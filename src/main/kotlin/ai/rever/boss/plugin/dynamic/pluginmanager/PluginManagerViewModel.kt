@@ -81,7 +81,7 @@ class PluginManagerViewModel(
     fun selectTab(tab: PluginManagerTab) {
         _state.value = _state.value.copy(currentTab = tab)
         // Auto-refresh store when switching to Available tab
-        if (tab == PluginManagerTab.AVAILABLE && _state.value.availablePlugins.isEmpty()) {
+        if (tab == PluginManagerTab.AVAILABLE) {
             refreshStore()
         }
     }
@@ -100,6 +100,10 @@ class PluginManagerViewModel(
         scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
+                // Refresh installed plugins
+                apiImpl.refreshInstalledPlugins()
+                // Refresh store plugins
+                refreshStoreInternal()
                 // Check for updates
                 checkForUpdatesInternal()
                 // Check admin status (matching bundled version behavior)
@@ -119,28 +123,31 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Refresh store plugins.
+     * Refresh store plugins (with loading indicator).
      */
     private fun refreshStore() {
         scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
-
-            val result = api.fetchStorePlugins()
-            result.fold(
-                onSuccess = { plugins ->
-                    _state.value = _state.value.copy(
-                        availablePlugins = plugins,
-                        isLoading = false
-                    )
-                },
-                onFailure = { e ->
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        error = e.message ?: "Failed to fetch plugins"
-                    )
-                }
-            )
+            refreshStoreInternal()
+            _state.value = _state.value.copy(isLoading = false)
         }
+    }
+
+    /**
+     * Refresh store plugins internally (without changing loading state).
+     */
+    private suspend fun refreshStoreInternal() {
+        val result = api.fetchStorePlugins()
+        result.fold(
+            onSuccess = { plugins ->
+                _state.value = _state.value.copy(availablePlugins = plugins)
+            },
+            onFailure = { e ->
+                _state.value = _state.value.copy(
+                    error = e.message ?: "Failed to fetch plugins"
+                )
+            }
+        )
     }
 
     /**
@@ -174,6 +181,9 @@ class PluginManagerViewModel(
             val result = api.installPlugin(pluginId)
             when (result) {
                 is InstallResult.Success -> {
+                    // Refresh installed plugins and store to update "Installed" badge
+                    apiImpl.refreshInstalledPlugins()
+                    refreshStoreInternal()
                     _state.value = _state.value.copy(isLoading = false)
                 }
                 is InstallResult.AlreadyInstalled -> {
@@ -226,6 +236,8 @@ class PluginManagerViewModel(
             val result = api.installFromGitHub(githubUrl)
             when (result) {
                 is InstallResult.Success -> {
+                    // Refresh installed plugins after successful install
+                    apiImpl.refreshInstalledPlugins()
                     _state.value = _state.value.copy(isLoading = false)
                 }
                 is InstallResult.DownloadFailed -> {
