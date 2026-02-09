@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.2.0"
+version = "1.4.1"
 
 java {
     toolchain {
@@ -23,7 +23,8 @@ kotlin {
 }
 
 // Flag to switch between local development and published dependencies
-val useLocalDependencies = true
+// Auto-detect CI environment (GitHub Actions sets CI=true)
+val useLocalDependencies = System.getenv("CI") != "true"
 val bossConsolePath = "../../BossConsole"
 
 repositories {
@@ -38,9 +39,9 @@ dependencies {
         implementation(files("$bossConsolePath/plugins/plugin-api/build/libs/plugin-api-desktop-1.0.14.jar"))
         implementation(files("$bossConsolePath/plugins/plugin-ui-core/build/libs/plugin-ui-core-desktop-1.0.7.jar"))
     } else {
-        // Plugin API from Maven Central (for release)
-        // Using minimal plugin-api dependency
+        // Plugin API and UI components from Maven Central (for release)
         implementation("com.risaboss:plugin-api-desktop:1.0.14")
+        implementation("com.risaboss:plugin-ui-core-desktop:1.0.7")
     }
 
     // Compose dependencies
