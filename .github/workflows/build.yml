@@ -83,5 +83,7 @@ jobs:
     needs: release
     if: startsWith(github.ref, 'refs/tags/')
     uses: risa-labs-inc/BossConsole-Releases/.github/workflows/plugin-release.yml@main
+    with:
+      boss_plugin_api_version: "1.0.17"
     secrets:
       BOSS_STORE_PLUGIN_PUBLISH_KEY: ${{ secrets.BOSS_STORE_PLUGIN_PUBLISH_KEY }}
