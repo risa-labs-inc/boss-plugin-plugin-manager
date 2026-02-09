@@ -1,0 +1,22 @@
+{
+  "manifestVersion": 1,
+  "pluginId": "ai.rever.boss.plugin.dynamic.pluginmanager",
+  "displayName": "Plugin Manager",
+  "version": "1.0.0",
+  "apiVersion": "1.0.14",
+  "minBossVersion": "8.16.29",
+  "mainClass": "ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin",
+  "type": "panel",
+  "systemPlugin": true,
+  "loadPriority": 5,
+  "canUnload": false,
+  "panel": {
+    "id": "plugin-manager",
+    "displayName": "Plugin Manager",
+    "position": "right",
+    "order": 100
+  },
+  "description": "Core plugin for managing installed plugins, browsing the plugin store, and installing/uninstalling plugins",
+  "author": "Risa Labs",
+  "url": "https://github.com/risa-labs-inc/boss-plugin-plugin-manager"
+}
