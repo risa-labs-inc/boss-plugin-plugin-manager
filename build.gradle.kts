@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.4.1"
+version = "1.4.2"
 
 java {
     toolchain {
@@ -22,7 +22,7 @@ kotlin {
     }
 }
 
-// Flag to switch between local development and published dependencies
+// Flag to switch between local development and CI dependencies
 // Auto-detect CI environment (GitHub Actions sets CI=true)
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossConsolePath = "../../BossConsole"
@@ -35,13 +35,15 @@ repositories {
 
 dependencies {
     if (useLocalDependencies) {
-        // Local development dependencies from BossConsole
-        implementation(files("$bossConsolePath/plugins/plugin-api/build/libs/plugin-api-desktop-1.0.14.jar"))
-        implementation(files("$bossConsolePath/plugins/plugin-ui-core/build/libs/plugin-ui-core-desktop-1.0.7.jar"))
+        // Local development: use JARs built from BossConsole repo
+        // compileOnly because at runtime, classes come from shared packages (parent classloader)
+        compileOnly(fileTree("$bossConsolePath/plugins/plugin-api/build/libs") { include("plugin-api-desktop-*.jar") })
+        compileOnly(fileTree("$bossConsolePath/plugins/plugin-ui-core/build/libs") { include("plugin-ui-core-desktop-*.jar") })
     } else {
-        // Plugin API and UI components from Maven Central (for release)
-        implementation("com.risaboss:plugin-api-desktop:1.0.14")
-        implementation("com.risaboss:plugin-ui-core-desktop:1.0.7")
+        // CI: use JARs copied by workflow from BossConsole build
+        // compileOnly because at runtime, classes come from shared packages (parent classloader)
+        compileOnly(fileTree("build/downloaded-deps") { include("plugin-api-desktop-*.jar") })
+        compileOnly(fileTree("build/downloaded-deps") { include("plugin-ui-core-desktop-*.jar") })
     }
 
     // Compose dependencies
