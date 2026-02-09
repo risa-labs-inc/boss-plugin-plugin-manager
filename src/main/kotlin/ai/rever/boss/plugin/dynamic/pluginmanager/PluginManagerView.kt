@@ -63,6 +63,60 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+
+/**
+ * Confirmation dialog for destructive actions.
+ */
+@Composable
+private fun ConfirmationDialog(
+    title: String,
+    message: String,
+    confirmText: String = "Confirm",
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        BossCard(
+            modifier = Modifier.width(320.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(8.dp)
+            ) {
+                Text(
+                    text = title,
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = message,
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    BossSecondaryButton(
+                        text = "Cancel",
+                        onClick = onDismiss
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    BossPrimaryButton(
+                        text = confirmText,
+                        onClick = {
+                            onConfirm()
+                            onDismiss()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
 
 /**
  * Plugin Manager View - matching bundled plugin-panel-manager exactly.
@@ -337,6 +391,20 @@ private fun InstalledPluginsTab(
     var showGitHubDialog by remember { mutableStateOf(false) }
     var gitHubUrl by remember { mutableStateOf("") }
 
+    // Confirmation dialog state for uninstall
+    var pluginToUninstall by remember { mutableStateOf<InstalledPluginState?>(null) }
+
+    // Show confirmation dialog for uninstall
+    pluginToUninstall?.let { plugin ->
+        ConfirmationDialog(
+            title = "Uninstall Plugin",
+            message = "Are you sure you want to uninstall \"${plugin.displayName}\"? This action cannot be undone.",
+            confirmText = "Uninstall",
+            onConfirm = { onUninstall(plugin.pluginId) },
+            onDismiss = { pluginToUninstall = null }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -426,7 +494,7 @@ private fun InstalledPluginsTab(
                         plugin = plugin,
                         hasUpdate = plugin.pluginId in updateIds,
                         onToggleEnabled = { onToggleEnabled(plugin.pluginId, it) },
-                        onUninstall = { onUninstall(plugin.pluginId) },
+                        onUninstall = { pluginToUninstall = plugin },
                         onUpdate = { onUpdate(plugin.pluginId) },
                         onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
                         isLoading = isLoading
@@ -574,6 +642,20 @@ private fun AvailablePluginsTab(
     isStoreAdmin: Boolean,
     isLoading: Boolean
 ) {
+    // Confirmation dialog state for delete from store
+    var pluginToDelete by remember { mutableStateOf<PluginStoreItem?>(null) }
+
+    // Show confirmation dialog for delete from store
+    pluginToDelete?.let { plugin ->
+        ConfirmationDialog(
+            title = "Delete from Store",
+            message = "Are you sure you want to delete \"${plugin.displayName}\" from the plugin store? This action cannot be undone.",
+            confirmText = "Delete",
+            onConfirm = { onDeleteFromStore(plugin.pluginId) },
+            onDismiss = { pluginToDelete = null }
+        )
+    }
+
     if (plugins.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -598,7 +680,7 @@ private fun AvailablePluginsTab(
                     hasUpdate = plugin.pluginId in updateIds,
                     onInstall = { onInstall(plugin.pluginId) },
                     onUpdate = { onUpdate(plugin.pluginId) },
-                    onDeleteFromStore = { onDeleteFromStore(plugin.pluginId) },
+                    onDeleteFromStore = { pluginToDelete = plugin },
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
                     isStoreAdmin = isStoreAdmin,
                     isLoading = isLoading
