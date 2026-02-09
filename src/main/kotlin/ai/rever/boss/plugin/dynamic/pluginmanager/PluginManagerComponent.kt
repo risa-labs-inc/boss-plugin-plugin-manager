@@ -30,13 +30,25 @@ class PluginManagerComponent(
         scope = context.pluginScope,
         loaderDelegate = loaderDelegate,
         onOpenUrl = { url ->
-            // Open URL in system browser using Java Desktop API
-            try {
-                if (java.awt.Desktop.isDesktopSupported()) {
-                    java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+            // Open URL in a BOSS browser tab using ActiveTabsProvider
+            val activeTabsProvider = context.activeTabsProvider
+            if (activeTabsProvider != null) {
+                // Extract title from URL
+                val title = try {
+                    java.net.URI(url).host ?: url
+                } catch (e: Exception) {
+                    url.take(50)
                 }
-            } catch (e: Exception) {
-                // Desktop API not available or failed
+                activeTabsProvider.createBrowserTab(url, title)
+            } else {
+                // Fallback to system browser if ActiveTabsProvider not available
+                try {
+                    if (java.awt.Desktop.isDesktopSupported()) {
+                        java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+                    }
+                } catch (e: Exception) {
+                    // Desktop API not available or failed
+                }
             }
         }
     )
