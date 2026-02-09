@@ -25,12 +25,13 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # Checkout BossConsole to build plugin-api dependencies
+      # Requires BOSSCONSOLE_PAT secret with repo access to risa-labs-inc/BossConsole
       - name: Checkout BossConsole
         uses: actions/checkout@v4
         with:
           repository: risa-labs-inc/BossConsole
           path: BossConsole
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.BOSSCONSOLE_PAT }}
 
       # Build plugin-api and plugin-ui-core JARs
       - name: Build plugin-api
@@ -75,12 +76,13 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # Checkout BossConsole to build plugin-api dependencies
+      # Requires BOSSCONSOLE_PAT secret with repo access to risa-labs-inc/BossConsole
       - name: Checkout BossConsole
         uses: actions/checkout@v4
         with:
           repository: risa-labs-inc/BossConsole
           path: BossConsole
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.BOSSCONSOLE_PAT }}
 
       # Build plugin-api and plugin-ui-core JARs
       - name: Build plugin-api
