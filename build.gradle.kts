@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.4.3"
+version = "1.4.4"
 
 java {
     toolchain {
@@ -22,10 +22,9 @@ kotlin {
     }
 }
 
-// Flag to switch between local development and CI dependencies
-// Auto-detect CI environment (GitHub Actions sets CI=true)
+// Auto-detect CI environment
 val useLocalDependencies = System.getenv("CI") != "true"
-val bossConsolePath = "../../BossConsole"
+val bossPluginApiPath = "../boss-plugin-api"
 
 repositories {
     google()
@@ -35,15 +34,11 @@ repositories {
 
 dependencies {
     if (useLocalDependencies) {
-        // Local development: use JARs built from BossConsole repo
-        // compileOnly because at runtime, classes come from shared packages (parent classloader)
-        compileOnly(fileTree("$bossConsolePath/plugins/plugin-api/build/libs") { include("plugin-api-desktop-*.jar") })
-        compileOnly(fileTree("$bossConsolePath/plugins/plugin-ui-core/build/libs") { include("plugin-ui-core-desktop-*.jar") })
+        // Local development: use boss-plugin-api JAR from sibling repo
+        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.15.jar"))
     } else {
-        // CI: use JARs copied by workflow from BossConsole build
-        // compileOnly because at runtime, classes come from shared packages (parent classloader)
-        compileOnly(fileTree("build/downloaded-deps") { include("plugin-api-desktop-*.jar") })
-        compileOnly(fileTree("build/downloaded-deps") { include("plugin-ui-core-desktop-*.jar") })
+        // CI: use downloaded JAR
+        compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
     }
 
     // Compose dependencies

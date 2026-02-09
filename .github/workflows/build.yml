@@ -8,6 +8,9 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  BOSS_PLUGIN_API_VERSION: "1.0.15"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,26 +27,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Checkout BossConsole to build plugin-api dependencies
-      # Requires BOSSCONSOLE_PAT secret with repo access to risa-labs-inc/BossConsole
-      - name: Checkout BossConsole
-        uses: actions/checkout@v4
-        with:
-          repository: risa-labs-inc/BossConsole
-          path: BossConsole
-          token: ${{ secrets.BOSSCONSOLE_PAT }}
-
-      # Build plugin-api and plugin-ui-core JARs
-      - name: Build plugin-api
-        working-directory: BossConsole
-        run: ./gradlew :plugins:plugin-api:desktopJar :plugins:plugin-ui-core:desktopJar --no-configuration-cache
-
-      # Copy built JARs to downloaded-deps directory
-      - name: Copy dependency JARs
+      - name: Download boss-plugin-api
         run: |
           mkdir -p build/downloaded-deps
-          cp BossConsole/plugins/plugin-api/build/libs/plugin-api-desktop-*.jar build/downloaded-deps/
-          cp BossConsole/plugins/plugin-ui-core/build/libs/plugin-ui-core-desktop-*.jar build/downloaded-deps/
+          curl -sL -o build/downloaded-deps/boss-plugin-api.jar \
+            "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v${BOSS_PLUGIN_API_VERSION}/boss-plugin-api-${BOSS_PLUGIN_API_VERSION}.jar"
           ls -la build/downloaded-deps/
 
       - name: Build Plugin JAR
@@ -75,26 +63,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Checkout BossConsole to build plugin-api dependencies
-      # Requires BOSSCONSOLE_PAT secret with repo access to risa-labs-inc/BossConsole
-      - name: Checkout BossConsole
-        uses: actions/checkout@v4
-        with:
-          repository: risa-labs-inc/BossConsole
-          path: BossConsole
-          token: ${{ secrets.BOSSCONSOLE_PAT }}
-
-      # Build plugin-api and plugin-ui-core JARs
-      - name: Build plugin-api
-        working-directory: BossConsole
-        run: ./gradlew :plugins:plugin-api:desktopJar :plugins:plugin-ui-core:desktopJar --no-configuration-cache
-
-      # Copy built JARs to downloaded-deps directory
-      - name: Copy dependency JARs
+      - name: Download boss-plugin-api
         run: |
           mkdir -p build/downloaded-deps
-          cp BossConsole/plugins/plugin-api/build/libs/plugin-api-desktop-*.jar build/downloaded-deps/
-          cp BossConsole/plugins/plugin-ui-core/build/libs/plugin-ui-core-desktop-*.jar build/downloaded-deps/
+          curl -sL -o build/downloaded-deps/boss-plugin-api.jar \
+            "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v${BOSS_PLUGIN_API_VERSION}/boss-plugin-api-${BOSS_PLUGIN_API_VERSION}.jar"
           ls -la build/downloaded-deps/
 
       - name: Build Plugin JAR
