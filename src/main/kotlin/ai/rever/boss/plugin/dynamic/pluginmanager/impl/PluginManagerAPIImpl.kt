@@ -564,17 +564,21 @@ class PluginManagerAPIImpl(
 
     override suspend fun deleteFromStore(pluginId: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val url = "$STORE_API_URL/delete"
+            // Get access token for authentication
+            val accessToken = loaderDelegate?.getAccessToken()
+            if (accessToken.isNullOrBlank()) {
+                return@withContext Result.failure(Exception("Not authenticated. Please sign in to delete plugins from the store."))
+            }
+
+            // Use the admin endpoint: DELETE /plugin-store/admin/:pluginId
+            val url = "$STORE_API_URL/admin/${java.net.URLEncoder.encode(pluginId, "UTF-8")}"
             val connection = URL(url).openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json")
+            connection.requestMethod = "DELETE"
             connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
-
-            val body = """{"plugin_id": "$pluginId"}"""
-            connection.outputStream.bufferedWriter().use { it.write(body) }
 
             if (connection.responseCode == 200) {
                 Result.success(Unit)
@@ -767,6 +771,13 @@ class PluginManagerAPIImpl(
         onError: (String) -> Unit
     ) = withContext(Dispatchers.IO) {
         try {
+            // Get access token for authentication
+            val accessToken = loaderDelegate?.getAccessToken()
+            if (accessToken.isNullOrBlank()) {
+                onError("Not authenticated. Please sign in to publish plugins.")
+                return@withContext
+            }
+
             onProgress(0.1f)
 
             val jarFile = File(jarPath)
@@ -819,6 +830,8 @@ class PluginManagerAPIImpl(
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
+            connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
             connection.connectTimeout = 60000
             connection.readTimeout = 120000
 
