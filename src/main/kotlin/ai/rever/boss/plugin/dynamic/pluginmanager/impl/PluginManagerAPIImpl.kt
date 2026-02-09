@@ -780,6 +780,21 @@ class PluginManagerAPIImpl(
 
             onProgress(0.1f)
 
+            // Check if this is a GitHub URL - use simplified /github endpoint
+            if (homepageUrl.contains("github.com")) {
+                publishFromGitHub(
+                    githubUrl = homepageUrl,
+                    changelog = changelog,
+                    tags = tags,
+                    accessToken = accessToken,
+                    onProgress = onProgress,
+                    onSuccess = onSuccess,
+                    onError = onError
+                )
+                return@withContext
+            }
+
+            // For non-GitHub sources, use multi-step publish flow
             val jarFile = File(jarPath)
             if (!jarFile.exists()) {
                 onError("JAR file not found: $jarPath")
@@ -788,43 +803,179 @@ class PluginManagerAPIImpl(
 
             onProgress(0.2f)
 
-            // Read JAR file as base64
-            val jarBytes = jarFile.readBytes()
-            val jarBase64 = java.util.Base64.getEncoder().encodeToString(jarBytes)
-
-            onProgress(0.4f)
-
-            // Build the publish request
-            val requestBody = buildString {
+            // Step 1: Create or update plugin entry
+            val createPluginBody = buildString {
                 append("{")
-                append("\"plugin_id\": \"$pluginId\",")
-                append("\"display_name\": \"${displayName.replace("\"", "\\\"")}\",")
-                append("\"version\": \"$version\",")
+                append("\"pluginId\": \"$pluginId\",")
+                append("\"displayName\": \"${displayName.replace("\"", "\\\"")}\",")
+                append("\"description\": \"${(description ?: "").replace("\"", "\\\"").replace("\n", "\\n")}\",")
+                append("\"authorName\": \"${authorName.replace("\"", "\\\"")}\",")
+                append("\"homepageUrl\": \"${homepageUrl.replace("\"", "\\\"")}\",")
                 append("\"type\": \"$pluginType\",")
-                append("\"api_version\": \"$apiVersion\",")
-                append("\"min_boss_version\": \"$minBossVersion\",")
-                append("\"author\": \"${authorName.replace("\"", "\\\"")}\",")
-                append("\"url\": \"${homepageUrl.replace("\"", "\\\"")}\",")
-                if (!description.isNullOrBlank()) {
-                    append("\"description\": \"${description.replace("\"", "\\\"").replace("\n", "\\n")}\",")
-                }
-                if (!changelog.isNullOrBlank()) {
-                    append("\"changelog\": \"${changelog.replace("\"", "\\\"").replace("\n", "\\n")}\",")
+                append("\"apiVersion\": \"$apiVersion\"")
+                if (!iconUrl.isNullOrBlank()) {
+                    append(",\"iconUrl\": \"${iconUrl.replace("\"", "\\\"")}\"")
                 }
                 if (tags.isNotEmpty()) {
-                    append("\"tags\": [${tags.joinToString(",") { "\"$it\"" }}],")
+                    append(",\"tags\": [${tags.joinToString(",") { "\"$it\"" }}]")
                 }
-                if (!iconUrl.isNullOrBlank()) {
-                    append("\"icon_url\": \"${iconUrl.replace("\"", "\\\"")}\",")
-                }
-                append("\"jar_base64\": \"$jarBase64\"")
                 append("}")
             }
 
-            onProgress(0.6f)
+            // Try to create plugin (will fail if already exists, which is fine)
+            val createUrl = "$STORE_API_URL/publish"
+            val createConn = URL(createUrl).openConnection() as HttpURLConnection
+            createConn.requestMethod = "POST"
+            createConn.doOutput = true
+            createConn.setRequestProperty("Content-Type", "application/json")
+            createConn.setRequestProperty("Accept", "application/json")
+            createConn.setRequestProperty("Authorization", "Bearer $accessToken")
+            createConn.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            createConn.connectTimeout = 30000
+            createConn.readTimeout = 30000
+            createConn.outputStream.bufferedWriter().use { it.write(createPluginBody) }
 
-            // Send publish request
-            val url = "$STORE_API_URL/publish"
+            // Read response (ignore 400 "already exists" error)
+            val createResponseCode = createConn.responseCode
+            if (createResponseCode != 200 && createResponseCode != 201 && createResponseCode != 400) {
+                val errorBody = createConn.errorStream?.bufferedReader()?.readText()
+                onError("Failed to create plugin: HTTP $createResponseCode - ${errorBody ?: createConn.responseMessage}")
+                return@withContext
+            }
+
+            onProgress(0.3f)
+
+            // Step 2: Create version and get upload URL
+            val versionBody = buildString {
+                append("{")
+                append("\"version\": \"$version\",")
+                append("\"changelog\": \"${(changelog ?: "").replace("\"", "\\\"").replace("\n", "\\n")}\",")
+                append("\"minBossVersion\": \"$minBossVersion\",")
+                append("\"dependencies\": []")
+                append("}")
+            }
+
+            val versionUrl = "$STORE_API_URL/$pluginId/version"
+            val versionConn = URL(versionUrl).openConnection() as HttpURLConnection
+            versionConn.requestMethod = "POST"
+            versionConn.doOutput = true
+            versionConn.setRequestProperty("Content-Type", "application/json")
+            versionConn.setRequestProperty("Accept", "application/json")
+            versionConn.setRequestProperty("Authorization", "Bearer $accessToken")
+            versionConn.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            versionConn.connectTimeout = 30000
+            versionConn.readTimeout = 30000
+            versionConn.outputStream.bufferedWriter().use { it.write(versionBody) }
+
+            if (versionConn.responseCode != 200 && versionConn.responseCode != 201) {
+                val errorBody = versionConn.errorStream?.bufferedReader()?.readText()
+                onError("Failed to create version: HTTP ${versionConn.responseCode} - ${errorBody ?: versionConn.responseMessage}")
+                return@withContext
+            }
+
+            val versionResponse = versionConn.inputStream.bufferedReader().readText()
+            val uploadUrlMatch = Regex(""""uploadUrl"\s*:\s*"([^"]+)"""").find(versionResponse)
+            val versionIdMatch = Regex(""""versionId"\s*:\s*"([^"]+)"""").find(versionResponse)
+
+            val uploadUrl = uploadUrlMatch?.groupValues?.get(1)
+            val versionId = versionIdMatch?.groupValues?.get(1)
+
+            if (uploadUrl.isNullOrBlank() || versionId.isNullOrBlank()) {
+                onError("Failed to get upload URL from version response")
+                return@withContext
+            }
+
+            onProgress(0.5f)
+
+            // Step 3: Upload JAR to signed URL
+            val jarBytes = jarFile.readBytes()
+            val uploadConn = URL(uploadUrl).openConnection() as HttpURLConnection
+            uploadConn.requestMethod = "PUT"
+            uploadConn.doOutput = true
+            uploadConn.setRequestProperty("Content-Type", "application/octet-stream")
+            uploadConn.connectTimeout = 60000
+            uploadConn.readTimeout = 120000
+            uploadConn.outputStream.use { it.write(jarBytes) }
+
+            if (uploadConn.responseCode != 200) {
+                onError("Failed to upload JAR: HTTP ${uploadConn.responseCode}")
+                return@withContext
+            }
+
+            onProgress(0.8f)
+
+            // Step 4: Finalize version with SHA256 and size
+            val sha256 = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(jarBytes)
+                .joinToString("") { "%02x".format(it) }
+
+            val finalizeBody = buildString {
+                append("{")
+                append("\"versionId\": \"$versionId\",")
+                append("\"sha256\": \"$sha256\",")
+                append("\"jarSize\": ${jarBytes.size}")
+                append("}")
+            }
+
+            val finalizeUrl = "$STORE_API_URL/version/finalize"
+            val finalizeConn = URL(finalizeUrl).openConnection() as HttpURLConnection
+            finalizeConn.requestMethod = "POST"
+            finalizeConn.doOutput = true
+            finalizeConn.setRequestProperty("Content-Type", "application/json")
+            finalizeConn.setRequestProperty("Accept", "application/json")
+            finalizeConn.setRequestProperty("Authorization", "Bearer $accessToken")
+            finalizeConn.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            finalizeConn.connectTimeout = 30000
+            finalizeConn.readTimeout = 30000
+            finalizeConn.outputStream.bufferedWriter().use { it.write(finalizeBody) }
+
+            if (finalizeConn.responseCode != 200) {
+                val errorBody = finalizeConn.errorStream?.bufferedReader()?.readText()
+                onError("Failed to finalize version: HTTP ${finalizeConn.responseCode} - ${errorBody ?: finalizeConn.responseMessage}")
+                return@withContext
+            }
+
+            onProgress(1.0f)
+            onSuccess(pluginId)
+
+        } catch (e: Exception) {
+            onError(e.message ?: "Unknown error during publish")
+        }
+    }
+
+    /**
+     * Publish plugin using the simplified GitHub endpoint.
+     * This fetches the JAR from GitHub releases and publishes in one request.
+     */
+    private suspend fun publishFromGitHub(
+        githubUrl: String,
+        changelog: String?,
+        tags: List<String>,
+        accessToken: String,
+        onProgress: (Float) -> Unit,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        try {
+            onProgress(0.3f)
+
+            // Build request body for /github endpoint
+            val requestBody = buildString {
+                append("{")
+                append("\"githubUrl\": \"${githubUrl.replace("\"", "\\\"")}\"")
+                if (!changelog.isNullOrBlank()) {
+                    append(",\"changelog\": \"${changelog.replace("\"", "\\\"").replace("\n", "\\n")}\"")
+                }
+                if (tags.isNotEmpty()) {
+                    append(",\"tags\": [${tags.joinToString(",") { "\"$it\"" }}]")
+                }
+                append("}")
+            }
+
+            onProgress(0.5f)
+
+            // Send request to /github endpoint
+            val url = "$STORE_API_URL/github"
             val connection = URL(url).openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.doOutput = true
@@ -832,8 +983,8 @@ class PluginManagerAPIImpl(
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Authorization", "Bearer $accessToken")
             connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
-            connection.connectTimeout = 60000
-            connection.readTimeout = 120000
+            connection.connectTimeout = 120000  // Longer timeout for GitHub fetch
+            connection.readTimeout = 180000
 
             connection.outputStream.bufferedWriter().use { it.write(requestBody) }
 
@@ -841,15 +992,17 @@ class PluginManagerAPIImpl(
 
             if (connection.responseCode == 200 || connection.responseCode == 201) {
                 val response = connection.inputStream.bufferedReader().readText()
+                // Extract pluginId from response
+                val pluginIdMatch = Regex(""""pluginId"\s*:\s*"([^"]+)"""").find(response)
+                val pluginId = pluginIdMatch?.groupValues?.get(1) ?: "unknown"
                 onProgress(1.0f)
                 onSuccess(pluginId)
             } else {
                 val errorBody = connection.errorStream?.bufferedReader()?.readText()
                 onError("Publish failed: HTTP ${connection.responseCode} - ${errorBody ?: connection.responseMessage}")
             }
-
         } catch (e: Exception) {
-            onError(e.message ?: "Unknown error during publish")
+            onError("GitHub publish error: ${e.message ?: "Unknown error"}")
         }
     }
 
