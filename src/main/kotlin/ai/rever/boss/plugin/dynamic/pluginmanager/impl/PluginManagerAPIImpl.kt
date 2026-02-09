@@ -191,7 +191,8 @@ class PluginManagerAPIImpl(
 
     override suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem> = withContext(Dispatchers.IO) {
         try {
-            val url = "$STORE_API_URL/details?plugin_id=${java.net.URLEncoder.encode(pluginId, "UTF-8")}"
+            // Use path parameter, not query parameter: /plugin-store/:pluginId
+            val url = "$STORE_API_URL/${java.net.URLEncoder.encode(pluginId, "UTF-8")}"
             val connection = URL(url).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.setRequestProperty("Accept", "application/json")
