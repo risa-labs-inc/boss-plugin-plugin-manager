@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
+import ai.rever.boss.plugin.api.LoadedPluginInfo
+import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -7,17 +9,16 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.zip.ZipFile
 
 /**
  * Implementation of PluginManagerAPI.
  *
- * This implementation is self-contained within the plugin-manager plugin.
- * It handles:
- * - Reading/writing installed.json
+ * This implementation uses the PluginLoaderDelegate from plugin-api to interact
+ * with BossConsole's DynamicPluginManager. It handles:
+ * - Getting loaded plugins from BossConsole
  * - Fetching plugins from the store API
  * - Downloading JARs from GitHub releases
- * - Delegating load/unload to PluginLoaderDelegate (provided by BossConsole)
+ * - Delegating load/unload to PluginLoaderDelegate
  */
 class PluginManagerAPIImpl(
     private val scope: CoroutineScope,
@@ -42,6 +43,8 @@ class PluginManagerAPIImpl(
     companion object {
         private const val STORE_API_URL = "https://api.risaboss.com/functions/v1/plugin-store"
         private const val GITHUB_API_URL = "https://api.github.com"
+        // Public Supabase anon key for API access (safe to include, only allows public operations)
+        private const val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBjbndxYW1xZG5zYWRyYW51Zmp2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzExNzQ0MjgsImV4cCI6MjA0Njc1MDQyOH0.VEMx2CWpLk2OzGXZY5FRN3dyHlHWZnH5EKs5SMx_Q6Y"
     }
 
     init {
@@ -65,12 +68,45 @@ class PluginManagerAPIImpl(
     override fun getInstalledPlugin(pluginId: String): PluginInfo? =
         _installedPlugins.value.find { it.pluginId == pluginId }
 
-    private suspend fun refreshInstalledPlugins() {
-        val plugins = readInstalledPlugins()
+    /**
+     * Refresh installed plugins from the delegate.
+     * This gets the actual loaded plugins from BossConsole.
+     */
+    suspend fun refreshInstalledPlugins() {
+        val plugins = if (loaderDelegate != null) {
+            // Get loaded plugins from BossConsole via delegate
+            loaderDelegate.getLoadedPlugins().map { it.toPluginInfo() }
+        } else {
+            // Fallback to reading installed.json
+            readInstalledPluginsFromFile()
+        }
         _installedPlugins.value = plugins
     }
 
-    private fun readInstalledPlugins(): List<PluginInfo> {
+    /**
+     * Convert LoadedPluginInfo from plugin-api to our local PluginInfo.
+     */
+    private fun LoadedPluginInfo.toPluginInfo(): PluginInfo {
+        return PluginInfo(
+            pluginId = pluginId,
+            displayName = displayName,
+            version = version,
+            description = description,
+            author = author,
+            url = url,
+            type = type,
+            apiVersion = apiVersion,
+            minBossVersion = minBossVersion,
+            isSystemPlugin = isSystemPlugin,
+            canUnload = canUnload,
+            loadPriority = loadPriority,
+            isEnabled = isEnabled,
+            jarPath = jarPath,
+            installedAt = installedAt
+        )
+    }
+
+    private fun readInstalledPluginsFromFile(): List<PluginInfo> {
         if (!installedJsonFile.exists()) {
             return emptyList()
         }
@@ -124,25 +160,29 @@ class PluginManagerAPIImpl(
         try {
             val urlBuilder = StringBuilder("$STORE_API_URL/list")
             val params = mutableListOf<String>()
+            params.add("page=1")
+            params.add("pageSize=50")
+            params.add("sortBy=downloads")
             if (!query.isNullOrBlank()) params.add("q=${java.net.URLEncoder.encode(query, "UTF-8")}")
             if (!category.isNullOrBlank()) params.add("category=${java.net.URLEncoder.encode(category, "UTF-8")}")
-            if (params.isNotEmpty()) {
-                urlBuilder.append("?").append(params.joinToString("&"))
-            }
+            urlBuilder.append("?").append(params.joinToString("&"))
 
             val connection = URL(urlBuilder.toString()).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.setRequestProperty("Accept", "application/json")
+            // Use the public anon key for API access
+            connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
 
             if (connection.responseCode == 200) {
                 val response = connection.inputStream.bufferedReader().readText()
-                val items = json.decodeFromString<List<PluginStoreItem>>(response)
-                _events.emit(PluginEvent.StoreRefreshed(items.size))
-                Result.success(items)
+                val listResponse = json.decodeFromString<PluginListResponse>(response)
+                _events.emit(PluginEvent.StoreRefreshed(listResponse.plugins.size))
+                Result.success(listResponse.plugins)
             } else {
-                Result.failure(Exception("HTTP ${connection.responseCode}: ${connection.responseMessage}"))
+                val errorBody = try { connection.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                Result.failure(Exception("HTTP ${connection.responseCode}: ${connection.responseMessage} - $errorBody"))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -179,8 +219,9 @@ class PluginManagerAPIImpl(
 
             try {
                 val details = fetchPluginDetails(plugin.pluginId).getOrNull()
-                if (details != null && isNewerVersion(details.version, plugin.version)) {
-                    updates[plugin.pluginId] = details.version
+                val detailsVersion = details?.version
+                if (details != null && detailsVersion != null && isNewerVersion(detailsVersion, plugin.version)) {
+                    updates[plugin.pluginId] = detailsVersion
                 }
             } catch (e: Exception) {
                 // Skip plugins we can't check
@@ -227,6 +268,7 @@ class PluginManagerAPIImpl(
             val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
             val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
             releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+            releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             releaseConnection.connectTimeout = 10000
             releaseConnection.readTimeout = 10000
 
@@ -249,6 +291,7 @@ class PluginManagerAPIImpl(
 
             val downloadConnection = URL(jarUrl).openConnection() as HttpURLConnection
             downloadConnection.instanceFollowRedirects = true
+            downloadConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             downloadConnection.connectTimeout = 30000
             downloadConnection.readTimeout = 60000
 
@@ -261,18 +304,17 @@ class PluginManagerAPIImpl(
             }
 
             // Load the plugin via delegate
-            val pluginInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
+            val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
                 ?: return@withContext InstallResult.LoadFailed("No plugin loader available")
 
-            // Update installed.json
-            val currentPlugins = _installedPlugins.value.toMutableList()
-            currentPlugins.add(pluginInfo.copy(
+            val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
                 installedAt = System.currentTimeMillis(),
                 url = githubUrl
-            ))
-            writeInstalledPlugins(currentPlugins)
-            _installedPlugins.value = currentPlugins
+            )
+
+            // Refresh installed plugins
+            refreshInstalledPlugins()
 
             _events.emit(PluginEvent.PluginInstalled(pluginInfo))
             InstallResult.Success(pluginInfo)
@@ -298,19 +340,17 @@ class PluginManagerAPIImpl(
                 dest
             }
 
-            // Load the plugin
-            val pluginInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
+            // Load the plugin via delegate
+            val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
                 ?: return@withContext InstallResult.LoadFailed("No plugin loader available")
 
-            // Update installed.json
-            val currentPlugins = _installedPlugins.value.toMutableList()
-            currentPlugins.removeAll { it.pluginId == pluginInfo.pluginId }
-            currentPlugins.add(pluginInfo.copy(
+            val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
                 installedAt = System.currentTimeMillis()
-            ))
-            writeInstalledPlugins(currentPlugins)
-            _installedPlugins.value = currentPlugins
+            )
+
+            // Refresh installed plugins
+            refreshInstalledPlugins()
 
             _events.emit(PluginEvent.PluginInstalled(pluginInfo))
             InstallResult.Success(pluginInfo)
@@ -329,7 +369,7 @@ class PluginManagerAPIImpl(
         }
 
         try {
-            // Unload from runtime
+            // Unload from runtime via delegate
             val unloaded = loaderDelegate?.unloadPlugin(pluginId) ?: false
             if (!unloaded && loaderDelegate != null) {
                 return@withContext UninstallResult.Failed("Failed to unload plugin from runtime")
@@ -343,11 +383,8 @@ class PluginManagerAPIImpl(
                 }
             }
 
-            // Update installed.json
-            val currentPlugins = _installedPlugins.value.toMutableList()
-            currentPlugins.removeAll { it.pluginId == pluginId }
-            writeInstalledPlugins(currentPlugins)
-            _installedPlugins.value = currentPlugins
+            // Refresh installed plugins
+            refreshInstalledPlugins()
 
             _events.emit(PluginEvent.PluginUninstalled(pluginId))
             UninstallResult.Success
@@ -386,56 +423,319 @@ class PluginManagerAPIImpl(
     // ========================================
 
     override suspend fun enablePlugin(pluginId: String): Boolean = withContext(Dispatchers.IO) {
-        val plugin = getInstalledPlugin(pluginId) ?: return@withContext false
-
-        if (plugin.isEnabled) return@withContext true
-
-        // Load the plugin
-        val loaded = loaderDelegate?.loadPlugin(plugin.jarPath) != null
-
-        if (loaded) {
-            // Update enabled state
-            val currentPlugins = _installedPlugins.value.map {
-                if (it.pluginId == pluginId) it.copy(isEnabled = true) else it
-            }
-            writeInstalledPlugins(currentPlugins)
-            _installedPlugins.value = currentPlugins
+        val enabled = loaderDelegate?.enablePlugin(pluginId) ?: false
+        if (enabled) {
+            refreshInstalledPlugins()
             _events.emit(PluginEvent.PluginEnabled(pluginId))
         }
-
-        loaded
+        enabled
     }
 
     override suspend fun disablePlugin(pluginId: String): Boolean = withContext(Dispatchers.IO) {
-        val plugin = getInstalledPlugin(pluginId) ?: return@withContext false
-
-        if (!plugin.isEnabled) return@withContext true
-
-        if (plugin.isSystemPlugin || !plugin.canUnload) {
-            return@withContext false
-        }
-
-        // Unload the plugin
-        val unloaded = loaderDelegate?.unloadPlugin(pluginId) ?: true
-
-        if (unloaded) {
-            // Update enabled state
-            val currentPlugins = _installedPlugins.value.map {
-                if (it.pluginId == pluginId) it.copy(isEnabled = false) else it
-            }
-            writeInstalledPlugins(currentPlugins)
-            _installedPlugins.value = currentPlugins
+        val disabled = loaderDelegate?.disablePlugin(pluginId) ?: false
+        if (disabled) {
+            refreshInstalledPlugins()
             _events.emit(PluginEvent.PluginDisabled(pluginId))
         }
-
-        unloaded
+        disabled
     }
+
+    // ========================================
+    // ADMIN
+    // ========================================
+
+    /**
+     * Check if current user is a store admin.
+     */
+    fun isCurrentUserAdmin(): Boolean = loaderDelegate?.isCurrentUserAdmin() ?: false
 
     // ========================================
     // EVENTS
     // ========================================
 
     override fun observeEvents(): Flow<PluginEvent> = _events.asSharedFlow()
+
+    // ========================================
+    // STORE ADMIN (PUBLISH)
+    // ========================================
+
+    override suspend fun deleteFromStore(pluginId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val url = "$STORE_API_URL/delete"
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+
+            val body = """{"plugin_id": "$pluginId"}"""
+            connection.outputStream.bufferedWriter().use { it.write(body) }
+
+            if (connection.responseCode == 200) {
+                Result.success(Unit)
+            } else {
+                val errorBody = connection.errorStream?.bufferedReader()?.readText()
+                Result.failure(Exception("HTTP ${connection.responseCode}: ${errorBody ?: connection.responseMessage}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun fetchFromGitHubForPublish(
+        url: String,
+        onProgress: (Float) -> Unit,
+        onStatus: (String) -> Unit,
+        onSuccess: (jarPath: String, manifest: ExtractedManifest) -> Unit,
+        onError: (String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            onStatus("Parsing GitHub URL...")
+            onProgress(0.1f)
+
+            // Parse GitHub URL
+            val regex = Regex("""github\.com/([^/]+)/([^/]+)""")
+            val match = regex.find(url)
+            if (match == null) {
+                onError("Invalid GitHub URL")
+                return@withContext
+            }
+
+            val owner = match.groupValues[1]
+            val repo = match.groupValues[2].removeSuffix(".git")
+
+            onStatus("Fetching release info...")
+            onProgress(0.2f)
+
+            // Get latest release
+            val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
+            val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
+            releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+            releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            releaseConnection.connectTimeout = 10000
+            releaseConnection.readTimeout = 10000
+
+            if (releaseConnection.responseCode != 200) {
+                onError("Could not fetch release: HTTP ${releaseConnection.responseCode}")
+                return@withContext
+            }
+
+            val releaseJson = releaseConnection.inputStream.bufferedReader().readText()
+            onProgress(0.3f)
+
+            // Find JAR asset URL
+            val jarUrlMatch = Regex(""""browser_download_url"\s*:\s*"([^"]+\.jar)"""").find(releaseJson)
+            if (jarUrlMatch == null) {
+                onError("No JAR asset found in release")
+                return@withContext
+            }
+
+            val jarUrl = jarUrlMatch.groupValues[1]
+            val jarFileName = jarUrl.substringAfterLast("/")
+
+            onStatus("Downloading $jarFileName...")
+            onProgress(0.4f)
+
+            // Download JAR to temp directory
+            val tempDir = File(System.getProperty("java.io.tmpdir"), "boss-publish")
+            tempDir.mkdirs()
+            val destFile = File(tempDir, jarFileName)
+
+            val downloadConnection = URL(jarUrl).openConnection() as HttpURLConnection
+            downloadConnection.instanceFollowRedirects = true
+            downloadConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            downloadConnection.connectTimeout = 30000
+            downloadConnection.readTimeout = 60000
+
+            if (downloadConnection.responseCode != 200) {
+                onError("Download failed: HTTP ${downloadConnection.responseCode}")
+                return@withContext
+            }
+
+            val contentLength = downloadConnection.contentLength
+            var downloaded = 0L
+            destFile.outputStream().use { output ->
+                downloadConnection.inputStream.buffered().use { input ->
+                    val buffer = ByteArray(8192)
+                    var bytes: Int
+                    while (input.read(buffer).also { bytes = it } != -1) {
+                        output.write(buffer, 0, bytes)
+                        downloaded += bytes
+                        if (contentLength > 0) {
+                            val progress = 0.4f + (downloaded.toFloat() / contentLength) * 0.4f
+                            onProgress(progress)
+                        }
+                    }
+                }
+            }
+
+            onStatus("Extracting manifest...")
+            onProgress(0.9f)
+
+            // Extract manifest from JAR
+            val manifest = extractManifestFromJar(destFile.absolutePath)
+            if (manifest == null) {
+                onError("Could not read plugin manifest from JAR")
+                return@withContext
+            }
+
+            onProgress(1.0f)
+            onSuccess(destFile.absolutePath, manifest)
+
+        } catch (e: Exception) {
+            onError(e.message ?: "Unknown error")
+        }
+    }
+
+    override suspend fun browseForPluginJar(onResult: (String?) -> Unit) = withContext(Dispatchers.Main) {
+        try {
+            val fileDialog = java.awt.FileDialog(null as java.awt.Frame?, "Select Plugin JAR", java.awt.FileDialog.LOAD)
+            fileDialog.filenameFilter = java.io.FilenameFilter { _, name -> name.endsWith(".jar") }
+            fileDialog.isVisible = true
+
+            val selectedFile = fileDialog.file
+            val directory = fileDialog.directory
+
+            if (selectedFile != null && directory != null) {
+                onResult(File(directory, selectedFile).absolutePath)
+            } else {
+                onResult(null)
+            }
+        } catch (e: Exception) {
+            onResult(null)
+        }
+    }
+
+    override suspend fun extractManifest(jarPath: String, onResult: (ExtractedManifest?) -> Unit) = withContext(Dispatchers.IO) {
+        val manifest = extractManifestFromJar(jarPath)
+        withContext(Dispatchers.Main) {
+            onResult(manifest)
+        }
+    }
+
+    private fun extractManifestFromJar(jarPath: String): ExtractedManifest? {
+        return try {
+            val jarFile = java.util.jar.JarFile(jarPath)
+            val manifestEntry = jarFile.getJarEntry("META-INF/boss-plugin/plugin.json")
+            if (manifestEntry != null) {
+                val manifestJson = jarFile.getInputStream(manifestEntry).bufferedReader().readText()
+                jarFile.close()
+
+                // Parse the manifest JSON
+                val manifestData = json.decodeFromString<PluginManifestData>(manifestJson)
+                ExtractedManifest(
+                    pluginId = manifestData.pluginId,
+                    displayName = manifestData.displayName,
+                    version = manifestData.version,
+                    description = manifestData.description ?: "",
+                    author = manifestData.author,
+                    url = manifestData.url,
+                    apiVersion = manifestData.apiVersion ?: "1.0",
+                    minBossVersion = manifestData.minBossVersion ?: "",
+                    type = PluginType.fromString(manifestData.type ?: "panel")
+                )
+            } else {
+                jarFile.close()
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override suspend fun publishPlugin(
+        jarPath: String,
+        pluginId: String,
+        displayName: String,
+        version: String,
+        homepageUrl: String,
+        authorName: String,
+        description: String?,
+        changelog: String?,
+        tags: List<String>,
+        iconUrl: String?,
+        pluginType: String,
+        apiVersion: String,
+        minBossVersion: String,
+        onProgress: (Float) -> Unit,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            onProgress(0.1f)
+
+            val jarFile = File(jarPath)
+            if (!jarFile.exists()) {
+                onError("JAR file not found: $jarPath")
+                return@withContext
+            }
+
+            onProgress(0.2f)
+
+            // Read JAR file as base64
+            val jarBytes = jarFile.readBytes()
+            val jarBase64 = java.util.Base64.getEncoder().encodeToString(jarBytes)
+
+            onProgress(0.4f)
+
+            // Build the publish request
+            val requestBody = buildString {
+                append("{")
+                append("\"plugin_id\": \"$pluginId\",")
+                append("\"display_name\": \"${displayName.replace("\"", "\\\"")}\",")
+                append("\"version\": \"$version\",")
+                append("\"type\": \"$pluginType\",")
+                append("\"api_version\": \"$apiVersion\",")
+                append("\"min_boss_version\": \"$minBossVersion\",")
+                append("\"author\": \"${authorName.replace("\"", "\\\"")}\",")
+                append("\"url\": \"${homepageUrl.replace("\"", "\\\"")}\",")
+                if (!description.isNullOrBlank()) {
+                    append("\"description\": \"${description.replace("\"", "\\\"").replace("\n", "\\n")}\",")
+                }
+                if (!changelog.isNullOrBlank()) {
+                    append("\"changelog\": \"${changelog.replace("\"", "\\\"").replace("\n", "\\n")}\",")
+                }
+                if (tags.isNotEmpty()) {
+                    append("\"tags\": [${tags.joinToString(",") { "\"$it\"" }}],")
+                }
+                if (!iconUrl.isNullOrBlank()) {
+                    append("\"icon_url\": \"${iconUrl.replace("\"", "\\\"")}\",")
+                }
+                append("\"jar_base64\": \"$jarBase64\"")
+                append("}")
+            }
+
+            onProgress(0.6f)
+
+            // Send publish request
+            val url = "$STORE_API_URL/publish"
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.connectTimeout = 60000
+            connection.readTimeout = 120000
+
+            connection.outputStream.bufferedWriter().use { it.write(requestBody) }
+
+            onProgress(0.8f)
+
+            if (connection.responseCode == 200 || connection.responseCode == 201) {
+                val response = connection.inputStream.bufferedReader().readText()
+                onProgress(1.0f)
+                onSuccess(pluginId)
+            } else {
+                val errorBody = connection.errorStream?.bufferedReader()?.readText()
+                onError("Publish failed: HTTP ${connection.responseCode} - ${errorBody ?: connection.responseMessage}")
+            }
+
+        } catch (e: Exception) {
+            onError(e.message ?: "Unknown error during publish")
+        }
+    }
 
     // ========================================
     // HELPERS

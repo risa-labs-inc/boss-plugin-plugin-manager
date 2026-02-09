@@ -137,6 +137,58 @@ interface PluginManagerAPI {
      * Observe plugin events (install, uninstall, update, etc.)
      */
     fun observeEvents(): Flow<PluginEvent>
+
+    // ========================================
+    // STORE ADMIN (PUBLISH)
+    // ========================================
+
+    /**
+     * Delete a plugin from the store (admin only).
+     */
+    suspend fun deleteFromStore(pluginId: String): Result<Unit>
+
+    /**
+     * Fetch plugin JAR from GitHub release for publishing.
+     */
+    suspend fun fetchFromGitHubForPublish(
+        url: String,
+        onProgress: (Float) -> Unit,
+        onStatus: (String) -> Unit,
+        onSuccess: (jarPath: String, manifest: ExtractedManifest) -> Unit,
+        onError: (String) -> Unit
+    )
+
+    /**
+     * Open file picker to select a plugin JAR file.
+     */
+    suspend fun browseForPluginJar(onResult: (String?) -> Unit)
+
+    /**
+     * Extract manifest from a JAR file.
+     */
+    suspend fun extractManifest(jarPath: String, onResult: (ExtractedManifest?) -> Unit)
+
+    /**
+     * Publish a plugin to the store.
+     */
+    suspend fun publishPlugin(
+        jarPath: String,
+        pluginId: String,
+        displayName: String,
+        version: String,
+        homepageUrl: String,
+        authorName: String,
+        description: String?,
+        changelog: String?,
+        tags: List<String>,
+        iconUrl: String?,
+        pluginType: String,
+        apiVersion: String,
+        minBossVersion: String,
+        onProgress: (Float) -> Unit,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    )
 }
 
 /**

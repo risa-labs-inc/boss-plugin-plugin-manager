@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.1.1"
+version = "1.2.0"
 
 java {
     toolchain {
@@ -23,7 +23,7 @@ kotlin {
 }
 
 // Flag to switch between local development and published dependencies
-val useLocalDependencies = false
+val useLocalDependencies = true
 val bossConsolePath = "../../BossConsole"
 
 repositories {
@@ -35,7 +35,7 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development dependencies from BossConsole
-        implementation(files("$bossConsolePath/plugins/plugin-api/build/libs/plugin-api-desktop-1.0.11.jar"))
+        implementation(files("$bossConsolePath/plugins/plugin-api/build/libs/plugin-api-desktop-1.0.14.jar"))
         implementation(files("$bossConsolePath/plugins/plugin-ui-core/build/libs/plugin-ui-core-desktop-1.0.7.jar"))
     } else {
         // Plugin API from Maven Central (for release)

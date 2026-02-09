@@ -27,34 +27,55 @@ data class PluginInfo(
 
 /**
  * Plugin available in the store.
+ * Matches the API response format from /plugin-store/list
  */
 @Serializable
 data class PluginStoreItem(
     val id: String = "",
-    @SerialName("plugin_id")
-    val pluginId: String,
-    @SerialName("display_name")
-    val displayName: String,
-    val version: String,
+    val pluginId: String = "",
+    val displayName: String = "",
+    val version: String? = null,
     val description: String = "",
     val author: String = "",
-    @SerialName("github_url")
+    val url: String = "",
     val githubUrl: String = "",
-    @SerialName("download_url")
     val downloadUrl: String = "",
     val type: String = "panel",
-    @SerialName("api_version")
     val apiVersion: String = "",
-    @SerialName("min_boss_version")
     val minBossVersion: String = "",
-    @SerialName("download_count")
     val downloadCount: Int = 0,
-    @SerialName("created_at")
     val createdAt: String = "",
-    @SerialName("updated_at")
     val updatedAt: String = "",
     val categories: List<String> = emptyList(),
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    val verified: Boolean = false,
+    val rating: Float = 0f,
+    val ratingCount: Int = 0,
+    val iconUrl: String = ""
+)
+
+/**
+ * API response wrapper for plugin list.
+ */
+@Serializable
+data class PluginListResponse(
+    val plugins: List<PluginStoreItem> = emptyList(),
+    val totalCount: Int = 0,
+    val page: Int = 1,
+    val pageSize: Int = 20
+)
+
+/**
+ * Information about an available plugin update.
+ */
+@Serializable
+data class UpdateInfo(
+    val pluginId: String,
+    val displayName: String,
+    val currentVersion: String,
+    val newVersion: String,
+    val changelog: String = "",
+    val critical: Boolean = false
 )
 
 /**
@@ -103,4 +124,71 @@ data class InstalledPluginEntry(
 @Serializable
 data class InstalledPluginsFile(
     val plugins: List<InstalledPluginEntry> = emptyList()
+)
+
+/**
+ * Plugin type enum matching the Supabase schema.
+ */
+enum class PluginType(val value: String, val displayText: String) {
+    PANEL("panel", "Panel (Sidebar)"),
+    TAB("tab", "Tab (Main Area)"),
+    HYBRID("hybrid", "Hybrid (Both)"),
+    SERVICE("service", "Service");
+
+    companion object {
+        fun fromString(value: String): PluginType = entries.find { it.value == value } ?: PANEL
+    }
+}
+
+/**
+ * State for an installed plugin in the UI.
+ * Matches bundled plugin-panel-manager exactly.
+ */
+data class InstalledPluginState(
+    val pluginId: String,
+    val displayName: String,
+    val version: String,
+    val description: String,
+    val enabled: Boolean,
+    val healthy: Boolean,
+    val canUnload: Boolean,
+    val jarPath: String,
+    val url: String? = null,
+    val requiresAdmin: Boolean = false
+)
+
+/**
+ * Data extracted from a plugin's manifest.
+ * Used when extracting manifest from JAR or fetching from GitHub.
+ */
+data class ExtractedManifest(
+    val pluginId: String,
+    val displayName: String,
+    val version: String,
+    val description: String,
+    val author: String?,
+    val url: String?,
+    val apiVersion: String = "1.0",
+    val minBossVersion: String = "",
+    val type: PluginType = PluginType.PANEL
+)
+
+/**
+ * Internal data class for parsing plugin.json manifest.
+ */
+@Serializable
+internal data class PluginManifestData(
+    @SerialName("pluginId")
+    val pluginId: String,
+    @SerialName("displayName")
+    val displayName: String,
+    val version: String,
+    val description: String? = null,
+    val author: String? = null,
+    val url: String? = null,
+    val type: String? = null,
+    @SerialName("apiVersion")
+    val apiVersion: String? = null,
+    @SerialName("minBossVersion")
+    val minBossVersion: String? = null
 )
