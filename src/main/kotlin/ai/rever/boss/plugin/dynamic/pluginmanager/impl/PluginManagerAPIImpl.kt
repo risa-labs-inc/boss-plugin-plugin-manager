@@ -243,16 +243,118 @@ class PluginManagerAPIImpl(
             return@withContext InstallResult.AlreadyInstalled(existing.version)
         }
 
-        // Fetch plugin details from store
+        // Try to download directly from plugin store first
+        val downloadResult = downloadFromStore(pluginId)
+        if (downloadResult is InstallResult.Success) {
+            return@withContext downloadResult
+        }
+
+        // Fallback: fetch plugin details and try GitHub
         val detailsResult = fetchPluginDetails(pluginId)
         if (detailsResult.isFailure) {
+            // Return the store download error if we also can't get details
+            if (downloadResult is InstallResult.DownloadFailed) {
+                return@withContext downloadResult
+            }
             return@withContext InstallResult.DownloadFailed("Plugin not found in store: ${detailsResult.exceptionOrNull()?.message}")
         }
 
         val storeItem = detailsResult.getOrThrow()
+        val githubUrl = storeItem.githubUrl
 
-        // Download from GitHub
-        installFromGitHub(storeItem.githubUrl)
+        // If no GitHub URL, return the store download error
+        if (githubUrl.isBlank()) {
+            if (downloadResult is InstallResult.DownloadFailed) {
+                return@withContext downloadResult
+            }
+            return@withContext InstallResult.DownloadFailed("No download source available for plugin")
+        }
+
+        // Try GitHub as fallback
+        installFromGitHub(githubUrl)
+    }
+
+    /**
+     * Download plugin directly from the plugin store.
+     * Uses /plugin-store/:pluginId/download endpoint.
+     */
+    private suspend fun downloadFromStore(pluginId: String): InstallResult {
+        try {
+            // Get download info from store
+            val downloadUrl = "$STORE_API_URL/${java.net.URLEncoder.encode(pluginId, "UTF-8")}/download"
+            val infoConnection = URL(downloadUrl).openConnection() as HttpURLConnection
+            infoConnection.requestMethod = "GET"
+            infoConnection.setRequestProperty("Accept", "application/json")
+            infoConnection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            infoConnection.connectTimeout = 10000
+            infoConnection.readTimeout = 10000
+
+            if (infoConnection.responseCode != 200) {
+                val errorBody = try { infoConnection.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode} - $errorBody")
+            }
+
+            val infoResponse = infoConnection.inputStream.bufferedReader().readText()
+            val downloadInfo = json.decodeFromString<DownloadInfoResponse>(infoResponse)
+
+            // Download the JAR from the signed URL
+            pluginsDir.mkdirs()
+            val jarFileName = "${pluginId.replace(".", "_")}_${downloadInfo.version}.jar"
+            val destFile = File(pluginsDir, jarFileName)
+
+            val jarConnection = URL(downloadInfo.downloadUrl).openConnection() as HttpURLConnection
+            jarConnection.instanceFollowRedirects = true
+            jarConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            jarConnection.connectTimeout = 30000
+            jarConnection.readTimeout = 60000
+
+            if (jarConnection.responseCode != 200) {
+                return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
+            }
+
+            destFile.outputStream().use { output ->
+                jarConnection.inputStream.copyTo(output)
+            }
+
+            // Verify SHA-256 if provided
+            if (downloadInfo.sha256.isNotBlank()) {
+                val actualSha256 = calculateSha256(destFile)
+                if (!actualSha256.equals(downloadInfo.sha256, ignoreCase = true)) {
+                    destFile.delete()
+                    return InstallResult.DownloadFailed("SHA-256 verification failed")
+                }
+            }
+
+            // Load the plugin via delegate
+            val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
+                ?: return InstallResult.LoadFailed("No plugin loader available")
+
+            val pluginInfo = loadedInfo.toPluginInfo().copy(
+                jarPath = destFile.absolutePath,
+                installedAt = System.currentTimeMillis()
+            )
+
+            // Refresh installed plugins
+            refreshInstalledPlugins()
+
+            _events.emit(PluginEvent.PluginInstalled(pluginInfo))
+            return InstallResult.Success(pluginInfo)
+
+        } catch (e: Exception) {
+            return InstallResult.DownloadFailed("Store download error: ${e.message}")
+        }
+    }
+
+    private fun calculateSha256(file: File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { fis ->
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            while (fis.read(buffer).also { bytesRead = it } != -1) {
+                digest.update(buffer, 0, bytesRead)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     override suspend fun installFromGitHub(githubUrl: String): InstallResult = withContext(Dispatchers.IO) {

@@ -66,6 +66,19 @@ data class PluginListResponse(
 )
 
 /**
+ * API response for download endpoint.
+ * Contains signed URL and metadata for downloading plugin JAR.
+ */
+@Serializable
+data class DownloadInfoResponse(
+    val downloadUrl: String,
+    val sha256: String = "",
+    val version: String = "",
+    val size: Long = 0,
+    val versionId: String = ""
+)
+
+/**
  * Information about an available plugin update.
  */
 @Serializable
