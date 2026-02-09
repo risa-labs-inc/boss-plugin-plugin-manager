@@ -2,12 +2,13 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "2.3.0"
+    kotlin("plugin.serialization") version "2.3.0"
     id("org.jetbrains.compose") version "1.10.0"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.0"
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.0.0"
+version = "1.1.0"
 
 java {
     toolchain {
@@ -38,6 +39,7 @@ dependencies {
         implementation(files("$bossConsolePath/plugins/plugin-ui-core/build/libs/plugin-ui-core-desktop-1.0.7.jar"))
     } else {
         // Plugin API from Maven Central (for release)
+        // Using minimal plugin-api dependency
         implementation("com.risaboss:plugin-api-desktop:1.0.14")
     }
 
@@ -55,6 +57,9 @@ dependencies {
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+
+    // Serialization (for JSON parsing)
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 }
 
 // Task to build plugin JAR with compiled classes only
