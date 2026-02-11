@@ -220,7 +220,7 @@ class PluginManagerAPIImpl(
 
             try {
                 val details = fetchPluginDetails(plugin.pluginId).getOrNull()
-                val detailsVersion = details?.version
+                val detailsVersion = details?.latestVersion ?: details?.version
                 if (details != null && detailsVersion != null && isNewerVersion(detailsVersion, plugin.version)) {
                     updates[plugin.pluginId] = detailsVersion
                 }

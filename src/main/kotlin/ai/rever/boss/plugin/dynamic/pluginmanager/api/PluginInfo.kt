@@ -35,6 +35,7 @@ data class PluginStoreItem(
     val pluginId: String = "",
     val displayName: String = "",
     val version: String? = null,
+    val latestVersion: String? = null,
     val description: String = "",
     val author: String = "",
     val url: String = "",
