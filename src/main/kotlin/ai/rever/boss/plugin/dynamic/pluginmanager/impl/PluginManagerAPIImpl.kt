@@ -260,10 +260,10 @@ class PluginManagerAPIImpl(
         }
 
         val storeItem = detailsResult.getOrThrow()
-        val githubUrl = storeItem.githubUrl
+        val githubUrl = storeItem.githubUrl.ifBlank { storeItem.homepageUrl }
 
         // If no GitHub URL, return the store download error
-        if (githubUrl.isBlank()) {
+        if (githubUrl.isBlank() || !githubUrl.contains("github.com")) {
             if (downloadResult is InstallResult.DownloadFailed) {
                 return@withContext downloadResult
             }

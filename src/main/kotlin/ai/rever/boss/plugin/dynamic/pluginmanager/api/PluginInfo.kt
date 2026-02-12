@@ -40,6 +40,7 @@ data class PluginStoreItem(
     val author: String = "",
     val url: String = "",
     val githubUrl: String = "",
+    val homepageUrl: String = "",
     val downloadUrl: String = "",
     val type: String = "panel",
     val apiVersion: String = "",
