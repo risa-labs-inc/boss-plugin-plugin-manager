@@ -3,6 +3,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
+import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
@@ -29,7 +30,8 @@ data class PluginManagerState(
     val isLoading: Boolean = false,
     val searchQuery: String = "",
     val error: String? = null,
-    val isStoreAdmin: Boolean = false
+    val isStoreAdmin: Boolean = false,
+    val realtimeConnected: Boolean = false
 )
 
 /**
@@ -68,6 +70,26 @@ class PluginManagerViewModel(
                 _state.value = _state.value.copy(installedPlugins = installedStates)
             }
         }
+
+        // Collect realtime store changes and auto-refresh
+        scope.launch {
+            apiImpl.storeChanges.collect { event ->
+                when (event) {
+                    is StoreChangeEvent.PluginChanged -> refreshStoreInternal()
+                    is StoreChangeEvent.VersionAdded -> checkForUpdatesInternal()
+                }
+            }
+        }
+
+        // Track realtime connection status
+        scope.launch {
+            apiImpl.realtimeClient.isConnected.collect { connected ->
+                _state.value = _state.value.copy(realtimeConnected = connected)
+            }
+        }
+
+        // Connect realtime
+        apiImpl.connectRealtime()
 
         // Initial refresh
         scope.launch {
@@ -501,7 +523,7 @@ class PluginManagerViewModel(
      * Dispose resources.
      */
     fun dispose() {
-        // Cleanup if needed
+        apiImpl.realtimeClient.dispose()
     }
 
     /**

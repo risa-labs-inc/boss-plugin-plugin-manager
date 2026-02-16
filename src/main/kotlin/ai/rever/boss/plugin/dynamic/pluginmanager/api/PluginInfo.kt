@@ -189,6 +189,40 @@ data class ExtractedManifest(
 )
 
 /**
+ * Row from the `plugins` table for Postgrest queries.
+ */
+@Serializable
+data class PluginRow(
+    val id: String,
+    @SerialName("plugin_id") val pluginId: String,
+    @SerialName("display_name") val displayName: String,
+    val description: String? = null,
+    @SerialName("author_name") val authorName: String? = null,
+    @SerialName("homepage_url") val homepageUrl: String? = null,
+    @SerialName("icon_url") val iconUrl: String? = null,
+    val type: String? = null,
+    @SerialName("api_version") val apiVersion: String? = null,
+    val verified: Boolean = false,
+    val published: Boolean = true,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null
+)
+
+/**
+ * Row from the `plugin_versions` table for Postgrest queries.
+ */
+@Serializable
+data class PluginVersionRow(
+    val id: String,
+    @SerialName("plugin_id") val pluginUuid: String,
+    val version: String,
+    val changelog: String? = null,
+    @SerialName("min_boss_version") val minBossVersion: String? = null,
+    @SerialName("jar_path") val jarPath: String? = null,
+    @SerialName("published_at") val publishedAt: String? = null
+)
+
+/**
  * Internal data class for parsing plugin.json manifest.
  */
 @Serializable
