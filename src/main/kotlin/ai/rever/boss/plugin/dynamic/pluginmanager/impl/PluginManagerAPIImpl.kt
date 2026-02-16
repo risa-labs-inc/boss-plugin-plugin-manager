@@ -304,8 +304,6 @@ class PluginManagerAPIImpl(
         val installed = getInstalledPlugins()
 
         for (plugin in installed) {
-            if (plugin.isSystemPlugin) continue // Skip system plugins
-
             try {
                 val details = fetchPluginDetails(plugin.pluginId).getOrNull()
                 val detailsVersion = details?.latestVersion ?: details?.version
