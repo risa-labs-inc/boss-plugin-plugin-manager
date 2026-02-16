@@ -5,6 +5,12 @@ import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
+import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.withHostClassLoader
+import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.createSupabaseClient
+import io.github.jan.supabase.postgrest.Postgrest
+import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.query.Columns
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.Json
@@ -18,13 +24,17 @@ import java.net.URL
  * This implementation uses the PluginLoaderDelegate from plugin-api to interact
  * with BossConsole's DynamicPluginManager. It handles:
  * - Getting loaded plugins from BossConsole
- * - Fetching plugins from the store API (Edge Functions)
+ * - Fetching plugins from the store via Supabase Postgrest
+ * - Live updates via Supabase Realtime
  * - Downloading JARs from GitHub releases
  * - Delegating load/unload to PluginLoaderDelegate
  *
- * Note: Supabase SDK (Postgrest, Realtime) cannot be used from sandboxed plugin
- * classloaders due to Ktor ServiceLoader incompatibility. All store reads use
- * HttpURLConnection to Edge Functions instead.
+ * Uses [withHostClassLoader] to swap the thread's context classloader to the
+ * host's classloader when creating SupabaseClients, so Ktor's ServiceLoader
+ * can discover the CIO engine from the host's META-INF/services.
+ *
+ * Edge Functions are kept only for operations needing server-side logic:
+ * download (signed URLs), publish, and admin delete.
  */
 class PluginManagerAPIImpl(
     private val scope: CoroutineScope,
@@ -47,14 +57,25 @@ class PluginManagerAPIImpl(
         get() = File(pluginsDir, "installed.json")
 
     companion object {
+        private const val SUPABASE_URL = "https://api.risaboss.com"
         private const val STORE_API_URL = "https://api.risaboss.com/functions/v1/plugin-store"
         private const val GITHUB_API_URL = "https://api.github.com"
         // Public Supabase anon key for API access (safe to include, only allows public operations)
         private const val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBjbndxYW1xZG5zYWRyYW51Zmp2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzExNzQ0MjgsImV4cCI6MjA0Njc1MDQyOH0.VEMx2CWpLk2OzGXZY5FRN3dyHlHWZnH5EKs5SMx_Q6Y"
     }
 
-    // Realtime stub (not functional from sandboxed classloader)
-    val realtimeClient = PluginStoreRealtimeClient("", "")
+    // Supabase Postgrest client for database reads (created with host classloader)
+    private val supabaseClient: SupabaseClient = withHostClassLoader {
+        createSupabaseClient(
+            supabaseUrl = SUPABASE_URL,
+            supabaseKey = SUPABASE_ANON_KEY
+        ) {
+            install(Postgrest)
+        }
+    }
+
+    // Realtime client for live updates
+    val realtimeClient = PluginStoreRealtimeClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     val storeChanges: SharedFlow<StoreChangeEvent> = realtimeClient.storeChanges
 
     fun connectRealtime() = realtimeClient.connect()
@@ -171,31 +192,58 @@ class PluginManagerAPIImpl(
         category: String?
     ): Result<List<PluginStoreItem>> = withContext(Dispatchers.IO) {
         try {
-            val urlBuilder = StringBuilder("$STORE_API_URL/list")
-            val params = mutableListOf<String>()
-            params.add("page=1")
-            params.add("pageSize=50")
-            params.add("sortBy=downloads")
-            if (!query.isNullOrBlank()) params.add("q=${java.net.URLEncoder.encode(query, "UTF-8")}")
-            if (!category.isNullOrBlank()) params.add("category=${java.net.URLEncoder.encode(category, "UTF-8")}")
-            urlBuilder.append("?").append(params.joinToString("&"))
+            val rows = supabaseClient.from("plugins")
+                .select(Columns.ALL) {
+                    filter {
+                        eq("published", true)
+                    }
+                    if (!query.isNullOrBlank()) {
+                        filter {
+                            ilike("display_name", "%$query%")
+                        }
+                    }
+                    range(0, 49)
+                }
+                .decodeList<PluginRow>()
 
-            val connection = URL(urlBuilder.toString()).openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
+            val storeItems = rows.map { row ->
+                val latestVersion = try {
+                    supabaseClient.from("plugin_versions")
+                        .select(Columns.ALL) {
+                            filter {
+                                eq("plugin_id", row.id)
+                            }
+                            range(0, 0)
+                        }
+                        .decodeList<PluginVersionRow>()
+                        .firstOrNull()
+                } catch (_: Exception) {
+                    null
+                }
 
-            if (connection.responseCode == 200) {
-                val response = connection.inputStream.bufferedReader().readText()
-                val listResponse = json.decodeFromString<PluginListResponse>(response)
-                _events.emit(PluginEvent.StoreRefreshed(listResponse.plugins.size))
-                Result.success(listResponse.plugins)
-            } else {
-                val errorBody = try { connection.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
-                Result.failure(Exception("HTTP ${connection.responseCode}: ${connection.responseMessage} - $errorBody"))
+                PluginStoreItem(
+                    id = row.id,
+                    pluginId = row.pluginId,
+                    displayName = row.displayName,
+                    version = latestVersion?.version,
+                    latestVersion = latestVersion?.version,
+                    description = row.description ?: "",
+                    author = row.authorName ?: "",
+                    url = row.homepageUrl ?: "",
+                    githubUrl = row.homepageUrl ?: "",
+                    homepageUrl = row.homepageUrl ?: "",
+                    type = row.type ?: "panel",
+                    apiVersion = row.apiVersion ?: "",
+                    minBossVersion = latestVersion?.minBossVersion ?: "",
+                    verified = row.verified,
+                    iconUrl = row.iconUrl ?: "",
+                    createdAt = row.createdAt ?: "",
+                    updatedAt = row.updatedAt ?: ""
+                )
             }
+
+            _events.emit(PluginEvent.StoreRefreshed(storeItems.size))
+            Result.success(storeItems)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -203,21 +251,51 @@ class PluginManagerAPIImpl(
 
     override suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem> = withContext(Dispatchers.IO) {
         try {
-            val url = "$STORE_API_URL/${java.net.URLEncoder.encode(pluginId, "UTF-8")}"
-            val connection = URL(url).openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
+            val row = supabaseClient.from("plugins")
+                .select(Columns.ALL) {
+                    filter {
+                        eq("plugin_id", pluginId)
+                    }
+                }
+                .decodeList<PluginRow>()
+                .firstOrNull()
+                ?: return@withContext Result.failure(Exception("Plugin not found: $pluginId"))
 
-            if (connection.responseCode == 200) {
-                val response = connection.inputStream.bufferedReader().readText()
-                val item = json.decodeFromString<PluginStoreItem>(response)
-                Result.success(item)
-            } else {
-                Result.failure(Exception("HTTP ${connection.responseCode}: ${connection.responseMessage}"))
+            val versions = try {
+                supabaseClient.from("plugin_versions")
+                    .select(Columns.ALL) {
+                        filter {
+                            eq("plugin_id", row.id)
+                        }
+                    }
+                    .decodeList<PluginVersionRow>()
+            } catch (_: Exception) {
+                emptyList()
             }
+
+            val latestVersion = versions.firstOrNull()
+
+            val item = PluginStoreItem(
+                id = row.id,
+                pluginId = row.pluginId,
+                displayName = row.displayName,
+                version = latestVersion?.version,
+                latestVersion = latestVersion?.version,
+                description = row.description ?: "",
+                author = row.authorName ?: "",
+                url = row.homepageUrl ?: "",
+                githubUrl = row.homepageUrl ?: "",
+                homepageUrl = row.homepageUrl ?: "",
+                type = row.type ?: "panel",
+                apiVersion = row.apiVersion ?: "",
+                minBossVersion = latestVersion?.minBossVersion ?: "",
+                verified = row.verified,
+                iconUrl = row.iconUrl ?: "",
+                createdAt = row.createdAt ?: "",
+                updatedAt = row.updatedAt ?: ""
+            )
+
+            Result.success(item)
         } catch (e: Exception) {
             Result.failure(e)
         }

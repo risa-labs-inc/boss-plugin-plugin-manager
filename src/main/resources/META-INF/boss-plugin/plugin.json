@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "pluginId": "ai.rever.boss.plugin.dynamic.pluginmanager",
   "displayName": "Plugin Manager",
-  "version": "1.4.23",
+  "version": "1.4.24",
   "apiVersion": "1.0.21",
   "minBossVersion": "8.16.30",
   "mainClass": "ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin",
