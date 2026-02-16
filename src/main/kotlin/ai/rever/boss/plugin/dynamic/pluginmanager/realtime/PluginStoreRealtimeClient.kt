@@ -2,7 +2,6 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.realtime
 
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
-import io.github.jan.supabase.postgrest.Postgrest
 import io.github.jan.supabase.realtime.Realtime
 import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.PostgresAction
@@ -61,7 +60,6 @@ class PluginStoreRealtimeClient(
                 supabaseUrl = supabaseUrl,
                 supabaseKey = supabaseAnonKey
             ) {
-                install(Postgrest)
                 install(Realtime)
             }
 
