@@ -513,8 +513,14 @@ class PluginManagerAPIImpl(
 
         val previousVersion = existing.version
 
-        // Uninstall current version
-        uninstallPlugin(pluginId)
+        // Uninstall current version - check result before proceeding
+        val uninstallResult = uninstallPlugin(pluginId)
+        if (uninstallResult is UninstallResult.CannotUnload) {
+            return@withContext InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
+        }
+        if (uninstallResult is UninstallResult.Failed) {
+            return@withContext InstallResult.LoadFailed("Uninstall failed: ${uninstallResult.error}")
+        }
 
         // Install latest version
         val result = if (existing.url.isNotBlank()) {

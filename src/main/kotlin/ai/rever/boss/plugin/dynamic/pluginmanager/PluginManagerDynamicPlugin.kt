@@ -27,7 +27,7 @@ import ai.rever.boss.plugin.api.PluginContext
 class PluginManagerDynamicPlugin : DynamicPlugin {
     override val pluginId: String = "ai.rever.boss.plugin.dynamic.pluginmanager"
     override val displayName: String = "Plugin Manager"
-    override val version: String = "1.4.22"
+    override val version: String = "1.4.23"
     override val description: String = "Core plugin for managing installed plugins and browsing the plugin store"
     override val author: String = "Risa Labs"
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-plugin-manager"
