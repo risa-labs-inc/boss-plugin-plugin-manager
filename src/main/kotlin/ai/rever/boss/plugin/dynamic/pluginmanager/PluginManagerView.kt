@@ -282,31 +282,6 @@ private fun PluginManagerHeader(
 
         Spacer(Modifier.width(4.dp))
 
-        // Realtime status indicator
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(end = 4.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(
-                        if (realtimeConnected) BossThemeColors.SuccessColor
-                        else BossThemeColors.TextMuted.copy(alpha = 0.4f)
-                    )
-            )
-            if (realtimeConnected) {
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    text = "Live",
-                    color = BossThemeColors.SuccessColor,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-
         // Refresh button
         Box(
             modifier = Modifier

@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.4.20"
+version = "1.4.21"
 
 java {
     toolchain {
@@ -61,7 +61,6 @@ dependencies {
 
     // Supabase SDK (provided by host classloader at runtime)
     compileOnly("io.github.jan-tennert.supabase:postgrest-kt:3.3.0")
-    compileOnly("io.github.jan-tennert.supabase:realtime-kt:3.3.0")
     compileOnly("io.github.jan-tennert.supabase:functions-kt:3.3.0")
     compileOnly("io.ktor:ktor-client-core:3.4.0")
     compileOnly("io.ktor:ktor-client-cio:3.4.0")
