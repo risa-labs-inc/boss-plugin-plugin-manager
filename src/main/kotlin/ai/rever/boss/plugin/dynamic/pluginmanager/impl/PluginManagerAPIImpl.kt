@@ -213,6 +213,7 @@ class PluginManagerAPIImpl(
                             filter {
                                 eq("plugin_id", row.id)
                             }
+                            order("published_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
                             range(0, 0)
                         }
                         .decodeList<PluginVersionRow>()
@@ -267,6 +268,7 @@ class PluginManagerAPIImpl(
                         filter {
                             eq("plugin_id", row.id)
                         }
+                        order("published_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
                     }
                     .decodeList<PluginVersionRow>()
             } catch (_: Exception) {
