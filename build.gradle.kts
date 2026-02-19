@@ -26,6 +26,11 @@ kotlin {
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossPluginApiPath = "../boss-plugin-api"
 
+// Supabase anon key: CI env var > gradle.properties > error
+val supabaseAnonKey: String = System.getenv("SUPABASE_ANON_KEY")
+    ?: findProperty("SUPABASE_ANON_KEY")?.toString()
+    ?: error("SUPABASE_ANON_KEY not set. Add it to gradle.properties or set as environment variable.")
+
 repositories {
     google()
     mavenCentral()
@@ -94,6 +99,32 @@ tasks.processResources {
             line.replace(Regex(""""version"\s*:\s*"[^"]*""""), """"version": "\$version"""")
         }
     }
+}
+
+// Generate BuildConfig.kt with secrets injected at build time
+val generateBuildConfig = tasks.register("generateBuildConfig") {
+    val outputDir = layout.buildDirectory.dir("generated/buildconfig")
+    outputs.dir(outputDir)
+    doLast {
+        val dir = outputDir.get().asFile.resolve("ai/rever/boss/plugin/dynamic/pluginmanager")
+        dir.mkdirs()
+        dir.resolve("BuildConfig.kt").writeText("""
+            package ai.rever.boss.plugin.dynamic.pluginmanager
+
+            /** Auto-generated at build time. Do not edit. */
+            object BuildConfig {
+                const val SUPABASE_ANON_KEY = "$supabaseAnonKey"
+            }
+        """.trimIndent() + "\n")
+    }
+}
+
+sourceSets.main {
+    kotlin.srcDir(layout.buildDirectory.dir("generated/buildconfig"))
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateBuildConfig)
 }
 
 tasks.build {

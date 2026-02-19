@@ -12,3 +12,4 @@ jobs:
       boss_plugin_api_version: '1.0.21'
     secrets:
       BOSS_STORE_PLUGIN_PUBLISH_KEY: ${{ secrets.BOSS_STORE_PLUGIN_PUBLISH_KEY }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

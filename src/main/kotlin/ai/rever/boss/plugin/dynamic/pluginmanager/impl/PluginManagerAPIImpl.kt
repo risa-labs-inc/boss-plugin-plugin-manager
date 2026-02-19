@@ -60,8 +60,8 @@ class PluginManagerAPIImpl(
         private const val SUPABASE_URL = "https://api.risaboss.com"
         private const val STORE_API_URL = "https://api.risaboss.com/functions/v1/plugin-store"
         private const val GITHUB_API_URL = "https://api.github.com"
-        // Public Supabase anon key for API access (safe to include, only allows public operations)
-        private const val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBjbndxYW1xZG5zYWRyYW51Zmp2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzExNzQ0MjgsImV4cCI6MjA0Njc1MDQyOH0.VEMx2CWpLk2OzGXZY5FRN3dyHlHWZnH5EKs5SMx_Q6Y"
+        // Anon key injected at build time from gradle.properties / CI env var
+        private val SUPABASE_ANON_KEY = ai.rever.boss.plugin.dynamic.pluginmanager.BuildConfig.SUPABASE_ANON_KEY
     }
 
     // Supabase Postgrest client for database reads (created with host classloader)
