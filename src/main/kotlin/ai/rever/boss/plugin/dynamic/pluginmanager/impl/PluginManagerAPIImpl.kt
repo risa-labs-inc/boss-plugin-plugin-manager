@@ -592,8 +592,19 @@ class PluginManagerAPIImpl(
             ?: return@withContext InstallResult.DownloadFailed("Plugin not installed: $pluginId")
 
         val previousVersion = existing.version
+        val isSystemOrLocked = existing.isSystemPlugin || !existing.canUnload
 
-        // Uninstall current version - check result before proceeding
+        if (isSystemOrLocked) {
+            // System/locked plugins: download new JAR on disk, replacing the old one.
+            // The new version takes effect after app restart.
+            val result = downloadUpdateForLockedPlugin(pluginId, existing)
+            if (result is InstallResult.Success) {
+                _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
+            }
+            return@withContext result
+        }
+
+        // Regular plugins: uninstall then reinstall
         val uninstallResult = uninstallPlugin(pluginId)
         if (uninstallResult is UninstallResult.CannotUnload) {
             return@withContext InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
@@ -615,6 +626,145 @@ class PluginManagerAPIImpl(
         }
 
         result
+    }
+
+    /**
+     * Download a new version of a system/locked plugin by replacing the JAR on disk.
+     * The plugin stays loaded with the old version until the app restarts.
+     */
+    private suspend fun downloadUpdateForLockedPlugin(
+        pluginId: String,
+        existing: PluginInfo
+    ): InstallResult {
+        try {
+            // Try store download first
+            val downloadUrl = "$STORE_API_URL/${java.net.URLEncoder.encode(pluginId, "UTF-8")}/download"
+            val infoConnection = URL(downloadUrl).openConnection() as HttpURLConnection
+            infoConnection.requestMethod = "GET"
+            infoConnection.setRequestProperty("Accept", "application/json")
+            infoConnection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            infoConnection.connectTimeout = 10000
+            infoConnection.readTimeout = 10000
+
+            if (infoConnection.responseCode != 200) {
+                // Fallback to GitHub if store download fails
+                if (existing.url.isNotBlank()) {
+                    return installFromGitHubToPath(existing.url, existing.jarPath)
+                }
+                return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode}")
+            }
+
+            val infoResponse = infoConnection.inputStream.bufferedReader().readText()
+            val downloadInfo = json.decodeFromString<DownloadInfoResponse>(infoResponse)
+
+            // Download new JAR to a temp file first
+            val destFile = File(existing.jarPath)
+            val tempFile = File(destFile.parentFile, destFile.name + ".update")
+
+            val jarConnection = URL(downloadInfo.downloadUrl).openConnection() as HttpURLConnection
+            jarConnection.instanceFollowRedirects = true
+            jarConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            jarConnection.connectTimeout = 30000
+            jarConnection.readTimeout = 60000
+
+            if (jarConnection.responseCode != 200) {
+                return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
+            }
+
+            tempFile.outputStream().use { output ->
+                jarConnection.inputStream.copyTo(output)
+            }
+
+            // Verify SHA-256 if provided
+            if (downloadInfo.sha256.isNotBlank()) {
+                val actualSha256 = calculateSha256(tempFile)
+                if (!actualSha256.equals(downloadInfo.sha256, ignoreCase = true)) {
+                    tempFile.delete()
+                    return InstallResult.DownloadFailed("SHA-256 verification failed")
+                }
+            }
+
+            // Replace old JAR with new one
+            destFile.delete()
+            tempFile.renameTo(destFile)
+
+            val pluginInfo = existing.copy(
+                version = downloadInfo.version,
+                installedAt = System.currentTimeMillis()
+            )
+
+            // Update the in-memory installed list directly since the host loader
+            // still reports the old loaded version (plugin wasn't reloaded).
+            // The new version takes effect after app restart.
+            val currentList = _installedPlugins.value.toMutableList()
+            val idx = currentList.indexOfFirst { it.pluginId == pluginId }
+            if (idx >= 0) {
+                currentList[idx] = pluginInfo
+            }
+            _installedPlugins.value = currentList
+
+            return InstallResult.Success(pluginInfo)
+        } catch (e: Exception) {
+            return InstallResult.DownloadFailed("Update failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Install from GitHub directly to a specific JAR path (for locked plugin updates).
+     */
+    private suspend fun installFromGitHubToPath(githubUrl: String, targetJarPath: String): InstallResult {
+        try {
+            val regex = Regex("""github\.com/([^/]+)/([^/]+)""")
+            val match = regex.find(githubUrl)
+                ?: return InstallResult.DownloadFailed("Invalid GitHub URL: $githubUrl")
+
+            val owner = match.groupValues[1]
+            val repo = match.groupValues[2].removeSuffix(".git")
+
+            val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
+            val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
+            releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+            releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            releaseConnection.connectTimeout = 10000
+            releaseConnection.readTimeout = 10000
+
+            if (releaseConnection.responseCode != 200) {
+                return InstallResult.DownloadFailed("GitHub release fetch failed: HTTP ${releaseConnection.responseCode}")
+            }
+
+            val releaseJson = releaseConnection.inputStream.bufferedReader().readText()
+            val jarUrlMatch = Regex(""""browser_download_url"\s*:\s*"([^"]+\.jar)"""").find(releaseJson)
+                ?: return InstallResult.DownloadFailed("No JAR asset found in latest release")
+
+            val jarUrl = jarUrlMatch.groupValues[1]
+            val destFile = File(targetJarPath)
+            val tempFile = File(destFile.parentFile, destFile.name + ".update")
+
+            val jarConnection = URL(jarUrl).openConnection() as HttpURLConnection
+            jarConnection.instanceFollowRedirects = true
+            jarConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            jarConnection.connectTimeout = 30000
+            jarConnection.readTimeout = 60000
+
+            if (jarConnection.responseCode != 200) {
+                return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
+            }
+
+            tempFile.outputStream().use { output ->
+                jarConnection.inputStream.copyTo(output)
+            }
+
+            destFile.delete()
+            tempFile.renameTo(destFile)
+
+            return InstallResult.Success(PluginInfo(
+                pluginId = "",
+                displayName = "",
+                version = "latest"
+            ))
+        } catch (e: Exception) {
+            return InstallResult.DownloadFailed("GitHub update failed: ${e.message}")
+        }
     }
 
     // ========================================
