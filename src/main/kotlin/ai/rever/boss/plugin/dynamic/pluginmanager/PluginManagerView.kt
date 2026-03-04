@@ -685,11 +685,27 @@ private fun AvailablePluginsTab(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            BossEmptyState(
-                icon = Icons.Default.Extension,
-                message = "No plugins available",
-                description = "Check back later"
-            )
+            if (isLoading) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(32.dp),
+                        color = BossThemeColors.AccentColor,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Loading plugins...",
+                        color = BossThemeColors.TextSecondary,
+                        fontSize = 13.sp
+                    )
+                }
+            } else {
+                BossEmptyState(
+                    icon = Icons.Default.Extension,
+                    message = "No plugins available",
+                    description = "Check back later"
+                )
+            }
         }
     } else {
         LazyColumn(
