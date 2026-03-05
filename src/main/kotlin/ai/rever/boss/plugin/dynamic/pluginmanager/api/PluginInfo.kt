@@ -22,7 +22,8 @@ data class PluginInfo(
     val loadPriority: Int = 100,
     val isEnabled: Boolean = true,
     val jarPath: String = "",
-    val installedAt: Long = 0L
+    val installedAt: Long = 0L,
+    val isIncompatible: Boolean = false
 )
 
 /**
@@ -169,7 +170,8 @@ data class InstalledPluginState(
     val canUnload: Boolean,
     val jarPath: String,
     val url: String? = null,
-    val requiresAdmin: Boolean = false
+    val requiresAdmin: Boolean = false,
+    val isIncompatible: Boolean = false
 )
 
 /**

@@ -593,7 +593,15 @@ private fun InstalledPluginCard(
                             tint = BossThemeColors.AccentColor
                         )
                     }
-                    if (!plugin.healthy) {
+                    if (plugin.isIncompatible) {
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Plugin incompatible",
+                            modifier = Modifier.size(14.dp),
+                            tint = BossThemeColors.ErrorColor
+                        )
+                    } else if (!plugin.healthy) {
                         Spacer(Modifier.width(8.dp))
                         Icon(
                             Icons.Default.Warning,
@@ -603,7 +611,14 @@ private fun InstalledPluginCard(
                         )
                     }
                 }
-                if (plugin.description.isNotEmpty()) {
+                if (plugin.isIncompatible) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Incompatible with this version of BOSS. Update required.",
+                        color = BossThemeColors.ErrorColor,
+                        fontSize = 12.sp
+                    )
+                } else if (plugin.description.isNotEmpty()) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = plugin.description,
@@ -616,7 +631,7 @@ private fun InstalledPluginCard(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (hasUpdate) {
+                if (hasUpdate || plugin.isIncompatible) {
                     BossPrimaryButton(
                         text = "Update",
                         onClick = onUpdate,
@@ -629,7 +644,7 @@ private fun InstalledPluginCard(
                     label = "",
                     checked = plugin.enabled,
                     onCheckedChange = onToggleEnabled,
-                    enabled = !isLoading,
+                    enabled = !isLoading && !plugin.isIncompatible,
                     modifier = Modifier.width(60.dp)
                 )
                 Spacer(Modifier.width(8.dp))

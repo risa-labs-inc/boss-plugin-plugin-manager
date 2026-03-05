@@ -64,7 +64,8 @@ class PluginManagerViewModel(
                         canUnload = plugin.canUnload,
                         jarPath = plugin.jarPath,
                         url = plugin.url.ifEmpty { null },
-                        requiresAdmin = false
+                        requiresAdmin = false,
+                        isIncompatible = plugin.isIncompatible
                     )
                 }
                 _state.value = _state.value.copy(installedPlugins = installedStates)

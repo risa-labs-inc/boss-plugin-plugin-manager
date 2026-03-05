@@ -39,6 +39,11 @@ class PluginStoreRealtimeClient(
     private val supabaseUrl: String,
     private val supabaseAnonKey: String
 ) {
+    // Capture plugin classloader at construction time (runs on plugin's thread)
+    // Coroutine threads on Dispatchers.Default use the system classloader,
+    // which can't find plugin classes like StoreChangeEvent.PluginChanged
+    private val pluginClassLoader: ClassLoader = Thread.currentThread().contextClassLoader
+
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private val _storeChanges = MutableSharedFlow<StoreChangeEvent>()

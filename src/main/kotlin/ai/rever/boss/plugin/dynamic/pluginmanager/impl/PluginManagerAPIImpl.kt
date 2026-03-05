@@ -136,7 +136,8 @@ class PluginManagerAPIImpl(
             loadPriority = loadPriority,
             isEnabled = isEnabled,
             jarPath = jarPath,
-            installedAt = installedAt
+            installedAt = installedAt,
+            isIncompatible = isIncompatible
         )
     }
 
