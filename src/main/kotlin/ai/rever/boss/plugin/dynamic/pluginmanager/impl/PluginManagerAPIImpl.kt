@@ -193,7 +193,7 @@ class PluginManagerAPIImpl(
         category: String?
     ): Result<List<PluginStoreItem>> = withContext(Dispatchers.IO) {
         try {
-            val rows = supabaseClient.from("plugins")
+            val rows = supabaseClient.from("plugins_with_latest_version")
                 .select(Columns.ALL) {
                     filter {
                         eq("published", true)
@@ -205,30 +205,15 @@ class PluginManagerAPIImpl(
                     }
                     range(0, 49)
                 }
-                .decodeList<PluginRow>()
+                .decodeList<PluginWithVersionRow>()
 
             val storeItems = rows.map { row ->
-                val latestVersion = try {
-                    supabaseClient.from("plugin_versions")
-                        .select(Columns.ALL) {
-                            filter {
-                                eq("plugin_id", row.id)
-                            }
-                            order("published_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
-                            range(0, 0)
-                        }
-                        .decodeList<PluginVersionRow>()
-                        .firstOrNull()
-                } catch (_: Exception) {
-                    null
-                }
-
                 PluginStoreItem(
                     id = row.id,
                     pluginId = row.pluginId,
                     displayName = row.displayName,
-                    version = latestVersion?.version,
-                    latestVersion = latestVersion?.version,
+                    version = row.latestVersion,
+                    latestVersion = row.latestVersion,
                     description = row.description ?: "",
                     author = row.authorName ?: "",
                     url = row.homepageUrl ?: "",
@@ -236,7 +221,7 @@ class PluginManagerAPIImpl(
                     homepageUrl = row.homepageUrl ?: "",
                     type = row.type ?: "panel",
                     apiVersion = row.apiVersion ?: "",
-                    minBossVersion = latestVersion?.minBossVersion ?: "",
+                    minBossVersion = row.latestMinBossVersion ?: "",
                     verified = row.verified,
                     iconUrl = row.iconUrl ?: "",
                     createdAt = row.createdAt ?: "",
@@ -305,22 +290,31 @@ class PluginManagerAPIImpl(
     }
 
     override suspend fun checkForUpdates(): Map<String, String> = withContext(Dispatchers.IO) {
-        val updates = mutableMapOf<String, String>()
         val installed = getInstalledPlugins()
+        if (installed.isEmpty()) return@withContext emptyMap()
 
-        for (plugin in installed) {
-            try {
-                val details = fetchPluginDetails(plugin.pluginId).getOrNull()
-                val detailsVersion = details?.latestVersion ?: details?.version
-                if (details != null && detailsVersion != null && isNewerVersion(detailsVersion, plugin.version)) {
-                    updates[plugin.pluginId] = detailsVersion
+        val installedIds = installed.map { it.pluginId }
+        val installedVersionMap = installed.associate { it.pluginId to it.version }
+
+        try {
+            val rows = supabaseClient.from("plugins_with_latest_version")
+                .select(Columns.raw("plugin_id, latest_version")) {
+                    filter {
+                        isIn("plugin_id", installedIds)
+                    }
                 }
-            } catch (e: Exception) {
-                // Skip plugins we can't check
-            }
-        }
+                .decodeList<PluginUpdateRow>()
 
-        updates
+            rows.mapNotNull { row ->
+                val latestVersion = row.latestVersion ?: return@mapNotNull null
+                val currentVersion = installedVersionMap[row.pluginId] ?: return@mapNotNull null
+                if (isNewerVersion(latestVersion, currentVersion)) {
+                    row.pluginId to latestVersion
+                } else null
+            }.toMap()
+        } catch (_: Exception) {
+            emptyMap()
+        }
     }
 
     // ========================================
