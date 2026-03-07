@@ -614,7 +614,8 @@ private fun InstalledPluginCard(
                 if (plugin.isIncompatible) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Incompatible with this version of BOSS. Update required.",
+                        text = if (hasUpdate) "Incompatible with this version of BOSS. Update available."
+                               else "Incompatible with this version of BOSS.",
                         color = BossThemeColors.ErrorColor,
                         fontSize = 12.sp
                     )
@@ -631,7 +632,7 @@ private fun InstalledPluginCard(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (hasUpdate || plugin.isIncompatible) {
+                if (hasUpdate) {
                     BossPrimaryButton(
                         text = "Update",
                         onClick = onUpdate,
