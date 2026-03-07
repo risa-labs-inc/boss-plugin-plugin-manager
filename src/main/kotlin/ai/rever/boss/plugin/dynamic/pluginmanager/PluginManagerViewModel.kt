@@ -38,6 +38,7 @@ data class PluginManagerState(
  * ViewModel for the Plugin Manager panel.
  * Matching bundled plugin-panel-manager exactly.
  */
+@OptIn(FlowPreview::class)
 class PluginManagerViewModel(
     private val scope: CoroutineScope,
     loaderDelegate: PluginLoaderDelegate?,
@@ -72,14 +73,16 @@ class PluginManagerViewModel(
             }
         }
 
-        // Collect realtime store changes and auto-refresh
+        // Collect realtime store changes and auto-refresh (debounced to avoid thundering herd)
         scope.launch {
-            apiImpl.storeChanges.collect { event ->
-                when (event) {
-                    is StoreChangeEvent.PluginChanged -> refreshStoreInternal()
-                    is StoreChangeEvent.VersionAdded -> checkForUpdatesInternal()
+            apiImpl.storeChanges
+                .debounce(500)
+                .collect { event ->
+                    when (event) {
+                        is StoreChangeEvent.PluginChanged -> refreshStoreInternal()
+                        is StoreChangeEvent.VersionAdded -> checkForUpdatesInternal()
+                    }
                 }
-            }
         }
 
         // Track realtime connection status
@@ -123,19 +126,22 @@ class PluginManagerViewModel(
         scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                // Refresh installed plugins
+                // Refresh installed plugins first (needed by checkForUpdates)
                 apiImpl.refreshInstalledPlugins()
-                // Refresh store plugins
-                refreshStoreInternal()
-                // Check for updates
-                checkForUpdatesInternal()
-                // Check admin status (matching bundled version behavior)
-                val isAdmin = try {
-                    apiImpl.isCurrentUserAdmin()
-                } catch (e: Exception) {
-                    false
+                // Run store fetch, update check, and admin check in parallel
+                coroutineScope {
+                    launch { refreshStoreInternal() }
+                    launch { checkForUpdatesInternal() }
+                    launch {
+                        val isAdmin = try {
+                            apiImpl.isCurrentUserAdmin()
+                        } catch (e: Exception) {
+                            false
+                        }
+                        _state.value = _state.value.copy(isStoreAdmin = isAdmin)
+                    }
                 }
-                _state.value = _state.value.copy(isLoading = false, isStoreAdmin = isAdmin)
+                _state.value = _state.value.copy(isLoading = false)
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,

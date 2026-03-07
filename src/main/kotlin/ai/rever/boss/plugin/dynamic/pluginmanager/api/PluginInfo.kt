@@ -211,6 +211,39 @@ data class PluginRow(
 )
 
 /**
+ * Row from the `plugins_with_latest_version` view for Postgrest queries.
+ * Includes latest version info via LATERAL JOIN, eliminating N+1 queries.
+ */
+@Serializable
+data class PluginWithVersionRow(
+    val id: String,
+    @SerialName("plugin_id") val pluginId: String,
+    @SerialName("display_name") val displayName: String,
+    val description: String? = null,
+    @SerialName("author_name") val authorName: String? = null,
+    @SerialName("homepage_url") val homepageUrl: String? = null,
+    @SerialName("icon_url") val iconUrl: String? = null,
+    val type: String? = null,
+    @SerialName("api_version") val apiVersion: String? = null,
+    val verified: Boolean = false,
+    val published: Boolean = true,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null,
+    @SerialName("latest_version") val latestVersion: String? = null,
+    @SerialName("latest_min_boss_version") val latestMinBossVersion: String? = null,
+    @SerialName("latest_published_at") val latestPublishedAt: String? = null
+)
+
+/**
+ * Lightweight row for batch update checks from `plugins_with_latest_version` view.
+ */
+@Serializable
+data class PluginUpdateRow(
+    @SerialName("plugin_id") val pluginId: String,
+    @SerialName("latest_version") val latestVersion: String? = null
+)
+
+/**
  * Row from the `plugin_versions` table for Postgrest queries.
  */
 @Serializable
