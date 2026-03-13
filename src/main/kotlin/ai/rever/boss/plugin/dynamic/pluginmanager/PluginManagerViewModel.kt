@@ -28,6 +28,8 @@ data class PluginManagerState(
     val availablePlugins: List<PluginStoreItem> = emptyList(),
     val updates: List<UpdateInfo> = emptyList(),
     val isLoading: Boolean = false,
+    /** Per-plugin loading state — tracks which plugins are currently being installed/updated/uninstalled. */
+    val busyPlugins: Set<String> = emptySet(),
     val searchQuery: String = "",
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
@@ -205,37 +207,36 @@ class PluginManagerViewModel(
      */
     fun installFromRemote(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
 
             val result = api.installPlugin(pluginId)
             when (result) {
                 is InstallResult.Success -> {
-                    // Refresh installed plugins and store to update "Installed" badge
                     apiImpl.refreshInstalledPlugins()
                     refreshStoreInternal()
-                    _state.value = _state.value.copy(isLoading = false)
+                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
                 is InstallResult.AlreadyInstalled -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Plugin already installed (v${result.currentVersion})"
                     )
                 }
                 is InstallResult.DownloadFailed -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Download failed: ${result.error}"
                     )
                 }
                 is InstallResult.LoadFailed -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Load failed: ${result.error}"
                     )
                 }
                 is InstallResult.VersionConflict -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Version conflict: requires ${result.required}, available ${result.available}"
                     )
                 }
@@ -293,28 +294,28 @@ class PluginManagerViewModel(
      */
     fun uninstallPlugin(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
 
             val result = api.uninstallPlugin(pluginId)
             when (result) {
                 is UninstallResult.Success -> {
-                    _state.value = _state.value.copy(isLoading = false)
+                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
                 is UninstallResult.NotFound -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Plugin not found: ${result.pluginId}"
                     )
                 }
                 is UninstallResult.CannotUnload -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Cannot uninstall: ${result.reason}"
                     )
                 }
                 is UninstallResult.Failed -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Uninstall failed: ${result.error}"
                     )
                 }
@@ -327,26 +328,25 @@ class PluginManagerViewModel(
      */
     fun updatePlugin(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
 
             val result = api.updatePlugin(pluginId)
             when (result) {
                 is InstallResult.Success -> {
-                    // Remove from updates list
                     val newUpdates = _state.value.updates.filter { it.pluginId != pluginId }
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         updates = newUpdates
                     )
                 }
                 is InstallResult.DownloadFailed -> {
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = "Update failed: ${result.error}"
                     )
                 }
                 else -> {
-                    _state.value = _state.value.copy(isLoading = false)
+                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
             }
         }
@@ -389,7 +389,7 @@ class PluginManagerViewModel(
      */
     fun togglePluginEnabled(pluginId: String, enabled: Boolean) {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
 
             if (enabled) {
                 api.enablePlugin(pluginId)
@@ -397,7 +397,7 @@ class PluginManagerViewModel(
                 api.disablePlugin(pluginId)
             }
 
-            _state.value = _state.value.copy(isLoading = false)
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
         }
     }
 
@@ -415,27 +415,26 @@ class PluginManagerViewModel(
      */
     fun deleteFromStore(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
             val result = api.deleteFromStore(pluginId)
             result.fold(
                 onSuccess = {
-                    // Refresh store to reflect deletion
                     val storeResult = api.fetchStorePlugins()
                     storeResult.fold(
                         onSuccess = { plugins ->
                             _state.value = _state.value.copy(
                                 availablePlugins = plugins,
-                                isLoading = false
+                                busyPlugins = _state.value.busyPlugins - pluginId
                             )
                         },
                         onFailure = {
-                            _state.value = _state.value.copy(isLoading = false)
+                            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                         }
                     )
                 },
                 onFailure = { e ->
                     _state.value = _state.value.copy(
-                        isLoading = false,
+                        busyPlugins = _state.value.busyPlugins - pluginId,
                         error = e.message ?: "Failed to delete plugin"
                     )
                 }

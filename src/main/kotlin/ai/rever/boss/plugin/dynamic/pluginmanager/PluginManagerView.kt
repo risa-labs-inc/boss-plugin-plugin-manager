@@ -167,7 +167,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onInstallFromFile = { viewModel.installFromFilePicker() },
                         onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
-                        isLoading = state.isLoading
+                        isLoading = state.isLoading,
+                        busyPlugins = state.busyPlugins
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
                         plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
@@ -178,13 +179,15 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onDeleteFromStore = { pluginId -> viewModel.deleteFromStore(pluginId) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
                         isStoreAdmin = state.isStoreAdmin,
-                        isLoading = state.isLoading
+                        isLoading = state.isLoading,
+                        busyPlugins = state.busyPlugins
                     )
                     PluginManagerTab.UPDATES -> UpdatesTab(
                         updates = state.updates,
                         onUpdate = { id -> viewModel.updatePlugin(id) },
                         onUpdateAll = { viewModel.updateAllPlugins() },
-                        isLoading = state.isLoading
+                        isLoading = state.isLoading,
+                        busyPlugins = state.busyPlugins
                     )
                     PluginManagerTab.PUBLISH -> PublishTab(
                         onFetchFromGitHub = { url, onProgress, onStatus, onSuccess, onError ->
@@ -410,7 +413,8 @@ private fun InstalledPluginsTab(
     onInstallFromFile: () -> Unit,
     onInstallFromGitHub: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    busyPlugins: Set<String> = emptySet()
 ) {
     var showGitHubDialog by remember { mutableStateOf(false) }
     var gitHubUrl by remember { mutableStateOf("") }
@@ -521,7 +525,7 @@ private fun InstalledPluginsTab(
                         onUninstall = { pluginToUninstall = plugin },
                         onUpdate = { onUpdate(plugin.pluginId) },
                         onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
-                        isLoading = isLoading
+                        isLoading = plugin.pluginId in busyPlugins
                     )
                 }
             }
@@ -680,7 +684,8 @@ private fun AvailablePluginsTab(
     onDeleteFromStore: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
     isStoreAdmin: Boolean,
-    isLoading: Boolean
+    isLoading: Boolean,
+    busyPlugins: Set<String> = emptySet()
 ) {
     // Confirmation dialog state for delete from store
     var pluginToDelete by remember { mutableStateOf<PluginStoreItem?>(null) }
@@ -739,7 +744,7 @@ private fun AvailablePluginsTab(
                     onDeleteFromStore = { pluginToDelete = plugin },
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
                     isStoreAdmin = isStoreAdmin,
-                    isLoading = isLoading
+                    isLoading = plugin.pluginId in busyPlugins
                 )
             }
         }
@@ -888,7 +893,8 @@ private fun UpdatesTab(
     updates: List<UpdateInfo>,
     onUpdate: (String) -> Unit,
     onUpdateAll: () -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    busyPlugins: Set<String> = emptySet()
 ) {
     Column(
         modifier = Modifier
@@ -919,7 +925,7 @@ private fun UpdatesTab(
                     BossPrimaryButton(
                         text = "Update All (${updates.size})",
                         onClick = onUpdateAll,
-                        enabled = !isLoading
+                        enabled = busyPlugins.isEmpty() && !isLoading
                     )
                 }
             }
@@ -934,7 +940,7 @@ private fun UpdatesTab(
                     UpdateCard(
                         update = update,
                         onUpdate = { onUpdate(update.pluginId) },
-                        isLoading = isLoading
+                        isLoading = update.pluginId in busyPlugins
                     )
                 }
             }
