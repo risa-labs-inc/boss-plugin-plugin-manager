@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "ai.rever.boss.plugin.dynamic"
-version = "1.4.37"
+version = "1.4.38"
 
 java {
     toolchain {
