@@ -839,7 +839,22 @@ private fun AvailablePluginCard(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // System / library plugins (type=service, e.g. microkernel
+                // runtime) ship through the plugin store but aren't user-
+                // installable — the host's auto-installer fetches them on
+                // launch when they're needed. Show a status badge instead
+                // of an Install/Update button so the entry stays
+                // discoverable but the broken click path is gone.
+                val isSystemComponent = plugin.type.equals("service", ignoreCase = true)
                 when {
+                    isSystemComponent -> {
+                        Text(
+                            text = "System • Managed",
+                            color = BossThemeColors.TextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                     hasUpdate -> {
                         BossPrimaryButton(
                             text = "Update",
