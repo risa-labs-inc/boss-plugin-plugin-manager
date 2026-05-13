@@ -65,9 +65,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // Supabase SDK (provided by host classloader at runtime)
-    compileOnly("io.github.jan-tennert.supabase:postgrest-kt:3.3.0")
-    compileOnly("io.github.jan-tennert.supabase:realtime-kt:3.3.0")
-    compileOnly("io.github.jan-tennert.supabase:functions-kt:3.3.0")
+    compileOnly("io.github.jan-tennert.supabase:postgrest-kt:3.6.0")
+    compileOnly("io.github.jan-tennert.supabase:realtime-kt:3.6.0")
+    compileOnly("io.github.jan-tennert.supabase:functions-kt:3.6.0")
     compileOnly("io.ktor:ktor-client-core:3.4.0")
     compileOnly("io.ktor:ktor-client-cio:3.4.0")
 }
