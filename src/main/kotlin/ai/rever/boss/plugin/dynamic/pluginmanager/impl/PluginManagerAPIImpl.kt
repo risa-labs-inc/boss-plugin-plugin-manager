@@ -289,6 +289,69 @@ class PluginManagerAPIImpl(
         }
     }
 
+    override suspend fun fetchPluginVersions(pluginId: String): Result<List<PluginVersionInfo>> = withContext(Dispatchers.IO) {
+        try {
+            val row = supabaseClient.from("plugins")
+                .select(Columns.ALL) {
+                    filter { eq("plugin_id", pluginId) }
+                }
+                .decodeList<PluginRow>()
+                .firstOrNull()
+                ?: return@withContext Result.failure(Exception("Plugin not found: $pluginId"))
+
+            val versions = supabaseClient.from("plugin_versions")
+                .select(Columns.ALL) {
+                    filter { eq("plugin_id", row.id) }
+                    order("published_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
+                }
+                .decodeList<PluginVersionRow>()
+
+            Result.success(versions.map { v ->
+                PluginVersionInfo(
+                    version = v.version,
+                    minIpcVersion = v.minIpcVersion ?: "1.0.0",
+                    changelog = v.changelog ?: "",
+                    publishedAt = v.publishedAt ?: "",
+                    compatibility = IpcCompat.status(v.minIpcVersion)
+                )
+            })
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun installVersion(pluginId: String, version: String): InstallResult = withContext(Dispatchers.IO) {
+        val existing = getInstalledPlugin(pluginId)
+        val previousVersion = existing?.version
+
+        // System/locked plugins: replace the on-disk JAR for the requested
+        // version; applies after restart. (The IPC gate lives in the download.)
+        if (existing != null && (existing.isSystemPlugin || !existing.canUnload)) {
+            val result = downloadUpdateForLockedPlugin(pluginId, existing, version)
+            if (result is InstallResult.Success && previousVersion != null) {
+                _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
+            }
+            return@withContext result
+        }
+
+        // Regular plugins: unload (if installed) then load the requested version.
+        if (existing != null) {
+            when (val u = uninstallPlugin(pluginId)) {
+                is UninstallResult.CannotUnload ->
+                    return@withContext InstallResult.LoadFailed("Cannot change version: ${u.reason}")
+                is UninstallResult.Failed ->
+                    return@withContext InstallResult.LoadFailed("Uninstall failed: ${u.error}")
+                else -> { /* unloaded */ }
+            }
+        }
+
+        val result = downloadFromStore(pluginId, version)
+        if (result is InstallResult.Success && previousVersion != null) {
+            _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
+        }
+        result
+    }
+
     override suspend fun checkForUpdates(): Map<String, String> = withContext(Dispatchers.IO) {
         val installed = getInstalledPlugins()
         if (installed.isEmpty()) return@withContext emptyMap()
@@ -363,10 +426,13 @@ class PluginManagerAPIImpl(
      * Download plugin directly from the plugin store.
      * Uses /plugin-store/:pluginId/download endpoint.
      */
-    private suspend fun downloadFromStore(pluginId: String): InstallResult {
+    private suspend fun downloadFromStore(pluginId: String, version: String? = null): InstallResult {
         try {
-            // Get download info from store
-            val downloadUrl = "$STORE_API_URL/${java.net.URLEncoder.encode(pluginId, "UTF-8")}/download"
+            // Get download info from store. A specific version uses the
+            // /download/:version endpoint; null fetches the latest.
+            val encodedId = java.net.URLEncoder.encode(pluginId, "UTF-8")
+            val versionSuffix = version?.let { "/${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""
+            val downloadUrl = "$STORE_API_URL/$encodedId/download$versionSuffix"
             val infoConnection = URL(downloadUrl).openConnection() as HttpURLConnection
             infoConnection.requestMethod = "GET"
             infoConnection.setRequestProperty("Accept", "application/json")
@@ -381,6 +447,13 @@ class PluginManagerAPIImpl(
 
             val infoResponse = infoConnection.inputStream.bufferedReader().readText()
             val downloadInfo = json.decodeFromString<DownloadInfoResponse>(infoResponse)
+
+            // IPC-compat gate: never load a version the host can't speak.
+            if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
+                return InstallResult.DownloadFailed(
+                    "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
+                )
+            }
 
             // Download the JAR from the signed URL
             pluginsDir.mkdirs()
@@ -629,11 +702,15 @@ class PluginManagerAPIImpl(
      */
     private suspend fun downloadUpdateForLockedPlugin(
         pluginId: String,
-        existing: PluginInfo
+        existing: PluginInfo,
+        version: String? = null
     ): InstallResult {
         try {
-            // Try store download first
-            val downloadUrl = "$STORE_API_URL/${java.net.URLEncoder.encode(pluginId, "UTF-8")}/download"
+            // Try store download first. A specific version uses the
+            // /download/:version endpoint; null fetches the latest.
+            val encodedId = java.net.URLEncoder.encode(pluginId, "UTF-8")
+            val versionSuffix = version?.let { "/${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""
+            val downloadUrl = "$STORE_API_URL/$encodedId/download$versionSuffix"
             val infoConnection = URL(downloadUrl).openConnection() as HttpURLConnection
             infoConnection.requestMethod = "GET"
             infoConnection.setRequestProperty("Accept", "application/json")
@@ -642,8 +719,8 @@ class PluginManagerAPIImpl(
             infoConnection.readTimeout = 10000
 
             if (infoConnection.responseCode != 200) {
-                // Fallback to GitHub if store download fails
-                if (existing.url.isNotBlank()) {
+                // Fallback to GitHub if store download fails (latest only).
+                if (version == null && existing.url.isNotBlank()) {
                     return installFromGitHubToPath(existing.url, existing.jarPath)
                 }
                 return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode}")
@@ -651,6 +728,14 @@ class PluginManagerAPIImpl(
 
             val infoResponse = infoConnection.inputStream.bufferedReader().readText()
             val downloadInfo = json.decodeFromString<DownloadInfoResponse>(infoResponse)
+
+            // IPC-compat gate: never replace the JAR with a version the host
+            // can't speak.
+            if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
+                return InstallResult.DownloadFailed(
+                    "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
+                )
+            }
 
             // Download new JAR to a temp file first
             val destFile = File(existing.jarPath)

@@ -65,6 +65,21 @@ interface PluginManagerAPI {
     suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem>
 
     /**
+     * Fetch the full published version history of a plugin (newest first),
+     * each tagged with its host-IPC compatibility. Powers the version /
+     * downgrade UI.
+     */
+    suspend fun fetchPluginVersions(pluginId: String): Result<List<PluginVersionInfo>>
+
+    /**
+     * Install (or downgrade/upgrade to) a specific published version. Refuses
+     * versions the host can't load on IPC grounds. For system/locked plugins
+     * the new JAR replaces the old on disk and applies after restart; regular
+     * plugins are unloaded and reloaded live.
+     */
+    suspend fun installVersion(pluginId: String, version: String): InstallResult
+
+    /**
      * Check for updates for installed plugins.
      *
      * @return Map of pluginId to available version (only includes plugins with updates)

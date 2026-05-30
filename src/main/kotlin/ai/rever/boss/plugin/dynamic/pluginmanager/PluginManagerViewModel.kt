@@ -33,7 +33,23 @@ data class PluginManagerState(
     val searchQuery: String = "",
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
-    val realtimeConnected: Boolean = false
+    val realtimeConnected: Boolean = false,
+    /** Open version-history / downgrade sheet, or null when closed. */
+    val versionSheet: VersionSheetState? = null
+)
+
+/**
+ * State for the per-plugin version-history sheet (Update / Downgrade + IPC
+ * compatibility badges).
+ */
+data class VersionSheetState(
+    val pluginId: String,
+    val displayName: String,
+    val installedVersion: String,
+    val isLoading: Boolean = true,
+    val versions: List<PluginVersionInfo> = emptyList(),
+    val hostIpcVersion: String? = IpcCompat.hostVersion,
+    val error: String? = null
 )
 
 /**
@@ -348,6 +364,53 @@ class PluginManagerViewModel(
                 else -> {
                     _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
+            }
+        }
+    }
+
+    /**
+     * Open the version-history / downgrade sheet for a plugin and load its
+     * published versions (each tagged with IPC compatibility).
+     */
+    fun openVersions(pluginId: String, displayName: String, installedVersion: String) {
+        _state.value = _state.value.copy(
+            versionSheet = VersionSheetState(
+                pluginId = pluginId,
+                displayName = displayName,
+                installedVersion = installedVersion
+            )
+        )
+        scope.launch {
+            val result = api.fetchPluginVersions(pluginId)
+            val sheet = _state.value.versionSheet ?: return@launch
+            if (sheet.pluginId != pluginId) return@launch // sheet changed while loading
+            _state.value = _state.value.copy(
+                versionSheet = result.fold(
+                    onSuccess = { sheet.copy(isLoading = false, versions = it) },
+                    onFailure = { sheet.copy(isLoading = false, error = it.message ?: "Failed to load versions") }
+                )
+            )
+        }
+    }
+
+    fun closeVersions() {
+        _state.value = _state.value.copy(versionSheet = null)
+    }
+
+    /**
+     * Install (downgrade/upgrade to) a specific version. Incompatible versions
+     * are gated in the API; the UI also disables their buttons.
+     */
+    fun installVersion(pluginId: String, version: String) {
+        scope.launch {
+            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            val result = api.installVersion(pluginId, version)
+            val base = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
+            _state.value = when (result) {
+                is InstallResult.Success -> base.copy(versionSheet = null)
+                is InstallResult.DownloadFailed -> base.copy(error = "Install failed: ${result.error}")
+                is InstallResult.LoadFailed -> base.copy(error = "Install failed: ${result.error}")
+                else -> base
             }
         }
     }
