@@ -2,9 +2,13 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstalledPluginState
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.IpcCompat
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginType
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.graphics.Color
 import ai.rever.boss.plugin.ui.BossBadge
 import ai.rever.boss.plugin.ui.BossCard
 import ai.rever.boss.plugin.ui.BossEmptyState
@@ -45,6 +49,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
@@ -122,6 +127,130 @@ private fun ConfirmationDialog(
  * Plugin Manager View - matching bundled plugin-panel-manager exactly.
  * Uses BossTheme and UI components from plugin-ui-core.
  */
+private val IpcCompatGreen = Color(0xFF59A869)
+private val IpcCompatAmber = Color(0xFFD9A33A)
+private val IpcCompatRed = Color(0xFFE05555)
+
+/**
+ * Version-history / downgrade sheet: lists every published version with its
+ * host-IPC compatibility badge and an Update/Downgrade action. Incompatible
+ * versions are shown but not installable.
+ */
+@Composable
+private fun VersionSheetDialog(
+    sheet: VersionSheetState,
+    busy: Boolean,
+    onInstall: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .width(460.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(BossThemeColors.SurfaceColor)
+                .padding(20.dp)
+        ) {
+            Text(
+                text = "${sheet.displayName} — versions",
+                color = BossThemeColors.TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "This host speaks IPC ${sheet.hostIpcVersion ?: "unknown"} · installed v${sheet.installedVersion}",
+                color = BossThemeColors.TextMuted,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(12.dp))
+
+            when {
+                sheet.isLoading -> Text("Loading versions…", color = BossThemeColors.TextSecondary, fontSize = 13.sp)
+                sheet.error != null -> Text(sheet.error, color = BossThemeColors.ErrorColor, fontSize = 13.sp)
+                sheet.versions.isEmpty() -> Text("No published versions in the store.", color = BossThemeColors.TextSecondary, fontSize = 13.sp)
+                else -> LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.heightIn(max = 360.dp)
+                ) {
+                    items(sheet.versions, key = { it.version }) { v ->
+                        VersionRow(
+                            version = v,
+                            installedVersion = sheet.installedVersion,
+                            busy = busy,
+                            onInstall = { onInstall(v.version) }
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                BossSecondaryButton(text = "Close", onClick = onDismiss)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VersionRow(
+    version: PluginVersionInfo,
+    installedVersion: String,
+    busy: Boolean,
+    onInstall: () -> Unit
+) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = "v${version.version}",
+            color = BossThemeColors.TextPrimary,
+            fontSize = 13.sp,
+            modifier = Modifier.width(96.dp)
+        )
+        IpcBadge(version.compatibility)
+        Spacer(Modifier.weight(1f))
+        val isInstalled = version.version == installedVersion
+        val installable = version.compatibility == IpcCompat.Status.COMPATIBLE ||
+            version.compatibility == IpcCompat.Status.UNKNOWN
+        when {
+            isInstalled -> Text("Installed", color = BossThemeColors.TextMuted, fontSize = 12.sp)
+            !installable -> Text("Needs newer BOSS", color = IpcCompatAmber, fontSize = 11.sp)
+            busy -> Text("…", color = BossThemeColors.TextMuted, fontSize = 12.sp)
+            else -> BossSecondaryButton(
+                text = if (ipcCompareSemver(version.version, installedVersion) > 0) "Update" else "Downgrade",
+                onClick = onInstall
+            )
+        }
+    }
+}
+
+@Composable
+private fun IpcBadge(status: IpcCompat.Status) {
+    val (color, label) = when (status) {
+        IpcCompat.Status.COMPATIBLE -> IpcCompatGreen to "Compatible"
+        IpcCompat.Status.REQUIRES_HOST_UPDATE -> IpcCompatAmber to "Host update"
+        IpcCompat.Status.MAJOR_MISMATCH -> IpcCompatRed to "Incompatible"
+        IpcCompat.Status.UNKNOWN -> return
+    }
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(color.copy(alpha = 0.18f))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** Compare two `major.minor.patch` strings; non-numeric segments sort as 0. */
+private fun ipcCompareSemver(a: String, b: String): Int {
+    val pa = a.split(".").map { it.toIntOrNull() ?: 0 }
+    val pb = b.split(".").map { it.toIntOrNull() ?: 0 }
+    for (i in 0 until maxOf(pa.size, pb.size)) {
+        val d = pa.getOrElse(i) { 0 } - pb.getOrElse(i) { 0 }
+        if (d != 0) return d
+    }
+    return 0
+}
+
 @Composable
 fun PluginManagerView(viewModel: PluginManagerViewModel) {
     val state by viewModel.state.collectAsState()
@@ -168,7 +297,11 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
                         isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins
+                        busyPlugins = state.busyPlugins,
+                        versionSheet = state.versionSheet,
+                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
+                        onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
+                        onCloseVersions = { viewModel.closeVersions() }
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
                         plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
@@ -414,13 +547,27 @@ private fun InstalledPluginsTab(
     onInstallFromGitHub: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
     isLoading: Boolean,
-    busyPlugins: Set<String> = emptySet()
+    busyPlugins: Set<String> = emptySet(),
+    versionSheet: VersionSheetState? = null,
+    onShowVersions: (InstalledPluginState) -> Unit = {},
+    onInstallVersion: (String, String) -> Unit = { _, _ -> },
+    onCloseVersions: () -> Unit = {}
 ) {
     var showGitHubDialog by remember { mutableStateOf(false) }
     var gitHubUrl by remember { mutableStateOf("") }
 
     // Confirmation dialog state for uninstall
     var pluginToUninstall by remember { mutableStateOf<InstalledPluginState?>(null) }
+
+    // Version-history / downgrade sheet
+    versionSheet?.let { sheet ->
+        VersionSheetDialog(
+            sheet = sheet,
+            busy = sheet.pluginId in busyPlugins,
+            onInstall = { version -> onInstallVersion(sheet.pluginId, version) },
+            onDismiss = onCloseVersions
+        )
+    }
 
     // Show confirmation dialog for uninstall
     pluginToUninstall?.let { plugin ->
@@ -525,6 +672,7 @@ private fun InstalledPluginsTab(
                         onUninstall = { pluginToUninstall = plugin },
                         onUpdate = { onUpdate(plugin.pluginId) },
                         onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
+                        onShowVersions = { onShowVersions(plugin) },
                         isLoading = plugin.pluginId in busyPlugins
                     )
                 }
@@ -541,6 +689,7 @@ private fun InstalledPluginCard(
     onUninstall: () -> Unit,
     onUpdate: () -> Unit,
     onOpenHomepage: () -> Unit,
+    onShowVersions: () -> Unit,
     isLoading: Boolean
 ) {
     val hasHomepage = !plugin.url.isNullOrBlank()
@@ -645,6 +794,20 @@ private fun InstalledPluginCard(
                     )
                     Spacer(Modifier.width(8.dp))
                 }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(enabled = !isLoading) { onShowVersions() }
+                        .padding(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.List,
+                        contentDescription = "Versions & compatibility",
+                        modifier = Modifier.size(16.dp),
+                        tint = BossThemeColors.TextSecondary
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
                 BossToggle(
                     label = "",
                     checked = plugin.enabled,

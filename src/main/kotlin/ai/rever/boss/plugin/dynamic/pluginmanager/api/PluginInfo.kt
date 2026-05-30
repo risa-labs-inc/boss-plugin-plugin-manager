@@ -78,7 +78,8 @@ data class DownloadInfoResponse(
     val sha256: String = "",
     val version: String = "",
     val size: Long = 0,
-    val versionId: String = ""
+    val versionId: String = "",
+    val minIpcVersion: String = "1.0.0"
 )
 
 /**
@@ -253,8 +254,21 @@ data class PluginVersionRow(
     val version: String,
     val changelog: String? = null,
     @SerialName("min_boss_version") val minBossVersion: String? = null,
+    @SerialName("min_ipc_version") val minIpcVersion: String? = null,
     @SerialName("jar_path") val jarPath: String? = null,
     @SerialName("published_at") val publishedAt: String? = null
+)
+
+/**
+ * A single published version of a plugin, with its host-IPC compatibility
+ * resolved against this host. Surfaced in the version-history / downgrade UI.
+ */
+data class PluginVersionInfo(
+    val version: String,
+    val minIpcVersion: String,
+    val changelog: String = "",
+    val publishedAt: String = "",
+    val compatibility: IpcCompat.Status
 )
 
 /**
