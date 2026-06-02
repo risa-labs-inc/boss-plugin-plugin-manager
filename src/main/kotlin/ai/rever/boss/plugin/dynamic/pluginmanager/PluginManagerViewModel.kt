@@ -487,14 +487,16 @@ class PluginManagerViewModel(
             )
         }
 
-        val withInstances = pluginIds.filter { delegate.getRunningInstanceCount(it) > 0 }
-        if (withInstances.isEmpty()) return null
-        val total = withInstances.sumOf { delegate.getRunningInstanceCount(it) }
+        // Count once per plugin (each call walks the split tree) and keep only those
+        // with at least one running instance.
+        val counts = pluginIds.associateWith { delegate.getRunningInstanceCount(it) }
+            .filterValues { it > 0 }
+        if (counts.isEmpty()) return null
         return PostUpdatePrompt(
-            pluginIds = withInstances,
-            displayName = displayNameFor(withInstances, loaded),
+            pluginIds = counts.keys.toList(),
+            displayName = displayNameFor(counts.keys.toList(), loaded),
             needsRestart = false,
-            instanceCount = total
+            instanceCount = counts.values.sum()
         )
     }
 
