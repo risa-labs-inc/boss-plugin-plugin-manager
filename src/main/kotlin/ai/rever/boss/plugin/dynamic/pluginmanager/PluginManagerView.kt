@@ -353,6 +353,30 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 }
             }
         }
+
+        // After an update, prompt to reset running instances (or restart BOSS) so the
+        // newly-installed version actually takes effect.
+        state.postUpdatePrompt?.let { prompt ->
+            if (prompt.needsRestart) {
+                ConfirmationDialog(
+                    title = "Update installed",
+                    message = "${prompt.displayName} updated. Restart BOSS to apply the update?",
+                    confirmText = "Restart BOSS",
+                    onConfirm = { viewModel.confirmRestartApplication() },
+                    onDismiss = { viewModel.dismissPostUpdatePrompt() }
+                )
+            } else {
+                val n = prompt.instanceCount
+                val plural = if (n == 1) "" else "s"
+                ConfirmationDialog(
+                    title = "Update installed",
+                    message = "${prompt.displayName} updated. Reset $n running instance$plural now to apply the update? Open tab$plural will close.",
+                    confirmText = "Reset",
+                    onConfirm = { viewModel.confirmResetInstances() },
+                    onDismiss = { viewModel.dismissPostUpdatePrompt() }
+                )
+            }
+        }
     }
 }
 
