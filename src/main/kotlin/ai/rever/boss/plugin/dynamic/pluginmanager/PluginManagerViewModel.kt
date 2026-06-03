@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
@@ -35,7 +36,25 @@ data class PluginManagerState(
     val isStoreAdmin: Boolean = false,
     val realtimeConnected: Boolean = false,
     /** Open version-history / downgrade sheet, or null when closed. */
-    val versionSheet: VersionSheetState? = null
+    val versionSheet: VersionSheetState? = null,
+    /** Prompt shown after an update to reset running instances / restart BOSS, or null. */
+    val postUpdatePrompt: PostUpdatePrompt? = null
+)
+
+/**
+ * Prompt shown after a successful update so the new version actually takes effect.
+ * Either offers to reset the plugin's running instances (close their tabs), or — for
+ * plugins that only apply on a full restart (system/locked / JAR-swap) — to restart BOSS.
+ */
+data class PostUpdatePrompt(
+    /** Plugins to reset (closed) when [needsRestart] is false. */
+    val pluginIds: List<String>,
+    /** "<name>" for a single plugin, or "N plugins" for update-all. */
+    val displayName: String,
+    /** True → offer "Restart BOSS"; false → offer to reset [instanceCount] running instances. */
+    val needsRestart: Boolean,
+    /** Total open instances that would be reset (only meaningful when !needsRestart). */
+    val instanceCount: Int
 )
 
 /**
@@ -59,7 +78,7 @@ data class VersionSheetState(
 @OptIn(FlowPreview::class)
 class PluginManagerViewModel(
     private val scope: CoroutineScope,
-    loaderDelegate: PluginLoaderDelegate?,
+    private val loaderDelegate: PluginLoaderDelegate?,
     private val onOpenUrl: ((String) -> Unit)? = null
 ) {
     private val apiImpl = PluginManagerAPIImpl(scope, loaderDelegate)
@@ -352,7 +371,8 @@ class PluginManagerViewModel(
                     val newUpdates = _state.value.updates.filter { it.pluginId != pluginId }
                     _state.value = _state.value.copy(
                         busyPlugins = _state.value.busyPlugins - pluginId,
-                        updates = newUpdates
+                        updates = newUpdates,
+                        postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
                     )
                 }
                 is InstallResult.DownloadFailed -> {
@@ -424,27 +444,85 @@ class PluginManagerViewModel(
 
             val updates = _state.value.updates.toList()
             val failures = mutableListOf<String>()
+            val succeeded = mutableListOf<String>()
 
             for (update in updates) {
                 val result = api.updatePlugin(update.pluginId)
                 if (result is InstallResult.DownloadFailed || result is InstallResult.LoadFailed) {
                     failures.add(update.displayName)
+                } else if (result is InstallResult.Success) {
+                    succeeded.add(update.pluginId)
                 }
             }
 
-            if (failures.isNotEmpty()) {
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    error = "Failed to update: ${failures.joinToString(", ")}",
-                    updates = emptyList()
-                )
-            } else {
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    updates = emptyList()
-                )
+            _state.value = _state.value.copy(
+                isLoading = false,
+                error = if (failures.isNotEmpty()) "Failed to update: ${failures.joinToString(", ")}" else null,
+                updates = emptyList(),
+                postUpdatePrompt = buildPostUpdatePrompt(succeeded)
+            )
+        }
+    }
+
+    /**
+     * Build the post-update prompt for the given just-updated plugins, or null if
+     * nothing needs resetting. Plugins that only apply on a full restart
+     * (system/locked) take priority and produce a "Restart BOSS" prompt; otherwise
+     * we prompt to reset the ones that currently have running instances.
+     */
+    private fun buildPostUpdatePrompt(pluginIds: List<String>): PostUpdatePrompt? {
+        val delegate = loaderDelegate ?: return null
+        if (pluginIds.isEmpty()) return null
+        val loaded = delegate.getLoadedPlugins().associateBy { it.pluginId }
+
+        val restartNeeded = pluginIds.filter { id ->
+            loaded[id]?.let { it.isSystemPlugin || !it.canUnload } ?: false
+        }
+        if (restartNeeded.isNotEmpty()) {
+            return PostUpdatePrompt(
+                pluginIds = restartNeeded,
+                displayName = displayNameFor(restartNeeded, loaded),
+                needsRestart = true,
+                instanceCount = 0
+            )
+        }
+
+        // Count once per plugin (each call walks the split tree) and keep only those
+        // with at least one running instance.
+        val counts = pluginIds.associateWith { delegate.getRunningInstanceCount(it) }
+            .filterValues { it > 0 }
+        if (counts.isEmpty()) return null
+        return PostUpdatePrompt(
+            pluginIds = counts.keys.toList(),
+            displayName = displayNameFor(counts.keys.toList(), loaded),
+            needsRestart = false,
+            instanceCount = counts.values.sum()
+        )
+    }
+
+    private fun displayNameFor(ids: List<String>, loaded: Map<String, LoadedPluginInfo>): String =
+        if (ids.size == 1) (loaded[ids[0]]?.displayName ?: ids[0]) else "${ids.size} plugins"
+
+    /** Confirm the post-update prompt: reset the affected plugins' running instances. */
+    fun confirmResetInstances() {
+        val prompt = _state.value.postUpdatePrompt ?: return
+        _state.value = _state.value.copy(postUpdatePrompt = null)
+        scope.launch {
+            prompt.pluginIds.forEach { id ->
+                runCatching { loaderDelegate?.resetPluginInstances(id) }
             }
         }
+    }
+
+    /** Confirm the post-update prompt: restart the BOSS application. */
+    fun confirmRestartApplication() {
+        _state.value = _state.value.copy(postUpdatePrompt = null)
+        loaderDelegate?.restartApplication()
+    }
+
+    /** Dismiss the post-update prompt without resetting/restarting. */
+    fun dismissPostUpdatePrompt() {
+        _state.value = _state.value.copy(postUpdatePrompt = null)
     }
 
     /**
