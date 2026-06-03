@@ -31,6 +31,12 @@ val supabaseAnonKey: String = System.getenv("SUPABASE_ANON_KEY")
     ?: findProperty("SUPABASE_ANON_KEY")?.toString()
     ?: error("SUPABASE_ANON_KEY not set. Add it to gradle.properties or set as environment variable.")
 
+// Admin "delete from store" password hash (SHA-256 hex).
+// CI env var > gradle.properties > empty. Empty => password gate disabled (plain confirmation).
+val adminDeletePasswordHash: String = System.getenv("ADMIN_DELETE_PASSWORD_HASH")
+    ?: findProperty("ADMIN_DELETE_PASSWORD_HASH")?.toString()
+    ?: ""
+
 repositories {
     google()
     mavenCentral()
@@ -114,6 +120,7 @@ val generateBuildConfig = tasks.register("generateBuildConfig") {
             /** Auto-generated at build time. Do not edit. */
             object BuildConfig {
                 const val SUPABASE_ANON_KEY = "$supabaseAnonKey"
+                const val ADMIN_DELETE_PASSWORD_HASH = "$adminDeletePasswordHash"
             }
         """.trimIndent() + "\n")
     }

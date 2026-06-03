@@ -42,7 +42,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Icon
+import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
+import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -54,6 +56,8 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Upgrade
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -65,6 +69,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,6 +121,113 @@ private fun ConfirmationDialog(
                         onClick = {
                             onConfirm()
                             onDismiss()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Password-gated confirmation dialog for the admin "Delete from Store" action.
+ *
+ * Verifies the typed password against [DeletePasswordGate]; only invokes [onConfirmed] on a match.
+ * A wrong password shows an inline error and keeps the dialog open.
+ */
+@Composable
+private fun PasswordDialog(
+    title: String,
+    message: String,
+    onConfirmed: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var password by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf(false) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        BossCard(
+            modifier = Modifier.width(320.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(8.dp)
+            ) {
+                Text(
+                    text = title,
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = message,
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        error = false
+                    },
+                    singleLine = true,
+                    label = { Text("Admin password") },
+                    isError = error,
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        Icon(
+                            imageVector = if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (showPassword) "Hide password" else "Show password",
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { showPassword = !showPassword }
+                                .padding(4.dp)
+                                .size(20.dp),
+                            tint = BossThemeColors.TextSecondary
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = TextFieldDefaults.outlinedTextFieldColors(
+                        textColor = BossThemeColors.TextPrimary,
+                        cursorColor = BossThemeColors.AccentColor,
+                        focusedBorderColor = BossThemeColors.AccentColor,
+                        unfocusedBorderColor = BossThemeColors.TextSecondary,
+                        focusedLabelColor = BossThemeColors.AccentColor,
+                        unfocusedLabelColor = BossThemeColors.TextSecondary,
+                        errorBorderColor = BossThemeColors.ErrorColor,
+                        errorLabelColor = BossThemeColors.ErrorColor
+                    )
+                )
+                if (error) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Incorrect password",
+                        color = BossThemeColors.ErrorColor,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    BossSecondaryButton(
+                        text = "Cancel",
+                        onClick = onDismiss
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    BossPrimaryButton(
+                        text = "Delete",
+                        enabled = password.isNotEmpty(),
+                        onClick = {
+                            if (DeletePasswordGate.verify(password)) {
+                                onConfirmed()
+                                onDismiss()
+                            } else {
+                                error = true
+                            }
                         }
                     )
                 }
@@ -877,15 +990,25 @@ private fun AvailablePluginsTab(
     // Confirmation dialog state for delete from store
     var pluginToDelete by remember { mutableStateOf<PluginStoreItem?>(null) }
 
-    // Show confirmation dialog for delete from store
+    // Show delete-from-store dialog. When a delete password is baked into the build, require it;
+    // otherwise fall back to a plain confirmation (e.g. dev builds with no hash configured).
     pluginToDelete?.let { plugin ->
-        ConfirmationDialog(
-            title = "Delete from Store",
-            message = "Are you sure you want to delete \"${plugin.displayName}\" from the plugin store? This action cannot be undone.",
-            confirmText = "Delete",
-            onConfirm = { onDeleteFromStore(plugin.pluginId) },
-            onDismiss = { pluginToDelete = null }
-        )
+        if (DeletePasswordGate.isConfigured) {
+            PasswordDialog(
+                title = "Delete from Store",
+                message = "Enter the admin password to delete \"${plugin.displayName}\" from the plugin store. This action cannot be undone.",
+                onConfirmed = { onDeleteFromStore(plugin.pluginId) },
+                onDismiss = { pluginToDelete = null }
+            )
+        } else {
+            ConfirmationDialog(
+                title = "Delete from Store",
+                message = "Are you sure you want to delete \"${plugin.displayName}\" from the plugin store? This action cannot be undone.",
+                confirmText = "Delete",
+                onConfirm = { onDeleteFromStore(plugin.pluginId) },
+                onDismiss = { pluginToDelete = null }
+            )
+        }
     }
 
     if (plugins.isEmpty()) {
