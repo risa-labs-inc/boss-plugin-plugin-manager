@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.api.DynamicPlugin
 import ai.rever.boss.plugin.api.PluginContext
+import ai.rever.boss.plugin.api.PluginLoaderDelegate
 
 /**
  * Plugin Manager dynamic plugin - Core bundled plugin.
@@ -13,19 +14,14 @@ import ai.rever.boss.plugin.api.PluginContext
  * NOTE: This plugin has systemPlugin=true and loadPriority=5 in its manifest,
  * meaning it loads early and cannot be unloaded.
  *
- * ## Current Implementation
- * Phase 1: Registers a placeholder panel. The actual plugin management UI
- * will be implemented when PluginManagerDataProvider is added to plugin-api.
- *
- * ## Future Enhancement
- * When PluginManagerDataProvider is available, this plugin will:
- * - Display list of installed plugins
- * - Show plugin store with available plugins
- * - Allow installing/uninstalling plugins
- * - Show plugin update notifications
+ * Registration creates a [PluginManagerCore] that runs for the plugin's whole
+ * lifetime: it owns the store API + realtime connection, registers the
+ * [ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI] for other
+ * plugins immediately, and proactively prompts (via host toasts) when
+ * compatible plugin updates are available — even if the panel is never opened.
  */
 class PluginManagerDynamicPlugin : DynamicPlugin {
-    override val pluginId: String = "ai.rever.boss.plugin.dynamic.pluginmanager"
+    override val pluginId: String = PluginManagerCore.PLUGIN_ID
     override val displayName: String = "Plugin Manager"
     override val version: String = "1.4.24"
     override val description: String = "Core plugin for managing installed plugins and browsing the plugin store"
@@ -33,17 +29,31 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
     override val url: String = "https://github.com/risa-labs-inc/boss-plugin-plugin-manager"
 
     private var pluginContext: PluginContext? = null
+    private var core: PluginManagerCore? = null
 
     override fun register(context: PluginContext) {
         pluginContext = context
 
+        val loaderDelegate = context.getPluginAPI(PluginLoaderDelegate::class.java)
+        val core = PluginManagerCore(context, loaderDelegate)
+        this.core = core
+
+        // Register the PluginManagerAPI for other plugins right away (it used
+        // to happen only once the panel was first opened)
+        context.registerPluginAPI(core.api)
+
+        // Start realtime + background update prompts
+        core.start()
+
         // Register the Plugin Manager panel
         context.panelRegistry.registerPanel(PluginManagerPanelInfo) { ctx, panelInfo ->
-            PluginManagerComponent(ctx, panelInfo, context)
+            PluginManagerComponent(ctx, panelInfo, context, core)
         }
     }
 
     override fun dispose() {
+        core?.dispose()
+        core = null
         // Unregister panel when plugin is unloaded
         pluginContext?.panelRegistry?.unregisterPanel(PluginManagerPanelInfo.id)
         pluginContext = null

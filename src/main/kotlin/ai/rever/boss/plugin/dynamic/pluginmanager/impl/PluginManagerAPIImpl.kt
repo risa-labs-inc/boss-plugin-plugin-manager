@@ -380,6 +380,74 @@ class PluginManagerAPIImpl(
         }
     }
 
+    override suspend fun checkForCompatibleUpdates(): List<UpdateInfo> = withContext(Dispatchers.IO) {
+        val installed = getInstalledPlugins()
+        if (installed.isEmpty()) return@withContext emptyList()
+        val installedById = installed.associateBy { it.pluginId }
+
+        // Step 1: candidates with a newer published version (one view query).
+        val candidates = checkForUpdates()
+        if (candidates.isEmpty()) return@withContext emptyList()
+
+        // Step 2: resolve each candidate version's min_ipc_version. If the
+        // lookup fails outright, skip this cycle rather than prompting for
+        // updates we can't verify (the download gate would refuse them anyway).
+        val versionRows = try {
+            fetchCandidateVersionRows(candidates)
+        } catch (_: Exception) {
+            return@withContext emptyList()
+        }
+
+        candidates.mapNotNull { (pluginId, latestVersion) ->
+            val current = installedById[pluginId] ?: return@mapNotNull null
+            val versionRow = versionRows[pluginId]
+            // A missing row resolves to UNKNOWN → installable, matching the
+            // install-time gate in downloadFromStore().
+            if (!IpcCompat.isInstallable(versionRow?.minIpcVersion)) return@mapNotNull null
+            UpdateInfo(
+                pluginId = pluginId,
+                displayName = current.displayName,
+                currentVersion = current.version,
+                newVersion = latestVersion,
+                changelog = versionRow?.changelog ?: ""
+            )
+        }
+    }
+
+    /**
+     * Batch-resolve the `plugin_versions` rows for the exact
+     * (pluginId, latestVersion) candidate pairs in two Postgrest queries:
+     * one to map plugin_id → uuid, one over plugin_versions. Note the
+     * `plugin_versions.plugin_id` column holds the plugin's UUID.
+     */
+    private suspend fun fetchCandidateVersionRows(
+        candidates: Map<String, String>
+    ): Map<String, PluginVersionRow> {
+        val pluginRows = supabaseClient.from("plugins")
+            .select(Columns.ALL) {
+                filter { isIn("plugin_id", candidates.keys.toList()) }
+            }
+            .decodeList<PluginRow>()
+        val pluginIdByUuid = pluginRows.associate { it.id to it.pluginId }
+        if (pluginIdByUuid.isEmpty()) return emptyMap()
+
+        val versionRows = supabaseClient.from("plugin_versions")
+            .select(Columns.ALL) {
+                filter {
+                    isIn("plugin_id", pluginIdByUuid.keys.toList())
+                    isIn("version", candidates.values.toList())
+                }
+            }
+            .decodeList<PluginVersionRow>()
+
+        // Match exact (pluginId, version) pairs client-side: the two isIn
+        // filters form a cross product, not pair-wise tuples.
+        return versionRows.mapNotNull { row ->
+            val pluginId = pluginIdByUuid[row.pluginUuid] ?: return@mapNotNull null
+            if (candidates[pluginId] == row.version) pluginId to row else null
+        }.toMap()
+    }
+
     // ========================================
     // INSTALL / UNINSTALL
     // ========================================
