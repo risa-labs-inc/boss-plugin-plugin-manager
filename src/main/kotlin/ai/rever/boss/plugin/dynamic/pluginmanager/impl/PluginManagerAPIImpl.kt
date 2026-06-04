@@ -14,6 +14,9 @@ import io.github.jan.supabase.postgrest.query.Columns
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -495,6 +498,9 @@ class PluginManagerAPIImpl(
      * Uses /plugin-store/:pluginId/download endpoint.
      */
     private suspend fun downloadFromStore(pluginId: String, version: String? = null): InstallResult {
+        // Capture the currently tracked JAR path (if any) before installing,
+        // so the old version's file can be removed after a successful load.
+        val previousJarPath = getInstalledPlugin(pluginId)?.jarPath
         try {
             // Get download info from store. A specific version uses the
             // /download/:version endpoint; null fetches the latest.
@@ -560,6 +566,9 @@ class PluginManagerAPIImpl(
                 installedAt = System.currentTimeMillis()
             )
 
+            // Remove the old version's JAR (and any stale duplicates)
+            cleanupOldVersionJars(pluginId, destFile, previousJarPath)
+
             // Refresh installed plugins
             refreshInstalledPlugins()
 
@@ -581,6 +590,51 @@ class PluginManagerAPIImpl(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Read the pluginId from a JAR's META-INF/boss-plugin/plugin.json, or null
+     * if the JAR is unreadable or not a BOSS plugin.
+     */
+    private fun readPluginIdFromJar(jar: File): String? {
+        return try {
+            java.util.jar.JarFile(jar).use { jarFile ->
+                val entry = jarFile.getJarEntry("META-INF/boss-plugin/plugin.json")
+                    ?: return@use null
+                val content = jarFile.getInputStream(entry).bufferedReader().use { it.readText() }
+                json.parseToJsonElement(content).jsonObject["pluginId"]
+                    ?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * After a successful install/update of [newJar] for [pluginId], delete the
+     * previously tracked JAR (if different) and any other JAR in the plugins
+     * dir whose manifest pluginId matches — install paths use differing
+     * filename conventions (store: `pluginId_version.jar`, GitHub: original
+     * asset name), so old versions otherwise accumulate and can shadow the new
+     * one at the next startup scan.
+     *
+     * Never deletes [newJar]; failures (e.g. Windows file locks) are swallowed.
+     */
+    private fun cleanupOldVersionJars(pluginId: String, newJar: File, previousJarPath: String?) {
+        try {
+            if (!previousJarPath.isNullOrBlank() && previousJarPath != newJar.absolutePath) {
+                runCatching { File(previousJarPath).takeIf { it.exists() }?.delete() }
+            }
+            pluginsDir.listFiles { f -> f.isFile && f.name.endsWith(".jar") }?.forEach { candidate ->
+                if (candidate.absolutePath == newJar.absolutePath) return@forEach
+                if (candidate.name.startsWith("boss-microkernel-runtime")) return@forEach
+                if (readPluginIdFromJar(candidate) == pluginId) {
+                    runCatching { candidate.delete() }
+                }
+            }
+        } catch (_: Exception) {
+            // Best-effort cleanup only; the host's startup reconciler heals leftovers.
+        }
     }
 
     override suspend fun installFromGitHub(githubUrl: String): InstallResult = withContext(Dispatchers.IO) {
@@ -640,6 +694,15 @@ class PluginManagerAPIImpl(
                 jarPath = destFile.absolutePath,
                 installedAt = System.currentTimeMillis(),
                 url = githubUrl
+            )
+
+            // Remove the old version's JAR (and any stale duplicates) — the
+            // pluginId is only known after the load, and the installed list
+            // still reflects the pre-install state at this point.
+            cleanupOldVersionJars(
+                pluginId = pluginInfo.pluginId,
+                newJar = destFile,
+                previousJarPath = getInstalledPlugin(pluginInfo.pluginId)?.jarPath
             )
 
             // Refresh installed plugins
