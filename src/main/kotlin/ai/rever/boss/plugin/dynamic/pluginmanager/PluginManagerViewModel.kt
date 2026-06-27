@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import kotlinx.coroutines.*
@@ -33,6 +34,8 @@ data class PluginManagerState(
     val isStoreAdmin: Boolean = false,
     /** Whether the user may use the Publish tab (store admin OR has plugins.admin.publish). */
     val canPublish: Boolean = false,
+    /** Installed plugins hidden from this (non-admin) user for lack of permissions. */
+    val inaccessiblePlugins: List<InaccessiblePluginInfo> = emptyList(),
     val realtimeConnected: Boolean = false,
     /** Open version-history / downgrade sheet, or null when closed. */
     val versionSheet: VersionSheetState? = null,
@@ -187,7 +190,17 @@ class PluginManagerViewModel(
                         } catch (e: Exception) {
                             isAdmin
                         }
-                        _state.value = _state.value.copy(isStoreAdmin = isAdmin, canPublish = canPublish)
+                        // Plugins installed but hidden from this user for lack of permissions.
+                        val inaccessible = try {
+                            loaderDelegate?.getInaccessiblePlugins() ?: emptyList()
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                        _state.value = _state.value.copy(
+                            isStoreAdmin = isAdmin,
+                            canPublish = canPublish,
+                            inaccessiblePlugins = inaccessible
+                        )
                     }
                 }
                 _state.value = _state.value.copy(isLoading = false)

@@ -19,6 +19,7 @@ import ai.rever.boss.plugin.ui.BossSection
 import ai.rever.boss.plugin.ui.BossTextArea
 import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
@@ -402,6 +403,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 when (state.currentTab) {
                     PluginManagerTab.INSTALLED -> InstalledPluginsTab(
                         plugins = filterPlugins(state.installedPlugins, state.searchQuery),
+                        inaccessiblePlugins = state.inaccessiblePlugins,
                         updateIds = state.updates.map { it.pluginId }.toSet(),
                         onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
                         onUninstall = { id -> viewModel.uninstallPlugin(id) },
@@ -676,6 +678,7 @@ private fun ErrorBanner(
 @Composable
 private fun InstalledPluginsTab(
     plugins: List<InstalledPluginState>,
+    inaccessiblePlugins: List<InaccessiblePluginInfo> = emptyList(),
     updateIds: Set<String>,
     onToggleEnabled: (String, Boolean) -> Unit,
     onUninstall: (String) -> Unit,
@@ -722,6 +725,35 @@ private fun InstalledPluginsTab(
             .fillMaxSize()
             .padding(12.dp)
     ) {
+        // Banner: installed plugins hidden from this user for lack of permissions.
+        if (inaccessiblePlugins.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        BossThemeColors.WarningColor.copy(alpha = 0.12f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "${inaccessiblePlugins.size} installed plugin(s) hidden — you lack the required permission(s)",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                inaccessiblePlugins.forEach { p ->
+                    Text(
+                        text = "• ${p.displayName} — ask an admin to grant: ${p.missingPermissions.joinToString(", ")}",
+                        color = BossThemeColors.TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+
         // Install section
         Row(
             modifier = Modifier.fillMaxWidth(),
