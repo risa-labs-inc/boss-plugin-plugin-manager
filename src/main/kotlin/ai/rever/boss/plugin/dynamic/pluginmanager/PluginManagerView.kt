@@ -383,7 +383,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 onTabSelected = { viewModel.selectTab(it) },
                 onRefresh = { viewModel.refresh() },
                 isLoading = state.isLoading,
-                isStoreAdmin = state.isStoreAdmin,
+                canPublish = state.canPublish,
                 realtimeConnected = state.realtimeConnected
             )
 
@@ -502,7 +502,7 @@ private fun PluginManagerHeader(
     onTabSelected: (PluginManagerTab) -> Unit,
     onRefresh: () -> Unit,
     isLoading: Boolean,
-    isStoreAdmin: Boolean,
+    canPublish: Boolean,
     realtimeConnected: Boolean = false
 ) {
     Row(
@@ -534,8 +534,8 @@ private fun PluginManagerHeader(
                 BossBadge(count = updateCount)
             }
         }
-        // Only show Publish tab for store admins
-        if (isStoreAdmin) {
+        // Show Publish tab to store admins and users with plugins.admin.publish
+        if (canPublish) {
             TabButton(
                 text = "Publish",
                 selected = currentTab == PluginManagerTab.PUBLISH,

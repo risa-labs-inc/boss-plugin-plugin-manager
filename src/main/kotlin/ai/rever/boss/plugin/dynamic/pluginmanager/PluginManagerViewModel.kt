@@ -31,6 +31,8 @@ data class PluginManagerState(
     val searchQuery: String = "",
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
+    /** Whether the user may use the Publish tab (store admin OR has plugins.admin.publish). */
+    val canPublish: Boolean = false,
     val realtimeConnected: Boolean = false,
     /** Open version-history / downgrade sheet, or null when closed. */
     val versionSheet: VersionSheetState? = null,
@@ -180,7 +182,12 @@ class PluginManagerViewModel(
                         } catch (e: Exception) {
                             false
                         }
-                        _state.value = _state.value.copy(isStoreAdmin = isAdmin)
+                        val canPublish = try {
+                            apiImpl.canPublish()
+                        } catch (e: Exception) {
+                            isAdmin
+                        }
+                        _state.value = _state.value.copy(isStoreAdmin = isAdmin, canPublish = canPublish)
                     }
                 }
                 _state.value = _state.value.copy(isLoading = false)
