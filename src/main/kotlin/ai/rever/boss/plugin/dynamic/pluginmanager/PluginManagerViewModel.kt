@@ -1,9 +1,6 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
-import ai.rever.boss.plugin.api.LoadedPluginInfo
-import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -74,15 +71,26 @@ data class VersionSheetState(
 /**
  * ViewModel for the Plugin Manager panel.
  * Matching bundled plugin-panel-manager exactly.
+ *
+ * Uses the shared [PluginManagerCore] instances (API impl + realtime client);
+ * the core owns their lifecycle, so panel close only cancels this ViewModel's
+ * own collectors.
  */
 @OptIn(FlowPreview::class)
 class PluginManagerViewModel(
-    private val scope: CoroutineScope,
-    private val loaderDelegate: PluginLoaderDelegate?,
+    parentScope: CoroutineScope,
+    core: PluginManagerCore,
     private val onOpenUrl: ((String) -> Unit)? = null
 ) {
-    private val apiImpl = PluginManagerAPIImpl(scope, loaderDelegate)
-    private val api: PluginManagerAPI = apiImpl
+    // Child scope of the plugin scope: cancelled in dispose() so collectors of a
+    // closed panel don't leak, while plugin unload still cancels everything.
+    private val scope = CoroutineScope(
+        parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job])
+    )
+
+    private val apiImpl = core.apiImpl
+    private val api: PluginManagerAPI = core.api
+    private val loaderDelegate = core.loaderDelegate
 
     private val _state = MutableStateFlow(PluginManagerState())
     val state: StateFlow<PluginManagerState> = _state.asStateFlow()
@@ -122,15 +130,12 @@ class PluginManagerViewModel(
                 }
         }
 
-        // Track realtime connection status
+        // Track realtime connection status (connection itself is owned by PluginManagerCore)
         scope.launch {
             apiImpl.realtimeClient.isConnected.collect { connected ->
                 _state.value = _state.value.copy(realtimeConnected = connected)
             }
         }
-
-        // Connect realtime
-        apiImpl.connectRealtime()
 
         // Initial refresh
         scope.launch {
@@ -466,42 +471,26 @@ class PluginManagerViewModel(
 
     /**
      * Build the post-update prompt for the given just-updated plugins, or null if
-     * nothing needs resetting. Plugins that only apply on a full restart
-     * (system/locked) take priority and produce a "Restart BOSS" prompt; otherwise
-     * we prompt to reset the ones that currently have running instances.
+     * nothing needs resetting. Decision logic is shared with the background
+     * update toast flow via [buildUpdateApplyPlan].
      */
     private fun buildPostUpdatePrompt(pluginIds: List<String>): PostUpdatePrompt? {
-        val delegate = loaderDelegate ?: return null
-        if (pluginIds.isEmpty()) return null
-        val loaded = delegate.getLoadedPlugins().associateBy { it.pluginId }
-
-        val restartNeeded = pluginIds.filter { id ->
-            loaded[id]?.let { it.isSystemPlugin || !it.canUnload } ?: false
-        }
-        if (restartNeeded.isNotEmpty()) {
-            return PostUpdatePrompt(
-                pluginIds = restartNeeded,
-                displayName = displayNameFor(restartNeeded, loaded),
+        return when (val plan = buildUpdateApplyPlan(pluginIds, loaderDelegate)) {
+            is UpdateApplyPlan.Restart -> PostUpdatePrompt(
+                pluginIds = plan.pluginIds,
+                displayName = plan.displayName,
                 needsRestart = true,
                 instanceCount = 0
             )
+            is UpdateApplyPlan.Reset -> PostUpdatePrompt(
+                pluginIds = plan.pluginIds,
+                displayName = plan.displayName,
+                needsRestart = false,
+                instanceCount = plan.instanceCount
+            )
+            is UpdateApplyPlan.None -> null
         }
-
-        // Count once per plugin (each call walks the split tree) and keep only those
-        // with at least one running instance.
-        val counts = pluginIds.associateWith { delegate.getRunningInstanceCount(it) }
-            .filterValues { it > 0 }
-        if (counts.isEmpty()) return null
-        return PostUpdatePrompt(
-            pluginIds = counts.keys.toList(),
-            displayName = displayNameFor(counts.keys.toList(), loaded),
-            needsRestart = false,
-            instanceCount = counts.values.sum()
-        )
     }
-
-    private fun displayNameFor(ids: List<String>, loaded: Map<String, LoadedPluginInfo>): String =
-        if (ids.size == 1) (loaded[ids[0]]?.displayName ?: ids[0]) else "${ids.size} plugins"
 
     /** Confirm the post-update prompt: reset the affected plugins' running instances. */
     fun confirmResetInstances() {
@@ -667,14 +656,11 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Dispose resources.
+     * Dispose resources. Cancels this ViewModel's collectors only — the shared
+     * API impl and realtime client are owned by [PluginManagerCore] and keep
+     * running so background update detection survives panel close.
      */
     fun dispose() {
-        apiImpl.realtimeClient.dispose()
+        scope.cancel()
     }
-
-    /**
-     * Expose the API for other components/plugins to use.
-     */
-    fun getAPI(): PluginManagerAPI = api
 }

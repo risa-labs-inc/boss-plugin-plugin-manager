@@ -3,7 +3,6 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 import ai.rever.boss.plugin.api.PanelComponentWithUI
 import ai.rever.boss.plugin.api.PanelInfo
 import ai.rever.boss.plugin.api.PluginContext
-import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import androidx.compose.runtime.Composable
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.essenty.lifecycle.Lifecycle
@@ -15,20 +14,20 @@ import com.arkivanov.essenty.lifecycle.Lifecycle
  * - List of installed plugins
  * - Plugin store browser
  * - Install/uninstall actions
+ *
+ * Created lazily when the panel is opened; the shared [PluginManagerCore]
+ * (API impl, realtime, background update prompts) lives at plugin scope.
  */
 class PluginManagerComponent(
     ctx: ComponentContext,
     override val panelInfo: PanelInfo,
-    private val context: PluginContext
+    private val context: PluginContext,
+    core: PluginManagerCore
 ) : PanelComponentWithUI, ComponentContext by ctx {
 
-    // Get the loader delegate from PluginContext via getPluginAPI
-    // Call directly (no reflection needed) - method is defined in PluginContext interface
-    private val loaderDelegate: PluginLoaderDelegate? = context.getPluginAPI(PluginLoaderDelegate::class.java)
-
     private val viewModel = PluginManagerViewModel(
-        scope = context.pluginScope,
-        loaderDelegate = loaderDelegate,
+        parentScope = context.pluginScope,
+        core = core,
         onOpenUrl = { url ->
             // Open URL in a BOSS browser tab using ActiveTabsProvider
             val activeTabsProvider = context.activeTabsProvider
@@ -59,9 +58,8 @@ class PluginManagerComponent(
                 viewModel.dispose()
             }
         })
-
-        // Register the PluginManagerAPI for other plugins to use
-        context.registerPluginAPI(viewModel.getAPI())
+        // NOTE: PluginManagerAPI registration happens at plugin register() time
+        // (see PluginManagerDynamicPlugin), not when the panel is first opened.
     }
 
     @Composable

@@ -86,6 +86,15 @@ interface PluginManagerAPI {
      */
     suspend fun checkForUpdates(): Map<String, String>
 
+    /**
+     * Like [checkForUpdates], but only returns updates whose latest published
+     * version is installable on this host's IPC contract (COMPATIBLE or
+     * UNKNOWN per [IpcCompat]). Versions requiring a newer host
+     * (REQUIRES_HOST_UPDATE) or a different IPC major (MAJOR_MISMATCH) are
+     * excluded. Returns an empty list if the compatibility lookup fails.
+     */
+    suspend fun checkForCompatibleUpdates(): List<UpdateInfo>
+
     // ========================================
     // INSTALL / UNINSTALL
     // ========================================
