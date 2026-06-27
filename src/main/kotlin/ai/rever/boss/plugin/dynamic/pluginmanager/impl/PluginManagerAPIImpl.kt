@@ -1274,7 +1274,9 @@ class PluginManagerAPIImpl(
                     url = manifestData.url,
                     apiVersion = manifestData.apiVersion ?: "1.0",
                     minBossVersion = manifestData.minBossVersion ?: "",
-                    type = PluginType.fromString(manifestData.type ?: "panel")
+                    type = PluginType.fromString(manifestData.type ?: "panel"),
+                    requiredPermissions = manifestData.requiredPermissions,
+                    definedPermissions = manifestData.definedPermissions
                 )
             } else {
                 jarFile.close()
@@ -1336,6 +1338,12 @@ class PluginManagerAPIImpl(
 
             onProgress(0.2f)
 
+            // Permissions the plugin declares in its manifest — sent so the store
+            // auto-registers any new ones (ungranted) on this multi-step path too.
+            val manifestForPerms = extractManifestFromJar(jarPath)
+            val requiredPerms = manifestForPerms?.requiredPermissions ?: emptyList()
+            val definedPerms = manifestForPerms?.definedPermissions ?: emptyList()
+
             // Step 1: Create or update plugin entry
             val createPluginBody = buildString {
                 append("{")
@@ -1351,6 +1359,16 @@ class PluginManagerAPIImpl(
                 }
                 if (tags.isNotEmpty()) {
                     append(",\"tags\": [${tags.joinToString(",") { "\"$it\"" }}]")
+                }
+                if (requiredPerms.isNotEmpty()) {
+                    append(",\"requiredPermissions\": [${requiredPerms.joinToString(",") { "\"${it.replace("\"", "\\\"")}\"" }}]")
+                }
+                if (definedPerms.isNotEmpty()) {
+                    append(",\"definedPermissions\": [")
+                    append(definedPerms.joinToString(",") { dp ->
+                        "{\"name\":\"${dp.name.replace("\"", "\\\"")}\",\"description\":\"${dp.description.replace("\"", "\\\"").replace("\n", "\\n")}\"}"
+                    })
+                    append("]")
                 }
                 append("}")
             }
