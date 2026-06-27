@@ -188,7 +188,9 @@ data class ExtractedManifest(
     val url: String?,
     val apiVersion: String = "1.0",
     val minBossVersion: String = "",
-    val type: PluginType = PluginType.PANEL
+    val type: PluginType = PluginType.PANEL,
+    val requiredPermissions: List<String> = emptyList(),
+    val definedPermissions: List<DefinedPermissionData> = emptyList()
 )
 
 /**
@@ -288,5 +290,16 @@ internal data class PluginManifestData(
     @SerialName("apiVersion")
     val apiVersion: String? = null,
     @SerialName("minBossVersion")
-    val minBossVersion: String? = null
+    val minBossVersion: String? = null,
+    @SerialName("requiredPermissions")
+    val requiredPermissions: List<String> = emptyList(),
+    @SerialName("definedPermissions")
+    val definedPermissions: List<DefinedPermissionData> = emptyList()
+)
+
+/** A permission a plugin introduces, parsed from the manifest's definedPermissions. */
+@Serializable
+data class DefinedPermissionData(
+    val name: String,
+    val description: String = ""
 )
