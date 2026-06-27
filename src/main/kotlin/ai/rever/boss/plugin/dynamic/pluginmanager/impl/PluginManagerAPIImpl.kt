@@ -14,6 +14,9 @@ import io.github.jan.supabase.postgrest.query.Columns
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -483,9 +486,16 @@ class PluginManagerAPIImpl(
                 }
             }
 
+            // Replace any already-loaded copy so the new version loads cleanly
+            // (no manual uninstall needed).
+            unloadIfAlreadyLoaded(destFile, knownPluginId = pluginId)
+
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return InstallResult.LoadFailed("No plugin loader available")
+                ?: return InstallResult.LoadFailed(
+                    if (loaderDelegate == null) "No plugin loader available"
+                    else "Failed to load plugin '$pluginId' (see app logs for details)"
+                )
 
             val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
@@ -513,6 +523,41 @@ class PluginManagerAPIImpl(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Read the pluginId from a JAR's bundled manifest without loading the plugin.
+     * Returns null if the manifest is absent or unparseable.
+     */
+    private fun readPluginIdFromJar(jarFile: File): String? = try {
+        java.util.zip.ZipFile(jarFile).use { zip ->
+            val entry = zip.getEntry("META-INF/boss-plugin/plugin.json")
+            if (entry == null) {
+                null
+            } else {
+                val text = zip.getInputStream(entry).bufferedReader().use { it.readText() }
+                json.parseToJsonElement(text).jsonObject["pluginId"]?.jsonPrimitive?.contentOrNull
+            }
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Make plugin loading idempotent: if a plugin with the same id is already
+     * loaded, unload it first so install/update *replaces* it instead of the
+     * host throwing "Plugin already loaded" (which surfaces here as a null load
+     * result). No-op when nothing matching is loaded or the id can't be read.
+     *
+     * Unloading only detaches the plugin from the runtime — it does not delete
+     * the JAR — so the freshly-downloaded JAR we're about to load is untouched.
+     */
+    private suspend fun unloadIfAlreadyLoaded(jarFile: File, knownPluginId: String? = null) {
+        val delegate = loaderDelegate ?: return
+        val pluginId = knownPluginId ?: readPluginIdFromJar(jarFile) ?: return
+        if (delegate.isPluginLoaded(pluginId)) {
+            delegate.unloadPlugin(pluginId)
+        }
     }
 
     override suspend fun installFromGitHub(githubUrl: String): InstallResult = withContext(Dispatchers.IO) {
@@ -564,9 +609,16 @@ class PluginManagerAPIImpl(
                 downloadConnection.inputStream.copyTo(output)
             }
 
+            // Replace any already-loaded copy so the new version loads cleanly
+            // (no manual uninstall needed).
+            unloadIfAlreadyLoaded(destFile)
+
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return@withContext InstallResult.LoadFailed("No plugin loader available")
+                ?: return@withContext InstallResult.LoadFailed(
+                    if (loaderDelegate == null) "No plugin loader available"
+                    else "Failed to load plugin from ${destFile.name} (see app logs for details)"
+                )
 
             val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
@@ -601,9 +653,16 @@ class PluginManagerAPIImpl(
                 dest
             }
 
+            // Replace any already-loaded copy so the new version loads cleanly
+            // (no manual uninstall needed).
+            unloadIfAlreadyLoaded(destFile)
+
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return@withContext InstallResult.LoadFailed("No plugin loader available")
+                ?: return@withContext InstallResult.LoadFailed(
+                    if (loaderDelegate == null) "No plugin loader available"
+                    else "Failed to load plugin from ${destFile.name} (see app logs for details)"
+                )
 
             val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
