@@ -4,7 +4,7 @@
   "displayName": "Plugin Manager",
   "version": "1.4.24",
   "apiVersion": "1.0.21",
-  "minBossVersion": "8.16.30",
+  "minBossVersion": "9.2.16",
   "mainClass": "ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin",
   "type": "panel",
   "systemPlugin": true,
