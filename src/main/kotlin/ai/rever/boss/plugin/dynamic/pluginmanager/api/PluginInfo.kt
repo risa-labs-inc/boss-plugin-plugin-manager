@@ -54,7 +54,9 @@ data class PluginStoreItem(
     val verified: Boolean = false,
     val rating: Float = 0f,
     val ratingCount: Int = 0,
-    val iconUrl: String = ""
+    val iconUrl: String = "",
+    /** Permissions the user must hold to install/use this plugin. Empty = open. */
+    val requiredPermissions: List<String> = emptyList()
 )
 
 /**
@@ -79,7 +81,8 @@ data class DownloadInfoResponse(
     val version: String = "",
     val size: Long = 0,
     val versionId: String = "",
-    val minIpcVersion: String = "1.0.0"
+    val minIpcVersion: String = "1.0.0",
+    val requiredPermissions: List<String> = emptyList()
 )
 
 /**

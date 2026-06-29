@@ -513,11 +513,24 @@ class PluginManagerAPIImpl(
             infoConnection.requestMethod = "GET"
             infoConnection.setRequestProperty("Accept", "application/json")
             infoConnection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+            // Send the user's token so the store can enforce the install-permission
+            // gate (plugins declaring requiredPermissions). Harmless for open plugins.
+            loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() }?.let {
+                infoConnection.setRequestProperty("Authorization", "Bearer $it")
+            }
             infoConnection.connectTimeout = 10000
             infoConnection.readTimeout = 10000
 
             if (infoConnection.responseCode != 200) {
                 val errorBody = try { infoConnection.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                // 403 = caller lacks the permission(s) required to install this plugin.
+                // The server's error message already names the missing permissions.
+                if (infoConnection.responseCode == 403) {
+                    return InstallResult.DownloadFailed(
+                        parseErrorMessage(errorBody)
+                            ?: "You don't have permission to install this plugin. Ask an admin to grant the required permissions."
+                    )
+                }
                 return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode} - $errorBody")
             }
 
@@ -1082,6 +1095,28 @@ class PluginManagerAPIImpl(
             perms.any { (it as? JsonPrimitive)?.contentOrNull == permission }
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /**
+     * Whether the current user may install a plugin that requires
+     * [requiredPermissions]. Admins always can; otherwise the user's JWT must
+     * carry every required permission. Empty ⇒ open to all (the `user.read`
+     * baseline). Mirrors the server-side /download gate so the UI never offers an
+     * install that would be rejected with a 403.
+     */
+    fun canInstall(requiredPermissions: List<String>): Boolean =
+        requiredPermissions.isEmpty() ||
+            isCurrentUserAdmin() ||
+            requiredPermissions.all { tokenHasPermission(it) }
+
+    /** Extract the `error` field from a JSON `{"error": "..."}` body, or null. */
+    private fun parseErrorMessage(body: String?): String? {
+        if (body.isNullOrBlank()) return null
+        return try {
+            (json.parseToJsonElement(body).jsonObject["error"] as? JsonPrimitive)?.contentOrNull
+        } catch (_: Exception) {
+            null
         }
     }
 
