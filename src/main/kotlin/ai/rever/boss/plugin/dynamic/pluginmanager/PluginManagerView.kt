@@ -8,7 +8,6 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginType
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.ui.graphics.Color
 import ai.rever.boss.plugin.ui.BossBadge
 import ai.rever.boss.plugin.ui.BossCard
 import ai.rever.boss.plugin.ui.BossEmptyState
@@ -243,9 +242,6 @@ private fun PasswordDialog(
  * Plugin Manager View - matching bundled plugin-panel-manager exactly.
  * Uses BossTheme and UI components from plugin-ui-core.
  */
-private val IpcCompatGreen = Color(0xFF59A869)
-private val IpcCompatAmber = Color(0xFFD9A33A)
-private val IpcCompatRed = Color(0xFFE05555)
 
 /**
  * Version-history / downgrade sheet: lists every published version with its
@@ -328,7 +324,7 @@ private fun VersionRow(
             version.compatibility == IpcCompat.Status.UNKNOWN
         when {
             isInstalled -> Text("Installed", color = BossThemeColors.TextMuted, fontSize = 12.sp)
-            !installable -> Text("Needs newer BOSS", color = IpcCompatAmber, fontSize = 11.sp)
+            !installable -> Text("Needs newer BOSS", color = BossThemeColors.WarningColor, fontSize = 11.sp)
             busy -> Text("…", color = BossThemeColors.TextMuted, fontSize = 12.sp)
             else -> BossSecondaryButton(
                 text = if (ipcCompareSemver(version.version, installedVersion) > 0) "Update" else "Downgrade",
@@ -341,9 +337,9 @@ private fun VersionRow(
 @Composable
 private fun IpcBadge(status: IpcCompat.Status) {
     val (color, label) = when (status) {
-        IpcCompat.Status.COMPATIBLE -> IpcCompatGreen to "Compatible"
-        IpcCompat.Status.REQUIRES_HOST_UPDATE -> IpcCompatAmber to "Host update"
-        IpcCompat.Status.MAJOR_MISMATCH -> IpcCompatRed to "Incompatible"
+        IpcCompat.Status.COMPATIBLE -> BossThemeColors.SuccessColor to "Compatible"
+        IpcCompat.Status.REQUIRES_HOST_UPDATE -> BossThemeColors.WarningColor to "Host update"
+        IpcCompat.Status.MAJOR_MISMATCH -> BossThemeColors.ErrorColor to "Incompatible"
         IpcCompat.Status.UNKNOWN -> return
     }
     Box(
