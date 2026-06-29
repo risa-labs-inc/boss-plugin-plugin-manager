@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
@@ -426,6 +428,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdate = { pluginId -> viewModel.updatePlugin(pluginId) },
                         onDeleteFromStore = { pluginId -> viewModel.deleteFromStore(pluginId) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        canInstall = { item -> viewModel.canInstall(item) },
                         isStoreAdmin = state.isStoreAdmin,
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins
@@ -1015,6 +1018,7 @@ private fun AvailablePluginsTab(
     onUpdate: (String) -> Unit,
     onDeleteFromStore: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
+    canInstall: (PluginStoreItem) -> Boolean = { true },
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet()
@@ -1085,6 +1089,7 @@ private fun AvailablePluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onDeleteFromStore = { pluginToDelete = plugin },
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
+                    canInstall = canInstall(plugin),
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins
                 )
@@ -1102,6 +1107,7 @@ private fun AvailablePluginCard(
     onUpdate: () -> Unit,
     onDeleteFromStore: () -> Unit,
     onOpenHomepage: () -> Unit,
+    canInstall: Boolean = true,
     isStoreAdmin: Boolean,
     isLoading: Boolean
 ) {
@@ -1212,6 +1218,38 @@ private fun AvailablePluginCard(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                    !canInstall -> {
+                        // The user lacks the permission(s) this plugin requires to
+                        // install/use. The server would reject the download (403),
+                        // so we surface the reason instead of offering Install.
+                        Column(horizontalAlignment = Alignment.End) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = BossThemeColors.WarningColor
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "Ask an admin",
+                                    color = BossThemeColors.WarningColor,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            if (plugin.requiredPermissions.isNotEmpty()) {
+                                Text(
+                                    text = "Requires: ${plugin.requiredPermissions.joinToString(", ")}",
+                                    color = BossThemeColors.TextMuted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 180.dp)
+                                )
+                            }
+                        }
                     }
                     else -> {
                         BossPrimaryButton(
