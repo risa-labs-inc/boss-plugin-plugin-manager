@@ -8,7 +8,6 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginType
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.ui.graphics.Color
 import ai.rever.boss.plugin.ui.BossBadge
 import ai.rever.boss.plugin.ui.BossCard
 import ai.rever.boss.plugin.ui.BossEmptyState
@@ -36,6 +35,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
@@ -241,9 +242,6 @@ private fun PasswordDialog(
  * Plugin Manager View - matching bundled plugin-panel-manager exactly.
  * Uses BossTheme and UI components from plugin-ui-core.
  */
-private val IpcCompatGreen = Color(0xFF59A869)
-private val IpcCompatAmber = Color(0xFFD9A33A)
-private val IpcCompatRed = Color(0xFFE05555)
 
 /**
  * Version-history / downgrade sheet: lists every published version with its
@@ -326,7 +324,7 @@ private fun VersionRow(
             version.compatibility == IpcCompat.Status.UNKNOWN
         when {
             isInstalled -> Text("Installed", color = BossThemeColors.TextMuted, fontSize = 12.sp)
-            !installable -> Text("Needs newer BOSS", color = IpcCompatAmber, fontSize = 11.sp)
+            !installable -> Text("Needs newer BOSS", color = BossThemeColors.WarningColor, fontSize = 11.sp)
             busy -> Text("…", color = BossThemeColors.TextMuted, fontSize = 12.sp)
             else -> BossSecondaryButton(
                 text = if (ipcCompareSemver(version.version, installedVersion) > 0) "Update" else "Downgrade",
@@ -339,9 +337,9 @@ private fun VersionRow(
 @Composable
 private fun IpcBadge(status: IpcCompat.Status) {
     val (color, label) = when (status) {
-        IpcCompat.Status.COMPATIBLE -> IpcCompatGreen to "Compatible"
-        IpcCompat.Status.REQUIRES_HOST_UPDATE -> IpcCompatAmber to "Host update"
-        IpcCompat.Status.MAJOR_MISMATCH -> IpcCompatRed to "Incompatible"
+        IpcCompat.Status.COMPATIBLE -> BossThemeColors.SuccessColor to "Compatible"
+        IpcCompat.Status.REQUIRES_HOST_UPDATE -> BossThemeColors.WarningColor to "Host update"
+        IpcCompat.Status.MAJOR_MISMATCH -> BossThemeColors.ErrorColor to "Incompatible"
         IpcCompat.Status.UNKNOWN -> return
     }
     Box(
@@ -426,6 +424,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdate = { pluginId -> viewModel.updatePlugin(pluginId) },
                         onDeleteFromStore = { pluginId -> viewModel.deleteFromStore(pluginId) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        canInstall = { item -> viewModel.canInstall(item) },
                         isStoreAdmin = state.isStoreAdmin,
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins
@@ -1015,6 +1014,7 @@ private fun AvailablePluginsTab(
     onUpdate: (String) -> Unit,
     onDeleteFromStore: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
+    canInstall: (PluginStoreItem) -> Boolean = { true },
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet()
@@ -1085,6 +1085,7 @@ private fun AvailablePluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onDeleteFromStore = { pluginToDelete = plugin },
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
+                    canInstall = canInstall(plugin),
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins
                 )
@@ -1102,6 +1103,7 @@ private fun AvailablePluginCard(
     onUpdate: () -> Unit,
     onDeleteFromStore: () -> Unit,
     onOpenHomepage: () -> Unit,
+    canInstall: Boolean = true,
     isStoreAdmin: Boolean,
     isLoading: Boolean
 ) {
@@ -1212,6 +1214,38 @@ private fun AvailablePluginCard(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                    !canInstall -> {
+                        // The user lacks the permission(s) this plugin requires to
+                        // install/use. The server would reject the download (403),
+                        // so we surface the reason instead of offering Install.
+                        Column(horizontalAlignment = Alignment.End) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = BossThemeColors.WarningColor
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "Ask an admin",
+                                    color = BossThemeColors.WarningColor,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            if (plugin.requiredPermissions.isNotEmpty()) {
+                                Text(
+                                    text = "Requires: ${plugin.requiredPermissions.joinToString(", ")}",
+                                    color = BossThemeColors.TextMuted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 180.dp)
+                                )
+                            }
+                        }
                     }
                     else -> {
                         BossPrimaryButton(

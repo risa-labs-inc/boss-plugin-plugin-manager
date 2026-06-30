@@ -265,6 +265,13 @@ class PluginManagerViewModel(
     /**
      * Install a plugin from the store.
      */
+    /**
+     * Whether the current user may install [item] from the store. Mirrors the
+     * server-side /download gate (admins bypass; otherwise the JWT must carry the
+     * plugin's requiredPermissions; empty = open). Used to gate the Install button.
+     */
+    fun canInstall(item: PluginStoreItem): Boolean = apiImpl.canInstall(item.requiredPermissions)
+
     fun installFromRemote(pluginId: String) {
         scope.launch {
             _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
