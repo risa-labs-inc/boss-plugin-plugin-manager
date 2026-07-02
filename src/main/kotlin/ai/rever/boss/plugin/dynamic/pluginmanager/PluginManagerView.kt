@@ -1033,7 +1033,14 @@ private fun InstalledPluginsTab(
     var mcpDialogManifest by remember { mutableStateOf<ExtractedManifest?>(null) }
     LaunchedEffect(mcpDialogPlugin) {
         mcpDialogManifest = null
-        mcpDialogPlugin?.let { plugin -> onExtractManifest(plugin.jarPath) { mcpDialogManifest = it } }
+        mcpDialogPlugin?.let { plugin ->
+            onExtractManifest(plugin.jarPath) { manifest ->
+                // The extraction runs on the VM scope and outlives this effect —
+                // guard so a slow read for plugin A can't populate the dialog
+                // after the user switched to plugin B (wrong permissions shown).
+                if (mcpDialogPlugin?.pluginId == plugin.pluginId) mcpDialogManifest = manifest
+            }
+        }
     }
 
     // Permissions dialog (lock button on the card) — same manifest-read pattern.
@@ -1041,7 +1048,11 @@ private fun InstalledPluginsTab(
     var permDialogManifest by remember { mutableStateOf<ExtractedManifest?>(null) }
     LaunchedEffect(permDialogPlugin) {
         permDialogManifest = null
-        permDialogPlugin?.let { plugin -> onExtractManifest(plugin.jarPath) { permDialogManifest = it } }
+        permDialogPlugin?.let { plugin ->
+            onExtractManifest(plugin.jarPath) { manifest ->
+                if (permDialogPlugin?.pluginId == plugin.pluginId) permDialogManifest = manifest
+            }
+        }
     }
     permDialogPlugin?.let { plugin ->
         PermissionsDialog(
@@ -1900,6 +1911,9 @@ private fun McpToolsTab(viewModel: PluginManagerViewModel) {
         }
     }
     val groups = remember(visibleTools) { visibleTools.groupBy { it.providerId }.entries.toList() }
+    // Unfiltered per-plugin tools, so the "N/M on" section counts reflect the
+    // plugin's FULL tool set even while a search filter narrows the rows shown.
+    val allByProvider = remember(allTools) { allTools.groupBy { it.providerId } }
 
     // One scrollable surface for the whole tab — header, server controls, and
     // tool groups all scroll together.
@@ -1957,10 +1971,11 @@ private fun McpToolsTab(viewModel: PluginManagerViewModel) {
         } else {
             items(groups, key = { it.key }) { (providerId, tools) ->
                     val display = nameById[providerId] ?: providerId.substringAfterLast('.')
-                    val onCount = tools.count { it.definition.name in exposedNames }
+                    val fullTools = allByProvider[providerId].orEmpty()
+                    val onCount = fullTools.count { it.definition.name in exposedNames }
                     BossSection(
                         title = display,
-                        description = "$onCount/${tools.size} on • $providerId"
+                        description = "$onCount/${fullTools.size} on • $providerId"
                     ) {
                         tools.forEach { tool ->
                             val def = tool.definition
