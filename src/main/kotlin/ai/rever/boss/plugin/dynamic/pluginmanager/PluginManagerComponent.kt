@@ -49,7 +49,13 @@ class PluginManagerComponent(
                     // Desktop API not available or failed
                 }
             }
-        }
+        },
+        mcpToolRegistry = context.mcpToolRegistry,
+        // Resolved lazily — terminal-tab (which registers this API) loads after us.
+        mcpServerControllerProvider = {
+            context.getPluginAPI(ai.rever.boss.plugin.api.McpServerController::class.java)
+        },
+        roleManagementProvider = context.roleManagementProvider
     )
 
     init {

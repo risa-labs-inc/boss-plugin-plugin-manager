@@ -1,6 +1,9 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
+import ai.rever.boss.plugin.api.McpServerController
+import ai.rever.boss.plugin.api.McpToolRegistry
+import ai.rever.boss.plugin.api.RoleManagementProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import kotlinx.coroutines.*
@@ -14,6 +17,7 @@ enum class PluginManagerTab {
     INSTALLED,
     AVAILABLE,
     UPDATES,
+    MCP,
     PUBLISH
 }
 
@@ -40,7 +44,13 @@ data class PluginManagerState(
     /** Open version-history / downgrade sheet, or null when closed. */
     val versionSheet: VersionSheetState? = null,
     /** Prompt shown after an update to reset running instances / restart BOSS, or null. */
-    val postUpdatePrompt: PostUpdatePrompt? = null
+    val postUpdatePrompt: PostUpdatePrompt? = null,
+    /**
+     * RBAC permission glossary: name → description, fetched best-effort from
+     * RoleManagementProvider (empty when unavailable, e.g. non-admin users).
+     * Used by the MCP dialog to explain what each required permission grants.
+     */
+    val permissionDescriptions: Map<String, String> = emptyMap()
 )
 
 /**
@@ -85,7 +95,18 @@ data class VersionSheetState(
 class PluginManagerViewModel(
     parentScope: CoroutineScope,
     core: PluginManagerCore,
-    private val onOpenUrl: ((String) -> Unit)? = null
+    private val onOpenUrl: ((String) -> Unit)? = null,
+    /** Registry of plugin-contributed MCP tools, for the MCP tab. Null if unavailable. */
+    val mcpToolRegistry: McpToolRegistry? = null,
+    /**
+     * Lazy resolver for the MCP server control surface (terminal-tab's plugin
+     * API). Resolved per-render, NOT at construction: plugin-manager loads
+     * before terminal-tab (loadPriority 5 vs 10), so getPluginAPI is null until
+     * terminal-tab registers.
+     */
+    val mcpServerControllerProvider: () -> McpServerController? = { null },
+    /** Role management provider for the permission-description glossary; null for non-admins. */
+    private val roleManagementProvider: RoleManagementProvider? = null
 ) {
     // Child scope of the plugin scope: cancelled in dispose() so collectors of a
     // closed panel don't leak, while plugin unload still cancels everything.
@@ -145,6 +166,18 @@ class PluginManagerViewModel(
         // Initial refresh
         scope.launch {
             refresh()
+        }
+
+        // Best-effort permission glossary (name → description) for the MCP
+        // dialog. RoleManagementProvider is null for non-admins; leave empty.
+        scope.launch {
+            runCatching {
+                roleManagementProvider?.getAllPermissions()?.getOrNull()?.let { perms ->
+                    _state.value = _state.value.copy(
+                        permissionDescriptions = perms.associate { it.name to (it.description ?: "") }
+                    )
+                }
+            }
         }
     }
 
