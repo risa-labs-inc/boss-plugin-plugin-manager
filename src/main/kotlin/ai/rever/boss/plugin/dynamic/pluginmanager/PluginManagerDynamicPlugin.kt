@@ -42,6 +42,9 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
         // to happen only once the panel was first opened)
         context.registerPluginAPI(core.api)
 
+        // Contribute plugins_list/enable/disable MCP tools; auto-removed on disable/unload.
+        context.registerMcpToolProvider(PluginManagerMcpToolProvider(pluginId, core.api))
+
         // Start realtime + background update prompts
         core.start()
 

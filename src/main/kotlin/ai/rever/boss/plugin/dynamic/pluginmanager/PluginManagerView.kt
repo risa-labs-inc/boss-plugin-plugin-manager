@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.DefinedPermissionData
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstalledPluginState
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.IpcCompat
@@ -23,6 +24,7 @@ import ai.rever.boss.plugin.ui.BossThemeColors
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,11 +64,18 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
+import ai.rever.boss.plugin.api.McpServerController
+import ai.rever.boss.plugin.api.McpToolRegistry
+import ai.rever.boss.plugin.api.RegisteredMcpTool
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -303,6 +312,309 @@ private fun VersionSheetDialog(
     }
 }
 
+/**
+ * Per-plugin MCP tools dialog (opened from the Installed tab's MCP button —
+ * mirrors [VersionSheetDialog]). Lists the tools this plugin contributes to the
+ * `boss` MCP server with live enable toggles and permission info; the same
+ * toggles as the MCP tab, scoped to one plugin.
+ */
+@Composable
+private fun McpToolsDialog(
+    displayName: String,
+    tools: List<RegisteredMcpTool>,
+    registry: McpToolRegistry,
+    manifest: ExtractedManifest?,
+    permissionDescriptions: Map<String, String>,
+    onDismiss: () -> Unit
+) {
+    val exposed by registry.tools.collectAsState()
+    val exposedNames = remember(exposed) { exposed.map { it.definition.name }.toSet() }
+    val disabled by registry.disabledToolNames.collectAsState()
+    val onCount = tools.count { it.definition.name in exposedNames }
+
+    // Every permission in play: the plugin's own manifest gate + each tool's
+    // requirements. Descriptions resolve from the plugin's definedPermissions
+    // (self-documented), then the RBAC glossary, then a built-in fallback.
+    val pluginPerms = manifest?.requiredPermissions.orEmpty()
+    val allPerms = remember(tools, pluginPerms) {
+        buildList {
+            addAll(pluginPerms)
+            tools.forEach { t ->
+                if (t.definition.requiresAdmin) add("admin")
+                addAll(t.definition.requiredPermissions)
+            }
+        }.distinct().sorted()
+    }
+    val definedByPlugin = remember(manifest) {
+        manifest?.definedPermissions.orEmpty().associate { it.name to it.description }
+    }
+    fun describe(perm: String): String =
+        definedByPlugin[perm]?.takeIf { it.isNotBlank() }
+            ?: permissionDescriptions[perm]?.takeIf { it.isNotBlank() }
+            ?: if (perm == "admin") "Administrator access — only admins can use this." else "No description available."
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .width(460.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(BossThemeColors.SurfaceColor)
+                .padding(20.dp)
+        ) {
+            Text(
+                text = "$displayName — MCP tools",
+                color = BossThemeColors.TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "$onCount/${tools.size} exposed to agents as mcp__boss__* while this plugin is active",
+                color = BossThemeColors.TextMuted,
+                fontSize = 12.sp
+            )
+            Text(
+                text = when {
+                    manifest == null -> "Plugin permissions: reading manifest…"
+                    pluginPerms.isEmpty() -> "Plugin requires no special permissions to load."
+                    else -> "Plugin requires: ${pluginPerms.joinToString(", ")}"
+                },
+                color = BossThemeColors.TextMuted,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(12.dp))
+
+            if (tools.isEmpty()) {
+                Text(
+                    text = "This plugin contributes no MCP tools.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.heightIn(max = 360.dp)
+                ) {
+                    items(tools, key = { it.definition.name }) { tool ->
+                        val def = tool.definition
+                        val name = def.name
+                        val on = name in exposedNames
+                        val userDisabled = name in disabled
+                        val permissionDenied = !on && !userDisabled
+                        val perms = buildList {
+                            if (def.requiresAdmin) add("admin")
+                            addAll(def.requiredPermissions)
+                        }
+                        val desc = buildString {
+                            append(def.description)
+                            if (perms.isNotEmpty()) append("  ·  requires: ${perms.joinToString(", ")}")
+                            if (permissionDenied) append("  ·  🔒 no permission")
+                        }
+                        BossToggle(
+                            label = name,
+                            checked = on,
+                            onCheckedChange = { enable -> registry.setToolEnabled(name, enable) },
+                            description = desc,
+                            enabled = !permissionDenied
+                        )
+                    }
+                }
+            }
+
+            // Permission glossary: what each permission referenced above grants.
+            if (allPerms.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Permissions",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    allPerms.forEach { perm ->
+                        Row {
+                            Text(
+                                text = perm,
+                                color = BossThemeColors.AccentColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.width(140.dp)
+                            )
+                            Text(
+                                text = describe(perm),
+                                color = BossThemeColors.TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                BossSecondaryButton(text = "Close", onClick = onDismiss)
+            }
+        }
+    }
+}
+
+/**
+ * Plugin permissions dialog (opened from the lock button on installed/store
+ * cards). Shows the permissions a plugin requires to install/use — each with a
+ * description — plus any permissions the plugin itself defines.
+ *
+ * [requiredPermissions] null means the manifest is still being read (installed
+ * path); the store path passes the store item's list directly.
+ */
+@Composable
+private fun PermissionsDialog(
+    displayName: String,
+    requiredPermissions: List<String>?,
+    definedPermissions: List<DefinedPermissionData>,
+    permissionDescriptions: Map<String, String>,
+    /** Permissions used inside the plugin by its MCP tools (incl. "admin"). */
+    toolPermissions: List<String> = emptyList(),
+    onDismiss: () -> Unit
+) {
+    val definedByPlugin = remember(definedPermissions) {
+        definedPermissions.associate { it.name to it.description }
+    }
+    fun describe(perm: String): String =
+        definedByPlugin[perm]?.takeIf { it.isNotBlank() }
+            ?: permissionDescriptions[perm]?.takeIf { it.isNotBlank() }
+            ?: if (perm == "admin") "Administrator access — only admins can use this." else "No description available."
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .width(460.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(BossThemeColors.SurfaceColor)
+                .padding(20.dp)
+        ) {
+            Text(
+                text = "$displayName — permissions",
+                color = BossThemeColors.TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Permissions gate who can install and use this plugin (admins bypass).",
+                color = BossThemeColors.TextMuted,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(12.dp))
+
+            when {
+                requiredPermissions == null -> Text(
+                    "Reading manifest…",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+                requiredPermissions.isEmpty() -> Text(
+                    "This plugin requires no special permissions — any authenticated user can use it.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 13.sp
+                )
+                else -> {
+                    Text(
+                        text = "Required permissions",
+                        color = BossThemeColors.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        requiredPermissions.sorted().forEach { perm ->
+                            Row {
+                                Text(
+                                    text = perm,
+                                    color = BossThemeColors.AccentColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.width(140.dp)
+                                )
+                                Text(
+                                    text = describe(perm),
+                                    color = BossThemeColors.TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Permissions used inside the plugin — required by its MCP tools
+            // (beyond the plugin-level gate above).
+            val extraToolPerms = toolPermissions.filterNot { it in requiredPermissions.orEmpty() }.sorted()
+            if (extraToolPerms.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Used inside the plugin (MCP tools)",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    extraToolPerms.forEach { perm ->
+                        Row {
+                            Text(
+                                text = perm,
+                                color = BossThemeColors.AccentColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.width(140.dp)
+                            )
+                            Text(
+                                text = describe(perm),
+                                color = BossThemeColors.TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Permissions this plugin introduces to the system (from its manifest).
+            if (definedPermissions.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Defines permissions",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    definedPermissions.forEach { p ->
+                        Row {
+                            Text(
+                                text = p.name,
+                                color = BossThemeColors.AccentColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.width(140.dp)
+                            )
+                            Text(
+                                text = p.description.ifBlank { "No description available." },
+                                color = BossThemeColors.TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                BossSecondaryButton(text = "Close", onClick = onDismiss)
+            }
+        }
+    }
+}
+
 @Composable
 private fun VersionRow(
     version: PluginVersionInfo,
@@ -414,7 +726,10 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         versionSheet = state.versionSheet,
                         onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
                         onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
-                        onCloseVersions = { viewModel.closeVersions() }
+                        onCloseVersions = { viewModel.closeVersions() },
+                        mcpToolRegistry = viewModel.mcpToolRegistry,
+                        permissionDescriptions = state.permissionDescriptions,
+                        onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
                         plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
@@ -427,7 +742,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         canInstall = { item -> viewModel.canInstall(item) },
                         isStoreAdmin = state.isStoreAdmin,
                         isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins
+                        busyPlugins = state.busyPlugins,
+                        permissionDescriptions = state.permissionDescriptions
                     )
                     PluginManagerTab.UPDATES -> UpdatesTab(
                         updates = state.updates,
@@ -436,6 +752,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins
                     )
+                    PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
                         onFetchFromGitHub = { url, onProgress, onStatus, onSuccess, onError ->
                             viewModel.fetchFromGitHubForPublish(url, onProgress, onStatus, onSuccess, onError)
@@ -535,6 +852,11 @@ private fun PluginManagerHeader(
                 BossBadge(count = updateCount)
             }
         }
+        TabButton(
+            text = "MCP",
+            selected = currentTab == PluginManagerTab.MCP,
+            onClick = { onTabSelected(PluginManagerTab.MCP) }
+        )
         // Show Publish tab to store admins and users with plugins.admin.publish
         if (canPublish) {
             TabButton(
@@ -690,13 +1012,52 @@ private fun InstalledPluginsTab(
     versionSheet: VersionSheetState? = null,
     onShowVersions: (InstalledPluginState) -> Unit = {},
     onInstallVersion: (String, String) -> Unit = { _, _ -> },
-    onCloseVersions: () -> Unit = {}
+    onCloseVersions: () -> Unit = {},
+    mcpToolRegistry: McpToolRegistry? = null,
+    permissionDescriptions: Map<String, String> = emptyMap(),
+    onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) }
 ) {
     var showGitHubDialog by remember { mutableStateOf(false) }
     var gitHubUrl by remember { mutableStateOf("") }
 
     // Confirmation dialog state for uninstall
     var pluginToUninstall by remember { mutableStateOf<InstalledPluginState?>(null) }
+
+    // Per-plugin MCP tools, for the card's MCP button + dialog.
+    val allMcpTools = mcpToolRegistry?.allTools?.collectAsState()?.value ?: emptyList()
+    val mcpToolsByPlugin = remember(allMcpTools) { allMcpTools.groupBy { it.providerId } }
+    var mcpDialogPlugin by remember { mutableStateOf<InstalledPluginState?>(null) }
+
+    // Manifest of the plugin whose MCP dialog is open — carries the plugin-level
+    // requiredPermissions + plugin-defined permission descriptions.
+    var mcpDialogManifest by remember { mutableStateOf<ExtractedManifest?>(null) }
+    LaunchedEffect(mcpDialogPlugin) {
+        mcpDialogManifest = null
+        mcpDialogPlugin?.let { plugin -> onExtractManifest(plugin.jarPath) { mcpDialogManifest = it } }
+    }
+
+    // Permissions dialog (lock button on the card) — same manifest-read pattern.
+    var permDialogPlugin by remember { mutableStateOf<InstalledPluginState?>(null) }
+    var permDialogManifest by remember { mutableStateOf<ExtractedManifest?>(null) }
+    LaunchedEffect(permDialogPlugin) {
+        permDialogManifest = null
+        permDialogPlugin?.let { plugin -> onExtractManifest(plugin.jarPath) { permDialogManifest = it } }
+    }
+    permDialogPlugin?.let { plugin ->
+        PermissionsDialog(
+            displayName = plugin.displayName,
+            requiredPermissions = permDialogManifest?.requiredPermissions,
+            definedPermissions = permDialogManifest?.definedPermissions.orEmpty(),
+            permissionDescriptions = permissionDescriptions,
+            toolPermissions = mcpToolsByPlugin[plugin.pluginId].orEmpty().flatMap { t ->
+                buildList {
+                    if (t.definition.requiresAdmin) add("admin")
+                    addAll(t.definition.requiredPermissions)
+                }
+            }.distinct(),
+            onDismiss = { permDialogPlugin = null }
+        )
+    }
 
     // Version-history / downgrade sheet
     versionSheet?.let { sheet ->
@@ -706,6 +1067,20 @@ private fun InstalledPluginsTab(
             onInstall = { version -> onInstallVersion(sheet.pluginId, version) },
             onDismiss = onCloseVersions
         )
+    }
+
+    // Per-plugin MCP tools dialog (mirrors the versions sheet).
+    mcpDialogPlugin?.let { plugin ->
+        if (mcpToolRegistry != null) {
+            McpToolsDialog(
+                displayName = plugin.displayName,
+                tools = mcpToolsByPlugin[plugin.pluginId].orEmpty(),
+                registry = mcpToolRegistry,
+                manifest = mcpDialogManifest,
+                permissionDescriptions = permissionDescriptions,
+                onDismiss = { mcpDialogPlugin = null }
+            )
+        }
     }
 
     // Show confirmation dialog for uninstall
@@ -841,7 +1216,10 @@ private fun InstalledPluginsTab(
                         onUpdate = { onUpdate(plugin.pluginId) },
                         onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
                         onShowVersions = { onShowVersions(plugin) },
-                        isLoading = plugin.pluginId in busyPlugins
+                        isLoading = plugin.pluginId in busyPlugins,
+                        mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
+                        onShowMcp = { mcpDialogPlugin = plugin },
+                        onShowPermissions = { permDialogPlugin = plugin }
                     )
                 }
             }
@@ -858,7 +1236,11 @@ private fun InstalledPluginCard(
     onUpdate: () -> Unit,
     onOpenHomepage: () -> Unit,
     onShowVersions: () -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    /** Number of MCP tools this plugin contributes; 0 hides the MCP button. */
+    mcpToolCount: Int = 0,
+    onShowMcp: () -> Unit = {},
+    onShowPermissions: () -> Unit = {}
 ) {
     val hasHomepage = !plugin.url.isNullOrBlank()
 
@@ -965,6 +1347,45 @@ private fun InstalledPluginCard(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
+                        .clickable(enabled = !isLoading) { onShowPermissions() }
+                        .padding(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Permissions",
+                        modifier = Modifier.size(15.dp),
+                        tint = BossThemeColors.TextSecondary
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                if (mcpToolCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(enabled = !isLoading) { onShowMcp() }
+                            .padding(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Build,
+                                contentDescription = "MCP tools",
+                                modifier = Modifier.size(14.dp),
+                                tint = BossThemeColors.AccentColor
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "$mcpToolCount",
+                                color = BossThemeColors.AccentColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
                         .clickable(enabled = !isLoading) { onShowVersions() }
                         .padding(8.dp)
                 ) {
@@ -1017,10 +1438,24 @@ private fun AvailablePluginsTab(
     canInstall: (PluginStoreItem) -> Boolean = { true },
     isStoreAdmin: Boolean,
     isLoading: Boolean,
-    busyPlugins: Set<String> = emptySet()
+    busyPlugins: Set<String> = emptySet(),
+    permissionDescriptions: Map<String, String> = emptyMap()
 ) {
     // Confirmation dialog state for delete from store
     var pluginToDelete by remember { mutableStateOf<PluginStoreItem?>(null) }
+
+    // Permissions dialog for a store item (its requiredPermissions ship with
+    // the store listing — no manifest read needed).
+    var permDialogItem by remember { mutableStateOf<PluginStoreItem?>(null) }
+    permDialogItem?.let { item ->
+        PermissionsDialog(
+            displayName = item.displayName,
+            requiredPermissions = item.requiredPermissions,
+            definedPermissions = emptyList(),
+            permissionDescriptions = permissionDescriptions,
+            onDismiss = { permDialogItem = null }
+        )
+    }
 
     // Show delete-from-store dialog. When a delete password is baked into the build, require it;
     // otherwise fall back to a plain confirmation (e.g. dev builds with no hash configured).
@@ -1087,7 +1522,8 @@ private fun AvailablePluginsTab(
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
                     canInstall = canInstall(plugin),
                     isStoreAdmin = isStoreAdmin,
-                    isLoading = plugin.pluginId in busyPlugins
+                    isLoading = plugin.pluginId in busyPlugins,
+                    onShowPermissions = { permDialogItem = plugin }
                 )
             }
         }
@@ -1105,7 +1541,8 @@ private fun AvailablePluginCard(
     onOpenHomepage: () -> Unit,
     canInstall: Boolean = true,
     isStoreAdmin: Boolean,
-    isLoading: Boolean
+    isLoading: Boolean,
+    onShowPermissions: () -> Unit = {}
 ) {
     val hasHomepage = plugin.url.isNotBlank()
 
@@ -1183,6 +1620,25 @@ private fun AvailablePluginCard(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Permissions button on every store card — the dialog explains
+                // what's required (or that the plugin is open to all users).
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onShowPermissions() }
+                        .padding(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Permissions",
+                        modifier = Modifier.size(15.dp),
+                        tint = if (plugin.requiredPermissions.isNotEmpty())
+                            BossThemeColors.WarningColor
+                        else
+                            BossThemeColors.TextSecondary
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
                 // System / library plugins (type=service, e.g. microkernel
                 // runtime) ship through the plugin store but aren't user-
                 // installable — the host's auto-installer fetches them on
@@ -1398,6 +1854,227 @@ private fun UpdateCard(
                 text = "Update",
                 onClick = onUpdate,
                 enabled = !isLoading
+            )
+        }
+    }
+}
+
+/**
+ * MCP Tools tab — lists every MCP tool contributed by an active plugin, grouped
+ * by plugin, each with an enable/disable switch. Disabling a tool removes it
+ * from the live `boss` MCP server (persisted). Built-in terminal tools are
+ * managed separately in Terminal settings.
+ */
+@Composable
+private fun McpToolsTab(viewModel: PluginManagerViewModel) {
+    val registry = viewModel.mcpToolRegistry
+    if (registry == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            BossEmptyState(
+                icon = Icons.Default.Extension,
+                message = "MCP tooling unavailable",
+                description = "The host does not expose an MCP tool registry."
+            )
+        }
+        return
+    }
+
+    val allTools by registry.allTools.collectAsState()
+    val disabled by registry.disabledToolNames.collectAsState()
+    val exposed by registry.tools.collectAsState()
+    val exposedNames = remember(exposed) { exposed.map { it.definition.name }.toSet() }
+    val state by viewModel.state.collectAsState()
+    val nameById = remember(state.installedPlugins) {
+        state.installedPlugins.associate { it.pluginId to it.displayName }
+    }
+
+    // Filter tools by the header search query (name, description, or plugin).
+    val query = state.searchQuery.trim()
+    val visibleTools = remember(allTools, query, nameById) {
+        if (query.isEmpty()) allTools
+        else allTools.filter { t ->
+            t.definition.name.contains(query, ignoreCase = true) ||
+                t.definition.description.contains(query, ignoreCase = true) ||
+                t.providerId.contains(query, ignoreCase = true) ||
+                (nameById[t.providerId]?.contains(query, ignoreCase = true) == true)
+        }
+    }
+    val groups = remember(visibleTools) { visibleTools.groupBy { it.providerId }.entries.toList() }
+
+    // One scrollable surface for the whole tab — header, server controls, and
+    // tool groups all scroll together.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item(key = "mcp-header") {
+            Column {
+                Text(
+                    text = "Plugin MCP Tools",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Tools contributed by active plugins, exposed to in-terminal agents as " +
+                        "mcp__boss__*. Toggle a tool off to hide it from agents (built-in terminal " +
+                        "tools are managed in Terminal settings). Use the search bar above to filter tools.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+        }
+
+        // Server on/off + CLI attach. Resolved per-render: terminal-tab (which
+        // provides this API) loads after plugin-manager, so it starts null.
+        item(key = "mcp-server") {
+            McpServerSection(viewModel.mcpServerControllerProvider())
+        }
+
+        if (visibleTools.isEmpty()) {
+            item(key = "mcp-empty") {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (query.isEmpty()) {
+                        BossEmptyState(
+                            icon = Icons.Default.List,
+                            message = "No plugin MCP tools",
+                            description = "Tools appear here when a plugin that provides them is active."
+                        )
+                    } else {
+                        BossEmptyState(
+                            icon = Icons.Default.List,
+                            message = "No tools match \"$query\"",
+                            description = "Try a different search — tools match by name, description, or plugin."
+                        )
+                    }
+                }
+            }
+        } else {
+            items(groups, key = { it.key }) { (providerId, tools) ->
+                    val display = nameById[providerId] ?: providerId.substringAfterLast('.')
+                    val onCount = tools.count { it.definition.name in exposedNames }
+                    BossSection(
+                        title = display,
+                        description = "$onCount/${tools.size} on • $providerId"
+                    ) {
+                        tools.forEach { tool ->
+                            val def = tool.definition
+                            val name = def.name
+                            val on = name in exposedNames
+                            val userDisabled = name in disabled
+                            val permissionDenied = !on && !userDisabled
+                            val perms = buildList {
+                                if (def.requiresAdmin) add("admin")
+                                addAll(def.requiredPermissions)
+                            }
+                            val desc = buildString {
+                                append(def.description)
+                                if (perms.isNotEmpty()) append("  ·  requires: ${perms.joinToString(", ")}")
+                                if (permissionDenied) append("  ·  🔒 no permission")
+                            }
+                            BossToggle(
+                                label = name,
+                                checked = on,
+                                onCheckedChange = { enable -> registry.setToolEnabled(name, enable) },
+                                description = desc,
+                                enabled = !permissionDenied
+                            )
+                        }
+                    }
+            }
+        }
+    }
+}
+
+/**
+ * MCP server controls: on/off toggle plus one-click attach of the `boss`
+ * endpoint to AI CLIs (Claude Code, Codex, Gemini, OpenCode). Backed by the
+ * terminal-tab plugin's [McpServerController]; renders a hint when that plugin
+ * hasn't loaded (yet).
+ */
+@Composable
+private fun McpServerSection(controller: McpServerController?) {
+    if (controller == null) {
+        BossSection(
+            title = "MCP Server",
+            description = "Server controls unavailable — the Terminal Tab plugin (which hosts the MCP server) is not loaded."
+        ) {}
+        return
+    }
+
+    val serverState by controller.state.collectAsState()
+    val targets by controller.attachTargets.collectAsState()
+    val scope = rememberCoroutineScope()
+    var attachStatus by remember { mutableStateOf<String?>(null) }
+    var attachingKey by remember { mutableStateOf<String?>(null) }
+
+    BossSection(
+        title = "MCP Server",
+        description = if (serverState.running) {
+            "${serverState.serverName} — running on 127.0.0.1:${serverState.port}"
+        } else {
+            "${serverState.serverName} — stopped"
+        }
+    ) {
+        BossToggle(
+            label = "Enable MCP server",
+            checked = serverState.enabled,
+            onCheckedChange = { controller.setEnabled(it) },
+            description = "Serves mcp__${serverState.serverName}__* tools to AI agents over loopback."
+        )
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Attach to AI CLIs",
+            color = BossThemeColors.TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(Modifier.height(6.dp))
+        // Single inline row of attach buttons; scrolls horizontally if the
+        // panel is too narrow to fit all four.
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            targets.forEach { t ->
+                BossSecondaryButton(
+                    text = (if (t.attached) "✓ " else "") + t.displayName,
+                    onClick = {
+                        attachingKey = t.key
+                        attachStatus = "Attaching ${t.displayName}…"
+                        scope.launch {
+                            val outcome = try {
+                                controller.attach(t.key)
+                            } catch (e: Exception) {
+                                ai.rever.boss.plugin.api.McpAttachOutcome(false, "Attach failed: ${e.message}")
+                            }
+                            attachStatus = outcome.message
+                            attachingKey = null
+                        }
+                    },
+                    enabled = serverState.running && attachingKey == null
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        attachStatus?.let { status ->
+            Text(
+                text = status,
+                color = BossThemeColors.TextSecondary,
+                fontSize = 11.sp
+            )
+        }
+        if (!serverState.running) {
+            Text(
+                text = "Turn the server on to attach CLIs.",
+                color = BossThemeColors.TextSecondary,
+                fontSize = 11.sp
             )
         }
     }
