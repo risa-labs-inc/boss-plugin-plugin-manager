@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**Plugin Manager** (`ai.rever.boss.plugin.dynamic.pluginmanager`) is a dynamic plugin for the BOSS desktop application.
+**Toolbox** (formerly "Plugin Manager", `ai.rever.boss.plugin.dynamic.pluginmanager`) is a dynamic plugin for the BOSS desktop application.
 
-Self-contained plugin manager with full plugin store, install, uninstall, and update capabilities
+Toolbox — self-contained plugin store with install, uninstall, and update capabilities. Only the user-facing name is "Toolbox"; the plugin ID, panel ID (`plugin-manager`), package, repo, and JAR artifact names intentionally keep the old identifiers so existing installs and the host's store bootstrap keep working.
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.pluginmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin`
