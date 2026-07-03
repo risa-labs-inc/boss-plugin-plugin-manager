@@ -5,7 +5,7 @@ import ai.rever.boss.plugin.api.Panel.Companion.bottom
 import ai.rever.boss.plugin.api.PanelId
 import ai.rever.boss.plugin.api.PanelInfo
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.HomeRepairService
 
 /**
  * Plugin Manager panel info for dynamic plugin.
@@ -16,6 +16,6 @@ import androidx.compose.material.icons.filled.Extension
 object PluginManagerPanelInfo : PanelInfo {
     override val id = PanelId("plugin-manager", 6)
     override val displayName = "Toolbox"
-    override val icon = Icons.Default.Extension
+    override val icon = Icons.Default.HomeRepairService
     override val defaultSlotPosition = left.bottom
 }
