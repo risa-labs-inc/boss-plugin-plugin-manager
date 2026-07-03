@@ -15,7 +15,7 @@ import androidx.compose.material.icons.filled.Extension
  */
 object PluginManagerPanelInfo : PanelInfo {
     override val id = PanelId("plugin-manager", 6)
-    override val displayName = "Plugin Manager"
+    override val displayName = "Toolbox"
     override val icon = Icons.Default.Extension
     override val defaultSlotPosition = left.bottom
 }

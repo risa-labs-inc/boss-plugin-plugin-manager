@@ -85,7 +85,7 @@ tasks.register<Jar>("buildPluginJar") {
 
     manifest {
         attributes(
-            "Implementation-Title" to "BOSS Plugin Manager",
+            "Implementation-Title" to "BOSS Toolbox",
             "Implementation-Version" to version,
             "Main-Class" to "ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin"
         )

@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "pluginId": "ai.rever.boss.plugin.dynamic.pluginmanager",
-  "displayName": "Plugin Manager",
+  "displayName": "Toolbox",
   "version": "1.4.24",
   "apiVersion": "1.0.21",
   "minBossVersion": "9.2.20",
@@ -12,11 +12,11 @@
   "canUnload": false,
   "panel": {
     "id": "plugin-manager",
-    "displayName": "Plugin Manager",
+    "displayName": "Toolbox",
     "position": "left",
     "order": 6
   },
-  "description": "Self-contained plugin manager with full plugin store, install, uninstall, and update capabilities",
+  "description": "Toolbox — self-contained plugin store with install, uninstall, and update capabilities",
   "author": "Risa Labs",
   "url": "https://github.com/risa-labs-inc/boss-plugin-plugin-manager"
 }
