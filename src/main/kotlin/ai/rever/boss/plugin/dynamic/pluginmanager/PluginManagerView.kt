@@ -2043,6 +2043,52 @@ private fun McpServerSection(controller: McpServerController?) {
             description = "Serves mcp__${serverState.serverName}__* tools to AI agents over loopback."
         )
 
+        Spacer(Modifier.height(10.dp))
+        // Port editor. Seeded from the live state (bound port while running,
+        // configured port otherwise) and re-seeded after an apply once the
+        // server rebinds. setPort persists + reconciles server-side; attached
+        // CLIs re-register on the new endpoint automatically.
+        var portText by remember(serverState.port) {
+            mutableStateOf(serverState.port?.toString() ?: "")
+        }
+        val parsedPort = portText.toIntOrNull()
+        val portValid = parsedPort != null && parsedPort in 1024..65535
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            BossTextField(
+                value = portText,
+                onValueChange = { portText = it.filter(Char::isDigit).take(5) },
+                label = "Port",
+                placeholder = "7677",
+                modifier = Modifier.width(140.dp)
+            )
+            BossSecondaryButton(
+                text = "Apply",
+                onClick = {
+                    if (parsedPort != null) {
+                        attachStatus = try {
+                            controller.setPort(parsedPort)
+                            "Port set to $parsedPort — server restarting; attached CLIs re-register automatically."
+                        } catch (e: LinkageError) {
+                            // Host or terminal-tab predates McpServerController.setPort
+                            // (NoSuchMethodError / AbstractMethodError) — degrade gracefully.
+                            "Changing the port here needs updated BOSS and Terminal Tab versions."
+                        }
+                    }
+                },
+                enabled = portValid && parsedPort != serverState.port
+            )
+        }
+        if (portText.isNotEmpty() && !portValid) {
+            Text(
+                text = "Port must be between 1024 and 65535.",
+                color = BossThemeColors.TextSecondary,
+                fontSize = 11.sp
+            )
+        }
+
         Spacer(Modifier.height(8.dp))
         Text(
             text = "Attach to AI CLIs",
