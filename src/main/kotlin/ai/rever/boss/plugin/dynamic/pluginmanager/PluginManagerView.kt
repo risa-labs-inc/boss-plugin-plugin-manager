@@ -754,6 +754,10 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
+                        toolCreatorInstalled = state.installedPlugins.any {
+                            it.pluginId == PluginManagerViewModel.TOOL_CREATOR_PLUGIN_ID
+                        },
+                        onOpenToolCreator = { viewModel.openToolCreator() },
                         onFetchFromGitHub = { url, onProgress, onStatus, onSuccess, onError ->
                             viewModel.fetchFromGitHubForPublish(url, onProgress, onStatus, onSuccess, onError)
                         },
@@ -857,10 +861,11 @@ private fun PluginManagerHeader(
             selected = currentTab == PluginManagerTab.MCP,
             onClick = { onTabSelected(PluginManagerTab.MCP) }
         )
-        // Show Publish tab to store admins and users with plugins.admin.publish
+        // Show Create tab to store admins and users with plugins.admin.publish.
+        // Hosts creating (Tool Creator) + publishing to the store.
         if (canPublish) {
             TabButton(
-                text = "Publish",
+                text = "Create",
                 selected = currentTab == PluginManagerTab.PUBLISH,
                 onClick = { onTabSelected(PluginManagerTab.PUBLISH) }
             )
@@ -2151,6 +2156,8 @@ private enum class JarSource {
 
 @Composable
 private fun PublishTab(
+    toolCreatorInstalled: Boolean,
+    onOpenToolCreator: () -> Unit,
     onFetchFromGitHub: (
         url: String,
         onProgress: (Float) -> Unit,
@@ -2210,6 +2217,29 @@ private fun PublishTab(
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
+        BossSection(
+            title = "Create a new plugin",
+            description = "Scaffold a new BOSS plugin and build it with an AI coding agent"
+        ) {
+            Text(
+                text = if (toolCreatorInstalled) {
+                    "Opens Tool Creator: name your tool, pick permissions and a CLI (Claude Code, Codex, Gemini, OpenCode), and it scaffolds the repo + CI and starts building."
+                } else {
+                    "Tool Creator isn't installed yet. Install it from the store to scaffold new plugins from here."
+                },
+                fontSize = 13.sp,
+                color = BossThemeColors.TextSecondary,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+            BossPrimaryButton(
+                text = if (toolCreatorInstalled) "Create a new plugin…" else "Install Tool Creator",
+                onClick = onOpenToolCreator,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         BossSection(
             title = "Publish Plugin",
             description = "Upload your plugin to the BOSS Plugin Store"
