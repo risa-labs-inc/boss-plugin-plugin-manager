@@ -55,7 +55,10 @@ class PluginManagerComponent(
         mcpServerControllerProvider = {
             context.getPluginAPI(ai.rever.boss.plugin.api.McpServerController::class.java)
         },
-        roleManagementProvider = context.roleManagementProvider
+        roleManagementProvider = context.roleManagementProvider,
+        panelEventProvider = context.panelEventProvider,
+        applicationEventBus = context.applicationEventBus,
+        windowId = context.windowId
     )
 
     init {

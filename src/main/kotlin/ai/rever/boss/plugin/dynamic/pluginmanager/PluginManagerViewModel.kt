@@ -1,8 +1,12 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.api.ApplicationEventBus
+import ai.rever.boss.plugin.api.CustomPluginEvent
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.McpToolRegistry
+import ai.rever.boss.plugin.api.PanelEventProvider
+import ai.rever.boss.plugin.api.PanelId
 import ai.rever.boss.plugin.api.RoleManagementProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
@@ -106,7 +110,13 @@ class PluginManagerViewModel(
      */
     val mcpServerControllerProvider: () -> McpServerController? = { null },
     /** Role management provider for the permission-description glossary; null for non-admins. */
-    private val roleManagementProvider: RoleManagementProvider? = null
+    private val roleManagementProvider: RoleManagementProvider? = null,
+    /** Reveals a sidebar panel by id (host >= 9.2.33); used to launch Tool Creator from the Create tab. */
+    private val panelEventProvider: PanelEventProvider? = null,
+    /** Event bus for signaling Tool Creator to open its New Tool dialog. */
+    private val applicationEventBus: ApplicationEventBus? = null,
+    /** This window's id, needed to target panel-open events. */
+    private val windowId: String? = null
 ) {
     // Child scope of the plugin scope: cancelled in dispose() so collectors of a
     // closed panel don't leak, while plugin unload still cancels everything.
@@ -304,6 +314,37 @@ class PluginManagerViewModel(
      * plugin's requiredPermissions; empty = open). Used to gate the Install button.
      */
     fun canInstall(item: PluginStoreItem): Boolean = apiImpl.canInstall(item.requiredPermissions)
+
+    /** Whether the Tool Creator plugin is currently installed. */
+    fun isToolCreatorInstalled(): Boolean =
+        _state.value.installedPlugins.any { it.pluginId == TOOL_CREATOR_PLUGIN_ID }
+
+    /**
+     * Launch Tool Creator's New Tool flow: signal it to open its dialog, then
+     * reveal its sidebar panel. Falls back to installing it from the store if
+     * it isn't installed yet.
+     */
+    fun openToolCreator() {
+        if (!isToolCreatorInstalled()) {
+            installFromRemote(TOOL_CREATOR_PLUGIN_ID)
+            return
+        }
+        scope.launch {
+            applicationEventBus?.publish(
+                CustomPluginEvent(
+                    sourcePluginId = PluginManagerCore.PLUGIN_ID,
+                    eventName = TOOL_CREATOR_OPEN_EVENT,
+                )
+            )
+            val wid = windowId
+            if (panelEventProvider != null && wid != null) {
+                panelEventProvider.openPanel(
+                    PanelId(panelId = TOOL_CREATOR_PANEL_ID, defaultOrder = 0, pluginId = "ai.rever.boss"),
+                    wid,
+                )
+            }
+        }
+    }
 
     fun installFromRemote(pluginId: String) {
         scope.launch {
@@ -722,5 +763,12 @@ class PluginManagerViewModel(
      */
     fun dispose() {
         scope.cancel()
+    }
+
+    companion object {
+        const val TOOL_CREATOR_PLUGIN_ID = "ai.rever.boss.plugin.dynamic.toolcreator"
+        const val TOOL_CREATOR_PANEL_ID = "tool-creator"
+        /** Must match ToolCreatorDynamicPlugin.OPEN_NEW_TOOL_EVENT. */
+        const val TOOL_CREATOR_OPEN_EVENT = "open-new-tool"
     }
 }
