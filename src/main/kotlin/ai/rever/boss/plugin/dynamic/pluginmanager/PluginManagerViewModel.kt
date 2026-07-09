@@ -533,7 +533,12 @@ class PluginManagerViewModel(
             val result = api.installVersion(pluginId, version)
             val base = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
             _state.value = when (result) {
-                is InstallResult.Success -> base.copy(versionSheet = null)
+                is InstallResult.Success -> base.copy(
+                    versionSheet = null,
+                    // Version changes of system/locked plugins land on disk only;
+                    // hot-reload (or prompt) so the chosen version actually runs.
+                    postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
+                )
                 is InstallResult.DownloadFailed -> base.copy(error = "Install failed: ${result.error}")
                 is InstallResult.LoadFailed -> base.copy(error = "Install failed: ${result.error}")
                 else -> base
@@ -571,12 +576,27 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Build the post-update prompt for the given just-updated plugins, or null if
-     * nothing needs resetting. Decision logic is shared with the background
-     * update toast flow via [buildUpdateApplyPlan].
+     * Apply what can be applied and build the post-update prompt for the given
+     * just-updated plugins, or null if nothing further is needed. Decision
+     * logic is shared with the background update toast flow via
+     * [buildUpdateApplyPlan]. Hot-reloadable system/locked plugins are
+     * reloaded here directly (no prompt); only a failed reload falls back to
+     * the restart prompt.
      */
-    private fun buildPostUpdatePrompt(pluginIds: List<String>): PostUpdatePrompt? {
+    private suspend fun buildPostUpdatePrompt(pluginIds: List<String>): PostUpdatePrompt? {
         return when (val plan = buildUpdateApplyPlan(pluginIds, loaderDelegate)) {
+            is UpdateApplyPlan.Reload -> {
+                val failed = plan.pluginIds.filter { id ->
+                    runCatching { loaderDelegate?.reloadPlugin(id) }.getOrNull() == null
+                }
+                if (failed.isEmpty()) null
+                else PostUpdatePrompt(
+                    pluginIds = failed,
+                    displayName = plan.displayName,
+                    needsRestart = true,
+                    instanceCount = 0
+                )
+            }
             is UpdateApplyPlan.Restart -> PostUpdatePrompt(
                 pluginIds = plan.pluginIds,
                 displayName = plan.displayName,

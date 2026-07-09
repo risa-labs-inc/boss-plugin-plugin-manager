@@ -144,10 +144,28 @@ class UpdatePromptService(
         }
     }
 
-    /** After a successful update, surface the restart/reset step (if any) as a toast. */
+    /** After a successful update, apply or surface the remaining step (if any) as a toast. */
     private fun showApplyFollowUp(succeeded: List<String>) {
         val notifications = notifications ?: return
         when (val plan = buildUpdateApplyPlan(succeeded, loaderDelegate)) {
+            is UpdateApplyPlan.Reload -> scope.launch {
+                val failed = plan.pluginIds.filter { id ->
+                    runCatching { loaderDelegate?.reloadPlugin(id) }.getOrNull() == null
+                }
+                if (failed.isEmpty()) {
+                    notifications.showSuccess("${plan.displayName} updated")
+                } else {
+                    notifications.showToast(
+                        message = "${plan.displayName} updated on disk but could not be " +
+                            "hot-reloaded. Restart BOSS to apply.",
+                        type = NotificationType.WARNING,
+                        duration = NotificationDuration.INDEFINITE,
+                        title = "Update installed",
+                        actionLabel = "Restart BOSS",
+                        onAction = { loaderDelegate?.restartApplication() }
+                    )
+                }
+            }
             is UpdateApplyPlan.Restart -> notifications.showToast(
                 message = "${plan.displayName} updated. Restart BOSS to apply.",
                 type = NotificationType.SUCCESS,
