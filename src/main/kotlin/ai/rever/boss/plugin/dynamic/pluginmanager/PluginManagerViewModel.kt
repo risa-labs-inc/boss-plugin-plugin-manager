@@ -59,19 +59,24 @@ data class PluginManagerState(
 
 /**
  * Prompt shown after a successful update so the new version actually takes effect.
- * Either offers to reset the plugin's running instances (close their tabs), or — for
- * plugins that only apply on a full restart (system/locked / JAR-swap) — to restart BOSS.
+ * Offers to reset the plugin's running instances (close their tabs), to hot-swap the
+ * API layer (API plugin update — reloads every plugin), or — for updates only a full
+ * restart can apply — to restart BOSS.
  */
 data class PostUpdatePrompt(
-    /** Plugins to reset (closed) when [needsRestart] is false. */
+    /** Plugins the confirm action applies to. */
     val pluginIds: List<String>,
     /** "<name>" for a single plugin, or "N plugins" for update-all. */
     val displayName: String,
-    /** True → offer "Restart BOSS"; false → offer to reset [instanceCount] running instances. */
-    val needsRestart: Boolean,
-    /** Total open instances that would be reset (only meaningful when !needsRestart). */
-    val instanceCount: Int
-)
+    /** Which apply action to offer. */
+    val kind: Kind,
+    /** Total open instances that would be reset (only meaningful for [Kind.RESET]). */
+    val instanceCount: Int = 0,
+    /** On-disk JAR of the updated API plugin (only set for [Kind.API_SWAP]). */
+    val apiJarPath: String? = null
+) {
+    enum class Kind { RESTART, RESET, API_SWAP }
+}
 
 /**
  * State for the per-plugin version-history sheet (Update / Downgrade + IPC
@@ -593,20 +598,24 @@ class PluginManagerViewModel(
                 else PostUpdatePrompt(
                     pluginIds = failed,
                     displayName = plan.displayName,
-                    needsRestart = true,
-                    instanceCount = 0
+                    kind = PostUpdatePrompt.Kind.RESTART
                 )
             }
+            is UpdateApplyPlan.SwapApiLayer -> PostUpdatePrompt(
+                pluginIds = pluginIds,
+                displayName = plan.displayName,
+                kind = PostUpdatePrompt.Kind.API_SWAP,
+                apiJarPath = plan.jarPath
+            )
             is UpdateApplyPlan.Restart -> PostUpdatePrompt(
                 pluginIds = plan.pluginIds,
                 displayName = plan.displayName,
-                needsRestart = true,
-                instanceCount = 0
+                kind = PostUpdatePrompt.Kind.RESTART
             )
             is UpdateApplyPlan.Reset -> PostUpdatePrompt(
                 pluginIds = plan.pluginIds,
                 displayName = plan.displayName,
-                needsRestart = false,
+                kind = PostUpdatePrompt.Kind.RESET,
                 instanceCount = plan.instanceCount
             )
             is UpdateApplyPlan.None -> null
@@ -628,6 +637,19 @@ class PluginManagerViewModel(
     fun confirmRestartApplication() {
         _state.value = _state.value.copy(postUpdatePrompt = null)
         loaderDelegate?.restartApplication()
+    }
+
+    /** Confirm the post-update prompt: hot-swap the API layer (reloads every plugin). */
+    fun confirmApiSwap() {
+        val prompt = _state.value.postUpdatePrompt ?: return
+        _state.value = _state.value.copy(postUpdatePrompt = null)
+        val jarPath = prompt.apiJarPath ?: return
+        scope.launch {
+            // Loading the newer api jar triggers the host's detached API-layer
+            // swap, which unloads THIS plugin mid-flight — the reloaded Toolbox
+            // comes back fresh, so there is no state to update here.
+            runCatching { loaderDelegate?.loadPlugin(jarPath) }
+        }
     }
 
     /** Dismiss the post-update prompt without resetting/restarting. */

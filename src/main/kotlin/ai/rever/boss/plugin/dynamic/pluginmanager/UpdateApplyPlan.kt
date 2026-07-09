@@ -22,22 +22,35 @@ sealed class UpdateApplyPlan {
      */
     data class Reload(val pluginIds: List<String>, val displayName: String) : UpdateApplyPlan()
 
+    /**
+     * The API plugin's new JAR is on disk; loading it hot-swaps the process-wide
+     * API layer — every plugin unloads and reloads (open plugin tabs/panels
+     * reset), which also applies any other pending on-disk updates. Disruptive
+     * enough to sit behind a prompt rather than auto-run.
+     */
+    data class SwapApiLayer(val jarPath: String, val displayName: String) : UpdateApplyPlan()
+
     /** Nothing further needed. */
     object None : UpdateApplyPlan()
 }
+
+/** The plugin whose JAR carries the shared API layer. */
+const val API_PLUGIN_ID = "ai.rever.boss.plugin.api"
 
 /**
  * Plugins a running Toolbox cannot hot-reload, so their updates only apply on
  * a full restart:
  * - Toolbox itself: the force-unload disposes this plugin — cancelling the very
  *   coroutine driving the reload — before the new version could be loaded.
- * - The API plugin: applying it means swapping the process-wide API layer,
- *   which unloads every plugin including Toolbox (same self-teardown problem).
+ *   (Goes away once the host runs reloads in a detached scope, like the #848
+ *   API swap does; gate on host version before removing.)
+ * - The API plugin: normally offered as [UpdateApplyPlan.SwapApiLayer]; kept
+ *   here as the fallback when its loaded entry can't be resolved.
  * - The microkernel runtime: a classpath component, never a loadable plugin.
  */
 private val RESTART_ONLY_PLUGIN_IDS = setOf(
     "ai.rever.boss.plugin.dynamic.pluginmanager",
-    "ai.rever.boss.plugin.api",
+    API_PLUGIN_ID,
     "ai.rever.boss.microkernel.runtime",
 )
 
@@ -58,6 +71,19 @@ fun buildUpdateApplyPlan(pluginIds: List<String>, delegate: PluginLoaderDelegate
     val loaded = delegate.getLoadedPlugins().associateBy { it.pluginId }
 
     fun isLocked(id: String) = loaded[id]?.let { it.isSystemPlugin || !it.canUnload } ?: false
+
+    // An API-plugin update whose JAR only landed on disk: offer the API-layer
+    // swap. It reloads every plugin from its current JAR, so it also applies
+    // every other pending update in this batch — no need to plan them separately.
+    if (API_PLUGIN_ID in pluginIds && isLocked(API_PLUGIN_ID)) {
+        val api = loaded.getValue(API_PLUGIN_ID)
+        if (api.jarPath.isNotBlank()) {
+            return UpdateApplyPlan.SwapApiLayer(
+                jarPath = api.jarPath,
+                displayName = api.displayName
+            )
+        }
+    }
 
     val restartNeeded = pluginIds.filter { it in RESTART_ONLY_PLUGIN_IDS && isLocked(it) }
     if (restartNeeded.isNotEmpty()) {

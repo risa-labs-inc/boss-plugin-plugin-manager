@@ -166,6 +166,23 @@ class UpdatePromptService(
                     )
                 }
             }
+            is UpdateApplyPlan.SwapApiLayer -> notifications.showToast(
+                message = "${plan.displayName} updated. Applying hot-swaps the API layer — " +
+                    "all plugins reload and their open tabs reset.",
+                type = NotificationType.SUCCESS,
+                duration = NotificationDuration.INDEFINITE,
+                title = "Update installed",
+                actionLabel = "Apply Now",
+                onAction = {
+                    scope.launch {
+                        // Loading the newer api jar triggers the host's detached
+                        // API-layer swap, which unloads THIS plugin mid-flight —
+                        // no outcome toast is possible; the visible full-plugin
+                        // reload is the feedback.
+                        runCatching { loaderDelegate?.loadPlugin(plan.jarPath) }
+                    }
+                }
+            )
             is UpdateApplyPlan.Restart -> notifications.showToast(
                 message = "${plan.displayName} updated. Restart BOSS to apply.",
                 type = NotificationType.SUCCESS,
