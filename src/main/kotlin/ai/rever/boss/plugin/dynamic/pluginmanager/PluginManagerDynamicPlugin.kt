@@ -48,6 +48,13 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
         // Start realtime + background update prompts
         core.start()
 
+        // Bottom-bar download/update progress. Guarded: hosts/API layers older
+        // than the status-bar registry throw here (missing class/method) — the
+        // widget is simply skipped and everything else keeps working.
+        runCatching {
+            context.registerStatusBarItem(DownloadStatusBarItem(core.apiImpl.downloadTracker))
+        }
+
         // Register the Plugin Manager panel
         context.panelRegistry.registerPanel(PluginManagerPanelInfo) { ctx, panelInfo ->
             PluginManagerComponent(ctx, panelInfo, context, core)
@@ -57,6 +64,9 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
     override fun dispose() {
         core?.dispose()
         core = null
+        // The host also auto-unregisters status-bar items on unload; same
+        // guard as registration for pre-status-bar API layers.
+        runCatching { pluginContext?.unregisterStatusBarItem(DownloadStatusBarItem.ITEM_ID) }
         // Unregister panel when plugin is unloaded
         pluginContext?.panelRegistry?.unregisterPanel(PluginManagerPanelInfo.id)
         pluginContext = null

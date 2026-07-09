@@ -2,6 +2,8 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
+import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadKind
+import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadProgressTracker
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
@@ -82,6 +84,9 @@ class PluginManagerAPIImpl(
     // Realtime client for live updates
     val realtimeClient = PluginStoreRealtimeClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     val storeChanges: SharedFlow<StoreChangeEvent> = realtimeClient.storeChanges
+
+    /** Live install/update download progress, surfaced in the host status bar. */
+    val downloadTracker = DownloadProgressTracker()
 
     fun connectRealtime() = realtimeClient.connect()
     fun disconnectRealtime() = realtimeClient.disconnect()
@@ -327,34 +332,46 @@ class PluginManagerAPIImpl(
 
     override suspend fun installVersion(pluginId: String, version: String): InstallResult = withContext(Dispatchers.IO) {
         val existing = getInstalledPlugin(pluginId)
+        val kind = if (existing != null) DownloadKind.UPDATE else DownloadKind.INSTALL
+        withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), kind) {
+            installVersionInternal(pluginId, version, existing, progressKey = pluginId)
+        }
+    }
+
+    private suspend fun installVersionInternal(
+        pluginId: String,
+        version: String,
+        existing: PluginInfo?,
+        progressKey: String
+    ): InstallResult {
         val previousVersion = existing?.version
 
         // System/locked plugins: replace the on-disk JAR for the requested
         // version; applies after restart. (The IPC gate lives in the download.)
         if (existing != null && (existing.isSystemPlugin || !existing.canUnload)) {
-            val result = downloadUpdateForLockedPlugin(pluginId, existing, version)
+            val result = downloadUpdateForLockedPlugin(pluginId, existing, progressKey, version)
             if (result is InstallResult.Success && previousVersion != null) {
                 _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
             }
-            return@withContext result
+            return result
         }
 
         // Regular plugins: unload (if installed) then load the requested version.
         if (existing != null) {
             when (val u = uninstallPlugin(pluginId)) {
                 is UninstallResult.CannotUnload ->
-                    return@withContext InstallResult.LoadFailed("Cannot change version: ${u.reason}")
+                    return InstallResult.LoadFailed("Cannot change version: ${u.reason}")
                 is UninstallResult.Failed ->
-                    return@withContext InstallResult.LoadFailed("Uninstall failed: ${u.error}")
+                    return InstallResult.LoadFailed("Uninstall failed: ${u.error}")
                 else -> { /* unloaded */ }
             }
         }
 
-        val result = downloadFromStore(pluginId, version)
+        val result = downloadFromStore(pluginId, version, progressKey)
         if (result is InstallResult.Success && previousVersion != null) {
             _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
         }
-        result
+        return result
     }
 
     override suspend fun checkForUpdates(): Map<String, String> = withContext(Dispatchers.IO) {
@@ -457,17 +474,85 @@ class PluginManagerAPIImpl(
     // INSTALL / UNINSTALL
     // ========================================
 
+    /**
+     * Track a download operation for [key] in [downloadTracker] while [block]
+     * runs. Nested operations on the same key reuse the outer entry (begin
+     * returns false), so a fallback path never shows a second status-bar item.
+     */
+    private suspend fun <T> withDownloadTracking(
+        key: String,
+        displayName: String,
+        kind: DownloadKind,
+        block: suspend () -> T
+    ): T {
+        val owned = downloadTracker.begin(key, displayName, kind)
+        try {
+            return block()
+        } finally {
+            if (owned) downloadTracker.end(key)
+        }
+    }
+
+    /** Best-effort friendly name when only a pluginId is known. */
+    private fun fallbackDisplayName(pluginId: String): String =
+        getInstalledPlugin(pluginId)?.displayName ?: pluginId.substringAfterLast('.')
+
+    /**
+     * Stream [connection]'s body into [dest], reporting download progress to
+     * [downloadTracker] under [progressKey]. [expectedSize] (from the store's
+     * download info) is the fallback when the response lacks a Content-Length.
+     */
+    private fun downloadWithProgress(
+        connection: HttpURLConnection,
+        dest: File,
+        progressKey: String,
+        expectedSize: Long = 0L
+    ) {
+        val total = connection.contentLengthLong.takeIf { it > 0 } ?: expectedSize
+        dest.outputStream().use { output ->
+            connection.inputStream.use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var copied = 0L
+                var lastPercent = -1
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    output.write(buffer, 0, read)
+                    copied += read
+                    if (total > 0) {
+                        // Throttle state updates to whole-percent steps
+                        val percent = ((copied * 100) / total).toInt()
+                        if (percent != lastPercent) {
+                            lastPercent = percent
+                            downloadTracker.progress(progressKey, copied.toFloat() / total)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     override suspend fun installPlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
+        // Check if already installed
+        getInstalledPlugin(pluginId)?.let {
+            return@withContext InstallResult.AlreadyInstalled(it.version)
+        }
+        withDownloadTracking(pluginId, fallbackDisplayName(pluginId), DownloadKind.INSTALL) {
+            installPluginInternal(pluginId, progressKey = pluginId)
+        }
+    }
+
+    private suspend fun installPluginInternal(pluginId: String, progressKey: String): InstallResult {
         // Check if already installed
         val existing = getInstalledPlugin(pluginId)
         if (existing != null) {
-            return@withContext InstallResult.AlreadyInstalled(existing.version)
+            return InstallResult.AlreadyInstalled(existing.version)
         }
 
         // Try to download directly from plugin store first
-        val downloadResult = downloadFromStore(pluginId)
+        val downloadResult = downloadFromStore(pluginId, null, progressKey)
         if (downloadResult is InstallResult.Success) {
-            return@withContext downloadResult
+            return downloadResult
         }
 
         // Fallback: fetch plugin details and try GitHub
@@ -475,9 +560,9 @@ class PluginManagerAPIImpl(
         if (detailsResult.isFailure) {
             // Return the store download error if we also can't get details
             if (downloadResult is InstallResult.DownloadFailed) {
-                return@withContext downloadResult
+                return downloadResult
             }
-            return@withContext InstallResult.DownloadFailed("Plugin not found in store: ${detailsResult.exceptionOrNull()?.message}")
+            return InstallResult.DownloadFailed("Plugin not found in store: ${detailsResult.exceptionOrNull()?.message}")
         }
 
         val storeItem = detailsResult.getOrThrow()
@@ -486,20 +571,24 @@ class PluginManagerAPIImpl(
         // If no GitHub URL, return the store download error
         if (githubUrl.isBlank() || !githubUrl.contains("github.com")) {
             if (downloadResult is InstallResult.DownloadFailed) {
-                return@withContext downloadResult
+                return downloadResult
             }
-            return@withContext InstallResult.DownloadFailed("No download source available for plugin")
+            return InstallResult.DownloadFailed("No download source available for plugin")
         }
 
         // Try GitHub as fallback
-        installFromGitHub(githubUrl)
+        return installFromGitHubInternal(githubUrl, progressKey)
     }
 
     /**
      * Download plugin directly from the plugin store.
      * Uses /plugin-store/:pluginId/download endpoint.
      */
-    private suspend fun downloadFromStore(pluginId: String, version: String? = null): InstallResult {
+    private suspend fun downloadFromStore(
+        pluginId: String,
+        version: String? = null,
+        progressKey: String = pluginId
+    ): InstallResult {
         // Capture the currently tracked JAR path (if any) before installing,
         // so the old version's file can be removed after a successful load.
         val previousJarPath = getInstalledPlugin(pluginId)?.jarPath
@@ -559,9 +648,7 @@ class PluginManagerAPIImpl(
                 return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
             }
 
-            destFile.outputStream().use { output ->
-                jarConnection.inputStream.copyTo(output)
-            }
+            downloadWithProgress(jarConnection, destFile, progressKey, downloadInfo.size)
 
             // Verify SHA-256 if provided
             if (downloadInfo.sha256.isNotBlank()) {
@@ -678,11 +765,19 @@ class PluginManagerAPIImpl(
     }
 
     override suspend fun installFromGitHub(githubUrl: String): InstallResult = withContext(Dispatchers.IO) {
+        val repoName = Regex("""github\.com/[^/]+/([^/]+)""").find(githubUrl)
+            ?.groupValues?.get(1)?.removeSuffix(".git")
+        withDownloadTracking(githubUrl, repoName ?: "plugin", DownloadKind.INSTALL) {
+            installFromGitHubInternal(githubUrl, progressKey = githubUrl)
+        }
+    }
+
+    private suspend fun installFromGitHubInternal(githubUrl: String, progressKey: String): InstallResult {
         try {
             // Parse GitHub URL to get owner/repo
             val regex = Regex("""github\.com/([^/]+)/([^/]+)""")
             val match = regex.find(githubUrl)
-                ?: return@withContext InstallResult.DownloadFailed("Invalid GitHub URL: $githubUrl")
+                ?: return InstallResult.DownloadFailed("Invalid GitHub URL: $githubUrl")
 
             val owner = match.groupValues[1]
             val repo = match.groupValues[2].removeSuffix(".git")
@@ -696,14 +791,14 @@ class PluginManagerAPIImpl(
             releaseConnection.readTimeout = 10000
 
             if (releaseConnection.responseCode != 200) {
-                return@withContext InstallResult.DownloadFailed("Could not fetch release: HTTP ${releaseConnection.responseCode}")
+                return InstallResult.DownloadFailed("Could not fetch release: HTTP ${releaseConnection.responseCode}")
             }
 
             val releaseJson = releaseConnection.inputStream.bufferedReader().readText()
 
             // Find JAR asset URL
             val jarUrlMatch = Regex(""""browser_download_url"\s*:\s*"([^"]+\.jar)"""").find(releaseJson)
-                ?: return@withContext InstallResult.DownloadFailed("No JAR asset found in release")
+                ?: return InstallResult.DownloadFailed("No JAR asset found in release")
 
             val jarUrl = jarUrlMatch.groupValues[1]
             val jarFileName = jarUrl.substringAfterLast("/")
@@ -719,12 +814,10 @@ class PluginManagerAPIImpl(
             downloadConnection.readTimeout = 60000
 
             if (downloadConnection.responseCode != 200) {
-                return@withContext InstallResult.DownloadFailed("Download failed: HTTP ${downloadConnection.responseCode}")
+                return InstallResult.DownloadFailed("Download failed: HTTP ${downloadConnection.responseCode}")
             }
 
-            destFile.outputStream().use { output ->
-                downloadConnection.inputStream.copyTo(output)
-            }
+            downloadWithProgress(downloadConnection, destFile, progressKey)
 
             // Replace any already-loaded copy so the new version loads cleanly
             // (no manual uninstall needed).
@@ -732,7 +825,7 @@ class PluginManagerAPIImpl(
 
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return@withContext InstallResult.LoadFailed(
+                ?: return InstallResult.LoadFailed(
                     if (loaderDelegate == null) "No plugin loader available"
                     else "Failed to load plugin from ${destFile.name} (see app logs for details)"
                 )
@@ -756,10 +849,10 @@ class PluginManagerAPIImpl(
             refreshInstalledPlugins()
 
             _events.emit(PluginEvent.PluginInstalled(pluginInfo))
-            InstallResult.Success(pluginInfo)
+            return InstallResult.Success(pluginInfo)
 
         } catch (e: Exception) {
-            InstallResult.DownloadFailed(e.message ?: "Unknown error")
+            return InstallResult.DownloadFailed(e.message ?: "Unknown error")
         }
     }
 
@@ -843,34 +936,43 @@ class PluginManagerAPIImpl(
     override suspend fun updatePlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
         val existing = getInstalledPlugin(pluginId)
             ?: return@withContext InstallResult.DownloadFailed("Plugin not installed: $pluginId")
+        withDownloadTracking(pluginId, existing.displayName, DownloadKind.UPDATE) {
+            updatePluginInternal(pluginId, existing, progressKey = pluginId)
+        }
+    }
 
+    private suspend fun updatePluginInternal(
+        pluginId: String,
+        existing: PluginInfo,
+        progressKey: String
+    ): InstallResult {
         val previousVersion = existing.version
         val isSystemOrLocked = existing.isSystemPlugin || !existing.canUnload
 
         if (isSystemOrLocked) {
             // System/locked plugins: download new JAR on disk, replacing the old one.
             // The new version takes effect after app restart.
-            val result = downloadUpdateForLockedPlugin(pluginId, existing)
+            val result = downloadUpdateForLockedPlugin(pluginId, existing, progressKey)
             if (result is InstallResult.Success) {
                 _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
             }
-            return@withContext result
+            return result
         }
 
         // Regular plugins: uninstall then reinstall
         val uninstallResult = uninstallPlugin(pluginId)
         if (uninstallResult is UninstallResult.CannotUnload) {
-            return@withContext InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
+            return InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
         }
         if (uninstallResult is UninstallResult.Failed) {
-            return@withContext InstallResult.LoadFailed("Uninstall failed: ${uninstallResult.error}")
+            return InstallResult.LoadFailed("Uninstall failed: ${uninstallResult.error}")
         }
 
         // Install latest version
         val result = if (existing.url.isNotBlank()) {
-            installFromGitHub(existing.url)
+            installFromGitHubInternal(existing.url, progressKey)
         } else {
-            installPlugin(pluginId)
+            installPluginInternal(pluginId, progressKey)
         }
 
         // Emit update event if successful
@@ -878,7 +980,7 @@ class PluginManagerAPIImpl(
             _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
         }
 
-        result
+        return result
     }
 
     /**
@@ -888,6 +990,7 @@ class PluginManagerAPIImpl(
     private suspend fun downloadUpdateForLockedPlugin(
         pluginId: String,
         existing: PluginInfo,
+        progressKey: String,
         version: String? = null
     ): InstallResult {
         try {
@@ -906,7 +1009,7 @@ class PluginManagerAPIImpl(
             if (infoConnection.responseCode != 200) {
                 // Fallback to GitHub if store download fails (latest only).
                 if (version == null && existing.url.isNotBlank()) {
-                    return installFromGitHubToPath(existing.url, existing.jarPath)
+                    return installFromGitHubToPath(existing.url, existing.jarPath, progressKey)
                 }
                 return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode}")
             }
@@ -936,9 +1039,7 @@ class PluginManagerAPIImpl(
                 return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
             }
 
-            tempFile.outputStream().use { output ->
-                jarConnection.inputStream.copyTo(output)
-            }
+            downloadWithProgress(jarConnection, tempFile, progressKey, downloadInfo.size)
 
             // Verify SHA-256 if provided
             if (downloadInfo.sha256.isNotBlank()) {
@@ -977,7 +1078,11 @@ class PluginManagerAPIImpl(
     /**
      * Install from GitHub directly to a specific JAR path (for locked plugin updates).
      */
-    private suspend fun installFromGitHubToPath(githubUrl: String, targetJarPath: String): InstallResult {
+    private suspend fun installFromGitHubToPath(
+        githubUrl: String,
+        targetJarPath: String,
+        progressKey: String
+    ): InstallResult {
         try {
             val regex = Regex("""github\.com/([^/]+)/([^/]+)""")
             val match = regex.find(githubUrl)
@@ -1015,9 +1120,7 @@ class PluginManagerAPIImpl(
                 return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
             }
 
-            tempFile.outputStream().use { output ->
-                jarConnection.inputStream.copyTo(output)
-            }
+            downloadWithProgress(jarConnection, tempFile, progressKey)
 
             destFile.delete()
             tempFile.renameTo(destFile)
