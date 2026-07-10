@@ -355,6 +355,10 @@ class PluginManagerViewModel(
         scope.launch {
             _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
 
+            // Friendly name for the status-bar progress item (the API only gets the id).
+            _state.value.availablePlugins.find { it.pluginId == pluginId }?.displayName
+                ?.let { apiImpl.downloadTracker.hintDisplayName(pluginId, it) }
+
             val result = api.installPlugin(pluginId)
             when (result) {
                 is InstallResult.Success -> {
