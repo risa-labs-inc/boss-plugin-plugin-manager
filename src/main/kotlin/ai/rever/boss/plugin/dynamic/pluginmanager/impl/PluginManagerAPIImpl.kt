@@ -655,6 +655,9 @@ class PluginManagerAPIImpl(
                 val actualSha256 = calculateSha256(destFile)
                 if (!actualSha256.equals(downloadInfo.sha256, ignoreCase = true)) {
                     destFile.delete()
+                    // Clear any sidecar left from a prior install at this path,
+                    // so it doesn't dangle pointing at bytes that are now gone.
+                    deleteSignatureSidecar(destFile)
                     return InstallResult.DownloadFailed("SHA-256 verification failed")
                 }
             }
@@ -1087,13 +1090,18 @@ class PluginManagerAPIImpl(
                 }
             }
 
+            // Clear the old sidecar BEFORE swapping the JAR: if the process
+            // dies between the rename and the sidecar write below, the
+            // worst-case state is "new JAR + no sidecar" (host treats as
+            // unsigned/warn) rather than "new JAR + stale sidecar" (host
+            // rejects the legitimate plugin as tampered).
+            deleteSignatureSidecar(destFile)
+
             // Replace old JAR with new one
             destFile.delete()
             tempFile.renameTo(destFile)
 
-            // In-place replacement: write the new sidecar, or clear the old
-            // one when this version is unsigned — a stale sidecar left beside
-            // the new bytes would fail load-time verification as tampered.
+            // Write the new sidecar (no-op clear if this version is unsigned).
             persistSignatureSidecar(destFile, downloadInfo.signature)
 
             val pluginInfo = existing.copy(
@@ -1164,12 +1172,12 @@ class PluginManagerAPIImpl(
 
             downloadWithProgress(jarConnection, tempFile, progressKey)
 
+            // Clear the stale sidecar before the swap (crash-safety: new JAR +
+            // no sidecar degrades to warn, not a tampered rejection). GitHub
+            // installs carry no store signature, so it stays cleared.
+            deleteSignatureSidecar(destFile)
             destFile.delete()
             tempFile.renameTo(destFile)
-
-            // In-place GitHub replacement carries no store signature — clear
-            // any stale sidecar so it isn't rejected against old bytes.
-            persistSignatureSidecar(destFile, null)
 
             return InstallResult.Success(PluginInfo(
                 pluginId = "",
