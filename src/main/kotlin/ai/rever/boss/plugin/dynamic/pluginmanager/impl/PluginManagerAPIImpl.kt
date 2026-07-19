@@ -782,7 +782,9 @@ class PluginManagerAPIImpl(
     private fun persistSignatureSidecar(jarFile: File, signature: String?) {
         runCatching {
             val sidecar = File("${jarFile.absolutePath}.sig")
-            if (signature != null) sidecar.writeText(signature) else sidecar.delete()
+            // Blank counts as absent: an empty sidecar reads back as a
+            // present-but-malformed signature, so clear rather than write "".
+            if (!signature.isNullOrBlank()) sidecar.writeText(signature) else sidecar.delete()
         }
     }
 
