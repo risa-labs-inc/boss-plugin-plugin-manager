@@ -78,6 +78,10 @@ data class PluginListResponse(
 data class DownloadInfoResponse(
     val downloadUrl: String,
     val sha256: String = "",
+    // Base64 store signature over the canonical anchor pluginId|version|sha256;
+    // persisted beside the JAR as a `.sig` sidecar so the host verifies it at
+    // load time. Null for versions published before store signing.
+    val signature: String? = null,
     val version: String = "",
     val size: Long = 0,
     val versionId: String = "",

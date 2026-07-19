@@ -659,6 +659,11 @@ class PluginManagerAPIImpl(
                 }
             }
 
+            // Persist the store signature as a `<jar>.sig` sidecar so the host
+            // verifies it against the pinned key at load time — the real
+            // authenticity gate; this download only checks integrity.
+            persistSignatureSidecar(destFile, downloadInfo.signature)
+
             // Replace any already-loaded copy so the new version loads cleanly
             // (no manual uninstall needed).
             unloadIfAlreadyLoaded(destFile, knownPluginId = pluginId)
@@ -751,17 +756,38 @@ class PluginManagerAPIImpl(
         try {
             if (!previousJarPath.isNullOrBlank() && previousJarPath != newJar.absolutePath) {
                 runCatching { File(previousJarPath).takeIf { it.exists() }?.delete() }
+                deleteSignatureSidecar(File(previousJarPath))
             }
             pluginsDir.listFiles { f -> f.isFile && f.name.endsWith(".jar") }?.forEach { candidate ->
                 if (candidate.absolutePath == newJar.absolutePath) return@forEach
                 if (candidate.name.startsWith("boss-microkernel-runtime")) return@forEach
                 if (readPluginIdFromJar(candidate) == pluginId) {
                     runCatching { candidate.delete() }
+                    deleteSignatureSidecar(candidate)
                 }
             }
         } catch (_: Exception) {
             // Best-effort cleanup only; the host's startup reconciler heals leftovers.
         }
+    }
+
+    /**
+     * Persist (or clear) the store signature beside [jarFile] as a `<jar>.sig`
+     * sidecar — the convention the host's PluginSignatureSidecar reads at load
+     * time. When [signature] is null we DELETE any pre-existing sidecar: an
+     * in-place JAR replacement (locked-plugin update) must never leave a stale
+     * sidecar that signs the old bytes, which the host would reject as
+     * tampered. Best-effort; a failure just means the host sees no sidecar.
+     */
+    private fun persistSignatureSidecar(jarFile: File, signature: String?) {
+        runCatching {
+            val sidecar = File("${jarFile.absolutePath}.sig")
+            if (signature != null) sidecar.writeText(signature) else sidecar.delete()
+        }
+    }
+
+    private fun deleteSignatureSidecar(jarFile: File) {
+        runCatching { File("${jarFile.absolutePath}.sig").delete() }
     }
 
     override suspend fun installFromGitHub(githubUrl: String): InstallResult = withContext(Dispatchers.IO) {
@@ -819,6 +845,11 @@ class PluginManagerAPIImpl(
 
             downloadWithProgress(downloadConnection, destFile, progressKey)
 
+            // GitHub installs carry no store signature — clear any stale
+            // sidecar so load-time verification treats it as unsigned rather
+            // than rejecting it against a leftover signature.
+            persistSignatureSidecar(destFile, null)
+
             // Replace any already-loaded copy so the new version loads cleanly
             // (no manual uninstall needed).
             unloadIfAlreadyLoaded(destFile)
@@ -872,6 +903,9 @@ class PluginManagerAPIImpl(
                 dest
             }
 
+            // Local side-load: no store signature — clear any stale sidecar.
+            persistSignatureSidecar(destFile, null)
+
             // Replace any already-loaded copy so the new version loads cleanly
             // (no manual uninstall needed).
             unloadIfAlreadyLoaded(destFile)
@@ -914,12 +948,13 @@ class PluginManagerAPIImpl(
                 return@withContext UninstallResult.Failed("Failed to unload plugin from runtime")
             }
 
-            // Delete JAR file
+            // Delete JAR file (and its signature sidecar)
             if (plugin.jarPath.isNotBlank()) {
                 val jarFile = File(plugin.jarPath)
                 if (jarFile.exists()) {
                     jarFile.delete()
                 }
+                deleteSignatureSidecar(jarFile)
             }
 
             // Refresh installed plugins
@@ -1054,6 +1089,11 @@ class PluginManagerAPIImpl(
             destFile.delete()
             tempFile.renameTo(destFile)
 
+            // In-place replacement: write the new sidecar, or clear the old
+            // one when this version is unsigned — a stale sidecar left beside
+            // the new bytes would fail load-time verification as tampered.
+            persistSignatureSidecar(destFile, downloadInfo.signature)
+
             val pluginInfo = existing.copy(
                 version = downloadInfo.version,
                 installedAt = System.currentTimeMillis()
@@ -1124,6 +1164,10 @@ class PluginManagerAPIImpl(
 
             destFile.delete()
             tempFile.renameTo(destFile)
+
+            // In-place GitHub replacement carries no store signature — clear
+            // any stale sidecar so it isn't rejected against old bytes.
+            persistSignatureSidecar(destFile, null)
 
             return InstallResult.Success(PluginInfo(
                 pluginId = "",
