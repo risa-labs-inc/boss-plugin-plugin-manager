@@ -17,7 +17,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -1221,39 +1220,16 @@ class PluginManagerAPIImpl(
     fun isCurrentUserAdmin(): Boolean = loaderDelegate?.isCurrentUserAdmin() ?: false
 
     /**
-     * Whether the current user may use the Publish tab (submit / publish their own
-     * plugins). Store admins always can; non-admins (e.g. `boss_admin`) can if their
-     * JWT carries the `plugins.admin.publish` permission. The store's publish
-     * endpoint only requires authentication + ownership, so this is purely a UI gate
-     * — moderation actions (verify / delete any plugin) stay admin-only.
+     * Whether the current user may use the Create tab (submit / publish their own
+     * plugins). Store admins always can; non-admins can if their JWT carries the
+     * `plugins.create` permission, held by the `boss_plugin_admin` role.
+     *
+     * This mirrors a real server gate: the store's publish endpoints require
+     * `plugins.create` plus ownership. Moderation actions (verify / delete any
+     * plugin) stay admin-only and keep using `plugins.admin.publish`.
      */
     fun canPublish(): Boolean =
-        isCurrentUserAdmin() || tokenHasPermission("plugins.admin.publish")
-
-    /**
-     * True if the current access token's `user_permissions` claim contains
-     * [permission]. Decodes the JWT payload locally; returns false if the token is
-     * absent, malformed, or lacks the claim.
-     */
-    private fun tokenHasPermission(permission: String): Boolean {
-        val token = loaderDelegate?.getAccessToken() ?: return false
-        return try {
-            val parts = token.split(".")
-            if (parts.size != 3) return false
-            val payload = parts[1].replace("-", "+").replace("_", "/")
-            val padded = when (payload.length % 4) {
-                2 -> "$payload=="
-                3 -> "$payload="
-                else -> payload
-            }
-            val decoded = String(java.util.Base64.getDecoder().decode(padded), Charsets.UTF_8)
-            val perms = json.parseToJsonElement(decoded).jsonObject["user_permissions"]?.jsonArray
-                ?: return false
-            perms.any { (it as? JsonPrimitive)?.contentOrNull == permission }
-        } catch (_: Exception) {
-            false
-        }
-    }
+        canPublishWith(isCurrentUserAdmin(), loaderDelegate?.getAccessToken())
 
     /**
      * Whether the current user may install a plugin that requires
@@ -1263,9 +1239,7 @@ class PluginManagerAPIImpl(
      * install that would be rejected with a 403.
      */
     fun canInstall(requiredPermissions: List<String>): Boolean =
-        requiredPermissions.isEmpty() ||
-            isCurrentUserAdmin() ||
-            requiredPermissions.all { tokenHasPermission(it) }
+        canInstallWith(isCurrentUserAdmin(), loaderDelegate?.getAccessToken(), requiredPermissions)
 
     /** Extract the `error` field from a JSON `{"error": "..."}` body, or null. */
     private fun parseErrorMessage(body: String?): String? {

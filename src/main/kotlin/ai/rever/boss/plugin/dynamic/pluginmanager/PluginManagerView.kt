@@ -870,7 +870,7 @@ private fun PluginManagerHeader(
             selected = currentTab == PluginManagerTab.MCP,
             onClick = { onTabSelected(PluginManagerTab.MCP) }
         )
-        // Show Create tab to store admins and users with plugins.admin.publish.
+        // Show Create tab to store admins and users with plugins.create.
         // Hosts creating (Tool Creator) + publishing to the store.
         if (canPublish) {
             TabButton(

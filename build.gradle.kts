@@ -76,6 +76,12 @@ dependencies {
     compileOnly("io.github.jan-tennert.supabase:functions-kt:3.6.0")
     compileOnly("io.ktor:ktor-client-core:3.4.0")
     compileOnly("io.ktor:ktor-client-cio:3.4.0")
+
+    testImplementation(kotlin("test"))
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 // Task to build plugin JAR with compiled classes only
