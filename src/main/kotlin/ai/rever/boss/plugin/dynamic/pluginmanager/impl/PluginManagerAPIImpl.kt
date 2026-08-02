@@ -17,7 +17,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -1230,14 +1229,7 @@ class PluginManagerAPIImpl(
      * plugin) stay admin-only and keep using `plugins.admin.publish`.
      */
     fun canPublish(): Boolean =
-        isCurrentUserAdmin() || PLUGIN_CREATE_PERMISSION in currentTokenPermissions()
-
-    /**
-     * Effective permissions from the current access token's `user_permissions`
-     * claim, or empty if there is no token. See [tokenPermissions].
-     */
-    private fun currentTokenPermissions(): Set<String> =
-        tokenPermissions(loaderDelegate?.getAccessToken())
+        canPublishWith(isCurrentUserAdmin(), loaderDelegate?.getAccessToken())
 
     /**
      * Whether the current user may install a plugin that requires
@@ -1247,9 +1239,7 @@ class PluginManagerAPIImpl(
      * install that would be rejected with a 403.
      */
     fun canInstall(requiredPermissions: List<String>): Boolean =
-        requiredPermissions.isEmpty() ||
-            isCurrentUserAdmin() ||
-            currentTokenPermissions().containsAll(requiredPermissions)
+        canInstallWith(isCurrentUserAdmin(), loaderDelegate?.getAccessToken(), requiredPermissions)
 
     /** Extract the `error` field from a JSON `{"error": "..."}` body, or null. */
     private fun parseErrorMessage(body: String?): String? {

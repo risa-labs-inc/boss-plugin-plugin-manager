@@ -65,6 +65,53 @@ class PluginPermissionGateTest {
     }
 
     // -----------------------------------------------------------------------
+    // Gate composition — the short-circuits, which a refactor can invert silently
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `canPublish requires plugins-create for a non-admin`() {
+        assertTrue(canPublishWith(isAdmin = false, token = tokenWithPermissions("plugins.create")))
+        assertFalse(canPublishWith(isAdmin = false, token = tokenWithPermissions("plugins.admin.publish")))
+        assertFalse(canPublishWith(isAdmin = false, token = null))
+    }
+
+    @Test
+    fun `canPublish admits an admin holding nothing`() {
+        assertTrue(canPublishWith(isAdmin = true, token = tokenWithPermissions()))
+        // Even with no token at all — admin is decided by the host, not the claim.
+        assertTrue(canPublishWith(isAdmin = true, token = null))
+    }
+
+    @Test
+    fun `canInstall treats an empty requirement list as open to everyone`() {
+        // Legacy plugins predate the field and rely on this.
+        assertTrue(canInstallWith(isAdmin = false, token = null, requiredPermissions = emptyList()))
+    }
+
+    @Test
+    fun `canInstall needs every required permission, not just one`() {
+        val token = tokenWithPermissions("plugins.create")
+        assertFalse(
+            canInstallWith(isAdmin = false, token = token, requiredPermissions = listOf("plugins.create", "api_key.create")),
+            "holding one of two must not admit",
+        )
+        assertTrue(
+            canInstallWith(
+                isAdmin = false,
+                token = tokenWithPermissions("plugins.create", "api_key.create"),
+                requiredPermissions = listOf("plugins.create", "api_key.create"),
+            ),
+        )
+    }
+
+    @Test
+    fun `canInstall lets an admin bypass requirements`() {
+        assertTrue(
+            canInstallWith(isAdmin = true, token = null, requiredPermissions = listOf("secret.read", "role.assign")),
+        )
+    }
+
+    // -----------------------------------------------------------------------
     // base64url padding — one case per `length % 4` branch
     // -----------------------------------------------------------------------
 

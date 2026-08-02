@@ -15,7 +15,7 @@ import kotlinx.serialization.json.jsonObject
  * author scoping, so it authorizes updates to *any* plugin, and it stays
  * reserved for store-wide moderation (verify / delete / enable / disable).
  */
-const val PLUGIN_CREATE_PERMISSION = "plugins.create"
+internal const val PLUGIN_CREATE_PERMISSION = "plugins.create"
 
 private val permissionJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -38,15 +38,11 @@ internal fun tokenPermissions(token: String?): Set<String> {
     return try {
         val parts = token.split(".")
         if (parts.size != 3) return emptySet()
-        // JWTs use base64url without padding; Base64.getDecoder() requires both
-        // the standard alphabet and correct padding.
-        val payload = parts[1].replace("-", "+").replace("_", "/")
-        val padded = when (payload.length % 4) {
-            2 -> "$payload=="
-            3 -> "$payload="
-            else -> payload
-        }
-        val decoded = String(java.util.Base64.getDecoder().decode(padded), Charsets.UTF_8)
+        // getUrlDecoder handles the base64url alphabet, and its contract accepts
+        // the missing padding JWTs omit ("interpreted as the end of the encoded
+        // byte data, but is not required"). A length % 4 == 1 payload throws,
+        // which the catch below turns into "no permissions".
+        val decoded = String(java.util.Base64.getUrlDecoder().decode(parts[1]), Charsets.UTF_8)
         val perms = permissionJson.parseToJsonElement(decoded).jsonObject["user_permissions"]?.jsonArray
             ?: return emptySet()
         perms.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.toSet()
@@ -54,3 +50,29 @@ internal fun tokenPermissions(token: String?): Set<String> {
         emptySet()
     }
 }
+
+/**
+ * Whether a user may use the Create tab (submit / publish their own plugins).
+ * Store admins always can; otherwise the token must carry [PLUGIN_CREATE_PERMISSION].
+ *
+ * Pure so the short-circuit itself is testable — inverting `isAdmin ||` is the
+ * kind of edit a refactor makes silently, and the API impl cannot be constructed
+ * in a test.
+ */
+internal fun canPublishWith(isAdmin: Boolean, token: String?): Boolean =
+    isAdmin || PLUGIN_CREATE_PERMISSION in tokenPermissions(token)
+
+/**
+ * Whether a user may install a plugin declaring [requiredPermissions]. Empty ⇒
+ * open to all (the `user.read` baseline every legacy plugin relies on); admins
+ * bypass; otherwise every required permission must be held. Mirrors the
+ * server-side /download gate so the UI never offers an install that would 403.
+ */
+internal fun canInstallWith(
+    isAdmin: Boolean,
+    token: String?,
+    requiredPermissions: List<String>,
+): Boolean =
+    requiredPermissions.isEmpty() ||
+        isAdmin ||
+        tokenPermissions(token).containsAll(requiredPermissions)
