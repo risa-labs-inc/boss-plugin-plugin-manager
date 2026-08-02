@@ -40,7 +40,7 @@ data class PluginManagerState(
     val searchQuery: String = "",
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
-    /** Whether the user may use the Publish tab (store admin OR has plugins.admin.publish). */
+    /** Whether the user may use the Create tab (store admin OR has plugins.create). */
     val canPublish: Boolean = false,
     /** Installed plugins hidden from this (non-admin) user for lack of permissions. */
     val inaccessiblePlugins: List<InaccessiblePluginInfo> = emptyList(),
