@@ -4,7 +4,7 @@
 
 **Toolbox** (formerly "Plugin Manager", `ai.rever.boss.plugin.dynamic.pluginmanager`) is a dynamic plugin for the BOSS desktop application.
 
-Toolbox — self-contained plugin store with install, uninstall, and update capabilities. Only the user-facing name is "Toolbox"; the plugin ID, panel ID (`plugin-manager`), package, repo, and JAR artifact names intentionally keep the old identifiers so existing installs and the host's store bootstrap keep working.
+Toolbox - self-contained plugin store with install, uninstall, and update capabilities. Only the user-facing name is "Toolbox"; the plugin ID, panel ID (`plugin-manager`), package, repo, and JAR artifact names intentionally keep the old identifiers so existing installs and the host's store bootstrap keep working.
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.pluginmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin`
@@ -49,13 +49,13 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 **`build.gradle.kts` is the single source of truth for version.**
 
-The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` — only change it in `build.gradle.kts`.
+The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
 
 ## Code Quality
 
 - Use Compose Multiplatform APIs (not Android-specific)
 - All Kotlin files must end with a newline
-- Handle null providers gracefully — show fallback UI, never crash
+- Handle null providers gracefully - show fallback UI, never crash
 
 ## CI/CD
 
