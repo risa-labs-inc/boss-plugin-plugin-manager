@@ -171,10 +171,30 @@ class PluginManagerViewModel(
                 }
         }
 
-        // Track realtime connection status (connection itself is owned by PluginManagerCore)
+        // Track realtime connection status (connection itself is owned by PluginManagerCore) and
+        // re-sync on (re)connect: a dropped-then-restored socket may have missed VersionAdded events,
+        // so pull the catalog + update check whenever we transition back to connected.
         scope.launch {
+            var wasConnected = false
             apiImpl.realtimeClient.isConnected.collect { connected ->
                 _state.value = _state.value.copy(realtimeConnected = connected)
+                if (connected && !wasConnected) {
+                    refreshStoreInternal()
+                    checkForUpdatesInternal()
+                }
+                wasConnected = connected
+            }
+        }
+
+        // Safety net: while realtime is down, poll for updates periodically so a dead socket can't
+        // leave the catalog stale until the next app restart. No-op when realtime is healthy.
+        scope.launch {
+            while (true) {
+                delay(UPDATE_POLL_INTERVAL_MS)
+                if (!_state.value.realtimeConnected) {
+                    refreshStoreInternal()
+                    checkForUpdatesInternal()
+                }
             }
         }
 
@@ -816,5 +836,8 @@ class PluginManagerViewModel(
         const val TOOL_CREATOR_PANEL_ID = "tool-creator"
         /** Must match ToolCreatorDynamicPlugin.OPEN_NEW_TOOL_EVENT. */
         const val TOOL_CREATOR_OPEN_EVENT = "open-new-tool"
+
+        /** How often to poll for store updates while realtime is disconnected (safety net). */
+        const val UPDATE_POLL_INTERVAL_MS = 5 * 60_000L
     }
 }
