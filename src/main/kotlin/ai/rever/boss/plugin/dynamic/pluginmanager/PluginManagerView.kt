@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.DefinedPermissionData
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstalledPluginState
@@ -93,7 +94,6 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 
 /**
  * The organisation call to action.
@@ -106,6 +106,14 @@ import androidx.compose.ui.window.Dialog
  *
  * Renders nothing while membership is unknown: see organisationCta.
  */
+// Every dialog in this file uses BossDialog, not Dialog. Under JxBrowser HARDWARE_ACCELERATED - the
+// host default on every platform since BossConsole 9.4.1 - Chromium composites its own native window
+// over the Compose scene, so a plain Compose Dialog in a plugin panel is drawn BEHIND the page.
+// Reported live against the version/downgrade sheet, which was cropped at the browser's rendering
+// area whenever the store sat beside a browser tab. BossDialog routes through the host's
+// always-on-top overlay window and falls back to exactly this Dialog wherever the browser is
+// off-screen.
+
 @Composable
 private fun OrganisationCtaCard(
     membership: Membership?,
@@ -166,7 +174,7 @@ private fun RequestOrganisationDialog(
     val slugError = if (touched) organisationSlugError(slug) else null
     val valid = organisationNameError(name) == null && organisationSlugError(slug) == null
 
-    Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+    BossDialog(onDismissRequest = { if (!busy) onDismiss() }) {
         BossCard(modifier = Modifier.width(420.dp)) {
             Column(modifier = Modifier.padding(8.dp)) {
                 Text(
@@ -269,7 +277,7 @@ private fun ConfirmationDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         BossCard(
             modifier = Modifier.width(320.dp)
         ) {
@@ -328,7 +336,7 @@ private fun PasswordDialog(
     var showPassword by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf(false) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         BossCard(
             modifier = Modifier.width(320.dp)
         ) {
@@ -435,7 +443,7 @@ private fun VersionSheetDialog(
     onInstall: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .width(460.dp)
@@ -524,7 +532,7 @@ private fun McpToolsDialog(
             ?: permissionDescriptions[perm]?.takeIf { it.isNotBlank() }
             ?: if (perm == "admin") "Administrator access — only admins can use this." else "No description available."
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .width(460.dp)
@@ -655,7 +663,7 @@ private fun PermissionsDialog(
             ?: permissionDescriptions[perm]?.takeIf { it.isNotBlank() }
             ?: if (perm == "admin") "Administrator access — only admins can use this." else "No description available."
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .width(460.dp)
