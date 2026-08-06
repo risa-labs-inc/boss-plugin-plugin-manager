@@ -4,6 +4,11 @@ import ai.rever.boss.plugin.api.ApplicationEventBus
 import ai.rever.boss.plugin.api.CustomPluginEvent
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.api.McpServerController
+import ai.rever.boss.plugin.api.SupabaseDataProvider
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHasOrganisation
 import ai.rever.boss.plugin.api.McpToolRegistry
 import ai.rever.boss.plugin.api.PanelEventProvider
 import ai.rever.boss.plugin.api.PanelId
@@ -54,7 +59,16 @@ data class PluginManagerState(
      * RoleManagementProvider (empty when unavailable, e.g. non-admin users).
      * Used by the MCP dialog to explain what each required permission grants.
      */
-    val permissionDescriptions: Map<String, String> = emptyMap()
+    val permissionDescriptions: Map<String, String> = emptyMap(),
+    /**
+     * Whether the signed-in user belongs to any organisation.
+     *
+     * NULL while the lookup is in flight, or when there is no Supabase provider
+     * to ask. Null renders no call to action at all -- see [organisationCta].
+     * A Boolean defaulting to false would show "Request an organisation" to
+     * every existing member for the length of a round trip.
+     */
+    val hasOrganisation: Boolean? = null
 )
 
 /**
@@ -121,7 +135,13 @@ class PluginManagerViewModel(
     /** Event bus for signaling Tool Creator to open its New Tool dialog. */
     private val applicationEventBus: ApplicationEventBus? = null,
     /** This window's id, needed to target panel-open events. */
-    private val windowId: String? = null
+    private val windowId: String? = null,
+    /**
+     * Read-only Supabase access, for the one question the Toolbox asks about
+     * organisations: does this user belong to any. Null when Supabase is
+     * unavailable, which leaves the call to action hidden rather than wrong.
+     */
+    private val supabaseDataProvider: SupabaseDataProvider? = null
 ) {
     // Child scope of the plugin scope: cancelled in dispose() so collectors of a
     // closed panel don't leak, while plugin unload still cancels everything.
@@ -348,6 +368,65 @@ class PluginManagerViewModel(
                     wid,
                 )
             }
+        }
+    }
+
+    /**
+     * Load whether the user belongs to any organisation.
+     *
+     * Best effort and deliberately quiet: any failure leaves `hasOrganisation`
+     * null, which hides the call to action. Showing "Request an organisation"
+     * because a read failed would push somebody toward creating a duplicate of
+     * one they are already in.
+     */
+    fun refreshOrganisationMembership() {
+        val supabase = supabaseDataProvider ?: return
+        scope.launch {
+            val result = supabase.rpc("get_my_organisations", "{}")
+            val has = parseHasOrganisation(result.getOrNull())
+            _state.value = _state.value.copy(hasOrganisation = has)
+        }
+    }
+
+    /** Is the Organisation plugin installed in this host? */
+    fun isOrganisationPluginInstalled(): Boolean =
+        _state.value.installedPlugins.any { it.pluginId == OrganisationPlugin.PLUGIN_ID }
+
+    /**
+     * The Toolbox call to action: request one, install the plugin, or open it.
+     *
+     * Mirrors openToolCreator, including the install branch -- there is no point
+     * opening a panel that does not exist yet.
+     */
+    fun onOrganisationCta() {
+        when (organisationCta(_state.value.hasOrganisation, isOrganisationPluginInstalled())) {
+            OrganisationCta.CREATE ->
+                // The request form lives on the web, next to the review queue an
+                // administrator uses to act on it.
+                onOpenUrl?.invoke(ORGANISATION_REQUEST_URL)
+
+            OrganisationCta.INSTALL_PLUGIN ->
+                installFromRemote(OrganisationPlugin.PLUGIN_ID)
+
+            OrganisationCta.OPEN -> {
+                val wid = windowId
+                // openPanel is suspend, so it needs a scope -- same shape as
+                // openToolCreator.
+                if (panelEventProvider != null && wid != null) {
+                    scope.launch {
+                        panelEventProvider.openPanel(
+                            PanelId(
+                                panelId = OrganisationPlugin.PANEL_ID,
+                                defaultOrder = 0,
+                                pluginId = "ai.rever.boss",
+                            ),
+                            wid,
+                        )
+                    }
+                }
+            }
+
+            null -> Unit
         }
     }
 
@@ -816,5 +895,15 @@ class PluginManagerViewModel(
         const val TOOL_CREATOR_PANEL_ID = "tool-creator"
         /** Must match ToolCreatorDynamicPlugin.OPEN_NEW_TOOL_EVENT. */
         const val TOOL_CREATOR_OPEN_EVENT = "open-new-tool"
+
+        /**
+         * Where "Request an organisation" goes.
+         *
+         * The custom domain, not the project-ref host: Supabase rewrites
+         * text/html to text/plain on <ref>.supabase.co, so the page would
+         * arrive as raw source with no error anywhere.
+         */
+        const val ORGANISATION_REQUEST_URL =
+            "https://api.risaboss.com/functions/v1/organisation/request"
     }
 }

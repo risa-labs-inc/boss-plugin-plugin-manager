@@ -26,6 +26,21 @@ kotlin {
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossPluginApiPath = "../boss-plugin-api"
 
+/**
+ * The most recently built api jar in the sibling checkout, whatever its version.
+ *
+ * Local development only - CI uses the downloaded jar. Deliberately not a hardcoded file name:
+ * this was pinned to boss-plugin-api-1.0.64.jar, the sibling checkout had moved on to 1.0.72, and
+ * the whole `ai.rever.boss.plugin.api` package read as "Unresolved reference" on symbols that
+ * plainly exist. Newest-by-mtime rather than by version string, because 1.0.9 sorts above 1.0.71
+ * lexicographically and the jar you just built is the one you meant.
+ */
+val localBossPluginApiJar: File? =
+    file("$bossPluginApiPath/build/libs")
+        .listFiles { f: File -> f.name.startsWith("boss-plugin-api-") && f.name.endsWith(".jar") }
+        ?.filterNot { it.name.contains("-sources") || it.name.contains("-thin") }
+        ?.maxByOrNull { it.lastModified() }
+
 // Supabase anon key: CI env var > gradle.properties > error
 val supabaseAnonKey: String = System.getenv("SUPABASE_ANON_KEY")
     ?: findProperty("SUPABASE_ANON_KEY")?.toString()
@@ -46,7 +61,15 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo
-        compileOnly(files("$bossPluginApiPath/build/libs/boss-plugin-api-1.0.64.jar"))
+        compileOnly(
+            files(
+                localBossPluginApiJar
+                    ?: error(
+                        "No boss-plugin-api jar in $bossPluginApiPath/build/libs - " +
+                            "run ./gradlew jar in the sibling boss-plugin-api checkout first.",
+                    ),
+            ),
+        )
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))

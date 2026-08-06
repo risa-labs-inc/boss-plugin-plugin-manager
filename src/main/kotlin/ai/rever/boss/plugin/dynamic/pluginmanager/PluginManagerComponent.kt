@@ -58,10 +58,16 @@ class PluginManagerComponent(
         roleManagementProvider = context.roleManagementProvider,
         panelEventProvider = context.panelEventProvider,
         applicationEventBus = context.applicationEventBus,
-        windowId = context.windowId
+        windowId = context.windowId,
+        supabaseDataProvider = context.supabaseDataProvider
     )
 
     init {
+        // Asked once per panel instance rather than per composition. The answer
+        // decides which organisation call to action the Create tab renders, and
+        // until it arrives the call to action is hidden rather than guessed.
+        viewModel.refreshOrganisationMembership()
+
         lifecycle.subscribe(object : Lifecycle.Callbacks {
             override fun onDestroy() {
                 viewModel.dispose()

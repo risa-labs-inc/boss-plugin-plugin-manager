@@ -21,6 +21,9 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -754,6 +757,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
+                        hasOrganisation = state.hasOrganisation,
+                        organisationPluginInstalled = viewModel.isOrganisationPluginInstalled(),
+                        onOrganisationCta = { viewModel.onOrganisationCta() },
                         toolCreatorInstalled = state.installedPlugins.any {
                             it.pluginId == PluginManagerViewModel.TOOL_CREATOR_PLUGIN_ID
                         },
@@ -2166,6 +2172,10 @@ private enum class JarSource {
 @Composable
 private fun PublishTab(
     toolCreatorInstalled: Boolean,
+    /** Null while the membership lookup is in flight; null hides the call to action. */
+    hasOrganisation: Boolean?,
+    organisationPluginInstalled: Boolean,
+    onOrganisationCta: () -> Unit,
     onOpenToolCreator: () -> Unit,
     onFetchFromGitHub: (
         url: String,
@@ -2226,6 +2236,30 @@ private fun PublishTab(
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
+        // Organisation call to action. Rendered only when the membership lookup
+        // has answered: `organisationCta` returns null while it is unknown, so
+        // an existing member never sees "Request an organisation" flash by.
+        organisationCta(hasOrganisation, organisationPluginInstalled)?.let { cta ->
+            BossSection(
+                title = "Organisation",
+                description = "Organisations own plugins, roles and shared secrets"
+            ) {
+                Text(
+                    text = organisationCtaDescription(cta),
+                    fontSize = 13.sp,
+                    color = BossThemeColors.TextSecondary,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                BossPrimaryButton(
+                    text = organisationCtaLabel(cta),
+                    onClick = onOrganisationCta,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
         BossSection(
             title = "Create a new plugin",
             description = "Scaffold a new BOSS plugin and build it with an AI coding agent"
