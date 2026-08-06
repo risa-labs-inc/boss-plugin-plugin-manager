@@ -8,7 +8,10 @@ Toolbox - self-contained plugin store with install, uninstall, and update capabi
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.pluginmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin`
-- **API Version**: 1.0.21
+- **API Version**: 1.0.57 (declared in plugin.json). Verified rather than assumed:
+  `SupabaseDataProvider` and `PluginContext.supabaseDataProvider`, which the organisation
+  call to action reads, are both present in the 1.0.36 jar, so the declared floor already
+  covers them.
 
 ## Essential Commands
 

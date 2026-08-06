@@ -21,6 +21,14 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -86,6 +94,169 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+
+/**
+ * The organisation call to action.
+ *
+ * On the INSTALLED tab, not the Create tab, and that placement is the point: the Create tab is
+ * gated on `canPublish` (store admin or plugins.create), while the CREATE branch here targets
+ * users who belong to no organisation - by definition the least likely to hold plugins.create.
+ * Behind that gate, the people who most need the request form were the ones who could not reach
+ * it. Organisations are account-level anyway, not a publishing concern.
+ *
+ * Renders nothing while membership is unknown: see organisationCta.
+ */
+@Composable
+private fun OrganisationCtaCard(
+    membership: Membership?,
+    pluginInstalled: Boolean,
+    hasPendingRequest: Boolean,
+    onAction: () -> Unit
+) {
+    val cta = organisationCta(membership, pluginInstalled, hasPendingRequest) ?: return
+
+    BossSection(
+        title = "Organisation",
+        description = "Organisations own plugins, roles and shared secrets"
+    ) {
+        Text(
+            text = organisationCtaDescription(cta),
+            fontSize = 13.sp,
+            color = BossThemeColors.TextSecondary,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        BossPrimaryButton(
+            text = organisationCtaLabel(cta),
+            onClick = onAction,
+            enabled = organisationCtaEnabled(cta),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+    Spacer(Modifier.height(16.dp))
+}
+
+/**
+ * Request a new organisation.
+ *
+ * In-app rather than a web page, and that is not a style preference:
+ * `submit_organisation_request` is authenticated-only, and the handoff-token
+ * mechanism that authenticates the other organisation web pages is org-scoped.
+ * A user with no organisation has nothing to hand off for, so a web form could
+ * not authenticate at all.
+ *
+ * Validation mirrors the database CHECK so a typo is a message under the field.
+ * The reserved-slug and collision rules stay server-side - only the database
+ * knows the full list, and `boss` deriving the existing global `boss_admin`
+ * role is the reason that list exists.
+ */
+@Composable
+private fun RequestOrganisationDialog(
+    busy: Boolean,
+    serverError: String?,
+    onSubmit: (slug: String, name: String, description: String, justification: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var slug by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var justification by remember { mutableStateOf("") }
+    var touched by remember { mutableStateOf(false) }
+
+    val nameError = if (touched) organisationNameError(name) else null
+    val slugError = if (touched) organisationSlugError(slug) else null
+    val valid = organisationNameError(name) == null && organisationSlugError(slug) == null
+
+    Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+        BossCard(modifier = Modifier.width(420.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Request an organisation",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "A BOSS administrator reviews the request before the organisation is created.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.height(14.dp))
+
+                BossTextField(
+                    value = name,
+                    onValueChange = { name = it; touched = true },
+                    label = "Name",
+                    placeholder = "Acme Inc"
+                )
+                nameError?.let { FieldError(it) }
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = slug,
+                    onValueChange = { slug = it.lowercase(); touched = true },
+                    label = "Identifier",
+                    placeholder = "acme"
+                )
+                slugError?.let { FieldError(it) }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    // Stated up front because it is permanent: the roles derive
+                    // from it and renaming would orphan them.
+                    text = "Permanent. Roles are named ${slug.ifBlank { "acme" }}_admin and " +
+                        "${slug.ifBlank { "acme" }}_user.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = "Description (optional)",
+                    placeholder = "What this organisation is for"
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = justification,
+                    onValueChange = { justification = it },
+                    label = "Note for the reviewer (optional)",
+                    placeholder = "Why you need it"
+                )
+
+                serverError?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(text = it, color = BossThemeColors.ErrorColor, fontSize = 12.sp)
+                }
+
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    BossSecondaryButton(text = "Cancel", onClick = onDismiss, enabled = !busy)
+                    Spacer(Modifier.width(8.dp))
+                    BossPrimaryButton(
+                        text = if (busy) "Sending..." else "Send request",
+                        onClick = { touched = true; onSubmit(slug, name, description, justification) },
+                        enabled = valid && !busy
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FieldError(message: String) {
+    Text(
+        text = message,
+        color = BossThemeColors.ErrorColor,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp)
+    )
+}
 
 /**
  * Confirmation dialog for destructive actions.
@@ -711,26 +882,43 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 modifier = Modifier.weight(1f).fillMaxWidth()
             ) {
                 when (state.currentTab) {
-                    PluginManagerTab.INSTALLED -> InstalledPluginsTab(
-                        plugins = filterPlugins(state.installedPlugins, state.searchQuery),
-                        inaccessiblePlugins = state.inaccessiblePlugins,
-                        updateIds = state.updates.map { it.pluginId }.toSet(),
-                        onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
-                        onUninstall = { id -> viewModel.uninstallPlugin(id) },
-                        onUpdate = { id -> viewModel.updatePlugin(id) },
-                        onInstallFromFile = { viewModel.installFromFilePicker() },
-                        onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
-                        onOpenHomepage = { url -> viewModel.openUrl(url) },
-                        isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins,
-                        versionSheet = state.versionSheet,
-                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
-                        onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
-                        onCloseVersions = { viewModel.closeVersions() },
-                        mcpToolRegistry = viewModel.mcpToolRegistry,
-                        permissionDescriptions = state.permissionDescriptions,
-                        onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
-                    )
+                    // The wrapper carries the tab's padding, and InstalledPluginsTab's own
+                    // Column drops it - otherwise the CTA renders flush against the panel edge
+                    // while every other card on the tab is inset by 12dp.
+                    PluginManagerTab.INSTALLED -> Column(Modifier.fillMaxSize().padding(12.dp)) {
+                        OrganisationCtaCard(
+                            membership = state.membership,
+                            // Read from the COLLECTED state, not viewModel._state: everything
+                            // else here observes `state`, and reading the flow's value directly
+                            // from composition only recomposes correctly by accident.
+                            pluginInstalled =
+                                state.installedPlugins.any {
+                                    it.pluginId == OrganisationPlugin.PLUGIN_ID
+                                },
+                            hasPendingRequest = state.hasPendingOrgRequest,
+                            onAction = { viewModel.onOrganisationCta() }
+                        )
+                        InstalledPluginsTab(
+                            plugins = filterPlugins(state.installedPlugins, state.searchQuery),
+                            inaccessiblePlugins = state.inaccessiblePlugins,
+                            updateIds = state.updates.map { it.pluginId }.toSet(),
+                            onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
+                            onUninstall = { id -> viewModel.uninstallPlugin(id) },
+                            onUpdate = { id -> viewModel.updatePlugin(id) },
+                            onInstallFromFile = { viewModel.installFromFilePicker() },
+                            onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
+                            onOpenHomepage = { url -> viewModel.openUrl(url) },
+                            isLoading = state.isLoading,
+                            busyPlugins = state.busyPlugins,
+                            versionSheet = state.versionSheet,
+                            onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
+                            onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
+                            onCloseVersions = { viewModel.closeVersions() },
+                            mcpToolRegistry = viewModel.mcpToolRegistry,
+                            permissionDescriptions = state.permissionDescriptions,
+                            onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
+                            )
+                    }
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
                         plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
                         installedIds = state.installedPlugins.map { it.pluginId }.toSet(),
@@ -820,6 +1008,21 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                 }
             }
+        }
+
+        // Rendered at the root, alongside the other dialogs, rather than inside
+        // the Create tab: the tab unmounts when the user switches away, and a
+        // dialog that disappears mid-typing because a click landed elsewhere is
+        // worse than one that stays put.
+        if (state.organisationRequestOpen) {
+            RequestOrganisationDialog(
+                busy = state.organisationRequestBusy,
+                serverError = state.organisationRequestError,
+                onSubmit = { slug, name, description, justification ->
+                    viewModel.submitOrganisationRequest(slug, name, description, justification)
+                },
+                onDismiss = { viewModel.dismissOrganisationRequest() }
+            )
         }
     }
 }
@@ -1121,8 +1324,7 @@ private fun InstalledPluginsTab(
 
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(12.dp)
+            .fillMaxSize()  // padding now comes from the tab wrapper, which also hosts the CTA
     ) {
         // Banner: installed plugins hidden from this user for lack of permissions.
         if (inaccessiblePlugins.isNotEmpty()) {
