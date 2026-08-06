@@ -240,7 +240,10 @@ class ParsePendingRequestTest {
     }
 
     @Test
-    fun `a reviewed request is not pending`() {
+    fun `a reviewed request is a CONFIDENT no, not unknown`() {
+        // This is what lets a rejection clear the flag. Reported as unknown, a rejected request
+        // would keep "Request pending review" on screen with a disabled button until the app
+        // restarted.
         for (status in listOf("approved", "rejected", "withdrawn")) {
             assertEquals(
                 false,
@@ -258,7 +261,8 @@ class ParsePendingRequestTest {
         // locking them out of requesting one until the queue drained.
         val queue =
             """{"success":true,"is_reviewer":true,"data":[{"slug":"someone-else","status":"pending"}]}"""
-        assertEquals(false, parsePendingRequest(queue))
+        // null, not false: the queue is not theirs, so this read says nothing about them.
+        assertNull(parsePendingRequest(queue))
 
         // The same body for a non-reviewer IS theirs.
         val mine =
@@ -277,11 +281,12 @@ class ParsePendingRequestTest {
     }
 
     @Test
-    fun `no requests, refusals and malformed bodies are all false`() {
+    fun `an empty own queue is a confident no, and anything unreadable is unknown`() {
         assertEquals(false, parsePendingRequest("""{"success":true,"data":[]}"""))
-        assertEquals(false, parsePendingRequest("""{"success":false,"error":"Permission denied"}"""))
-        assertEquals(false, parsePendingRequest(null))
-        assertEquals(false, parsePendingRequest("not json"))
+        // Inconclusive: we could not ask, so the previous value must survive.
+        assertNull(parsePendingRequest("""{"success":false,"error":"Permission denied"}"""))
+        assertNull(parsePendingRequest(null))
+        assertNull(parsePendingRequest("not json"))
     }
 }
 
@@ -383,11 +388,18 @@ class OrganisationRequestValidationTest {
  */
 class RetainPendingRequestTest {
     @Test
-    fun `a server false does not clear a flag we already set`() {
-        // The case that matters: parsePendingRequest returns false for a REVIEWER, so a BOSS
-        // admin who submits a request would otherwise watch the button revert to "Request an
-        // organisation" one round trip later - the exact resubmit path the state exists to close.
-        assertEquals(true, retainPendingRequest(previouslyKnown = true, fromServer = false))
+    fun `an inconclusive read does not clear a flag we already set`() {
+        // A reviewer envelope, a refusal or a transport failure all read as null, and a BOSS
+        // admin who submits would otherwise watch the button revert one round trip later.
+        assertEquals(true, retainPendingRequest(previouslyKnown = true, fromServer = null))
+    }
+
+    @Test
+    fun `a CONFIDENT no clears it`() {
+        // The rejection path. Monotonic retention kept "Request pending review" on screen with a
+        // disabled button until the app restarted - the same lockout the reviewer branch exists
+        // to prevent, through a different door.
+        assertEquals(false, retainPendingRequest(previouslyKnown = true, fromServer = false))
     }
 
     @Test
@@ -398,14 +410,17 @@ class RetainPendingRequestTest {
     @Test
     fun `both false stays false`() {
         assertEquals(false, retainPendingRequest(previouslyKnown = false, fromServer = false))
+        assertEquals(false, retainPendingRequest(previouslyKnown = false, fromServer = null))
     }
 
     @Test
-    fun `it is monotonic, so repeated refreshes cannot flip it back`() {
+    fun `it survives repeated INCONCLUSIVE reads but yields to a confident one`() {
         var flag = false
         flag = retainPendingRequest(flag, fromServer = true)
-        // Every later read fails or comes from a reviewer's queue.
-        repeat(5) { flag = retainPendingRequest(flag, fromServer = false) }
-        assertEquals(true, flag)
+        repeat(5) { flag = retainPendingRequest(flag, fromServer = null) }
+        assertEquals(true, flag, "an unreadable queue must not clear it")
+
+        flag = retainPendingRequest(flag, fromServer = false)
+        assertEquals(false, flag, "a rejection must")
     }
 }

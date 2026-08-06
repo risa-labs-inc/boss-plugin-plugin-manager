@@ -427,7 +427,9 @@ class PluginManagerViewModel(
                         }.getOrNull()
                     parsePendingRequest(requests)
                 } else {
-                    false
+                    // A member has no CREATE branch to reach, so the queue read is skipped -
+                    // null, not false, because we did not ask.
+                    null
                 }
 
             _state.value =

@@ -175,7 +175,7 @@ fun parseMembership(raw: String?): Membership? {
  * submission therefore could never move the button off CREATE - the exact failure
  * REQUEST_PENDING was added to prevent.
  *
- * REVIEWERS GET `false`, WHATEVER THE QUEUE HOLDS. The RPC scopes to the caller's own requests
+ * REVIEWERS GET `null`, WHATEVER THE QUEUE HOLDS. The RPC scopes to the caller's own requests
  * only for a NON-reviewer; for a BOSS admin holding `organisation.approve` it returns the whole
  * queue, and the envelope's `is_reviewer` flag is how we know which we got. Without this a BOSS
  * admin who belongs to no organisation - reachable, since that is the branch we are in - would
@@ -186,17 +186,18 @@ fun parseMembership(raw: String?): Membership? {
  * is nothing to match `requester_id` against. The cost is that a reviewer does not see their own
  * pending state, which is a missing hint rather than a lockout - the safe direction.
  */
-fun parsePendingRequest(raw: String?): Boolean {
-    if (raw.isNullOrBlank()) return false
+fun parsePendingRequest(raw: String?): Boolean? {
+    if (raw.isNullOrBlank()) return null
     return runCatching {
-        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return false
-        if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return false
-        if (root["is_reviewer"]?.jsonPrimitive?.booleanOrNull == true) return false
-        val rows = root["data"] as? JsonArray ?: return false
+        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return null
+        if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return null
+        // A reviewer's queue is not theirs, so this read says nothing about the caller.
+        if (root["is_reviewer"]?.jsonPrimitive?.booleanOrNull == true) return null
+        val rows = root["data"] as? JsonArray ?: return null
         rows.any { element ->
             (element as? JsonObject)?.get("status")?.jsonPrimitive?.contentOrNull == "pending"
         }
-    }.getOrDefault(false)
+    }.getOrNull()
 }
 
 
@@ -259,8 +260,16 @@ fun submitRequestError(raw: String?): String? {
 /**
  * Combine a freshly-read pending-request flag with what we already believed.
  *
- * A refresh may only ever turn this ON, never off, and the reason is that a `false` from the
- * server is not evidence of absence in two distinct cases:
+ * A refresh retains the old value only when the read was INCONCLUSIVE (null). A confident
+ * `false` clears it.
+ *
+ * The first version of this was monotonic - `fromServer || previouslyKnown` - which fixed the
+ * two inconclusive cases below and introduced a worse one: an admin REJECTING the request is a
+ * confident false, so the user kept "Request pending review" with a disabled button for the life
+ * of the panel, and canUnload:false makes that until the app restarts. The same lockout the
+ * reviewer branch was written to prevent, through a different door.
+ *
+ * Inconclusive, and therefore retained:
  *
  *  - [parsePendingRequest] returns false for a REVIEWER, because the queue it sees is not
  *    theirs. A BOSS admin who submits a request would otherwise watch the button revert to
@@ -269,11 +278,10 @@ fun submitRequestError(raw: String?): String? {
  *  - A transport failure or a refusal also yields false, which would discard a known-true value
  *    on a failed read.
  *
- * Both are the same "unknown is not no" rule the rest of this file is built on. The flag is
- * session-scoped, so it resets when the panel is rebuilt, which is the right lifetime for an
- * optimistic hint.
+ * That is the "unknown is not no" rule the rest of this file is built on - the bug was
+ * collapsing *unknown* and *confident no* into one value.
  */
 fun retainPendingRequest(
     previouslyKnown: Boolean,
-    fromServer: Boolean,
-): Boolean = fromServer || previouslyKnown
+    fromServer: Boolean?,
+): Boolean = fromServer ?: previouslyKnown
