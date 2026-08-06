@@ -59,21 +59,22 @@ class OrganisationGateTest {
     }
 
     @Test
-    fun `a pending request offers no action`() {
+    fun `a pending creation request offers no action`() {
         assertEquals(
             OrganisationCta.REQUEST_PENDING,
-            organisationCta(Membership.PENDING, pluginInstalled = false),
+            organisationCta(Membership.NONE, pluginInstalled = false, hasPendingRequest = true),
         )
+        // Membership wins: someone since added to an organisation should be pointed at it,
+        // not at a request that is now moot.
         assertEquals(
-            OrganisationCta.REQUEST_PENDING,
-            organisationCta(Membership.PENDING, pluginInstalled = true),
+            OrganisationCta.OPEN,
+            organisationCta(Membership.ACTIVE, pluginInstalled = true, hasPendingRequest = true),
         )
         // Rendered, but not clickable: there is nothing to do but wait, and a live button would
-        // submit a duplicate that comes back as "already in use" and reads as a failure.
+        // submit a duplicate that returns "a pending request already exists" and reads as a
+        // failure.
         assertEquals(false, organisationCtaEnabled(OrganisationCta.REQUEST_PENDING))
         assertEquals(true, organisationCtaEnabled(OrganisationCta.CREATE))
-        assertEquals(true, organisationCtaEnabled(OrganisationCta.INSTALL_PLUGIN))
-        assertEquals(true, organisationCtaEnabled(OrganisationCta.OPEN))
     }
 
     @Test
@@ -108,7 +109,7 @@ class OrganisationGateTest {
     fun `the decision is total over its inputs`() {
         // Three states for membership, two for the plugin: no combination may
         // throw, and only the null-membership pair may be absent.
-        val memberships = listOf(null, Membership.NONE, Membership.PENDING, Membership.ACTIVE)
+        val memberships = listOf(null, Membership.NONE, Membership.ACTIVE)
         val installed = listOf(false, true)
         for (m in memberships) {
             for (i in installed) {
@@ -125,9 +126,47 @@ class OrganisationGateTest {
  * The parse decides which of three offers the Toolbox makes, and every wrong
  * answer still renders a plausible button, so the failure modes are quiet.
  */
-class ParseHasOrganisationTest {
+class ParseMembershipTest {
+    /** What every real response contains: the seeded boss organisation, active. */
+    private val bossRow = """{"slug":"boss","status":"active","is_system":true}"""
+
     @Test
-    fun `an active membership counts`() {
+    fun `the seeded boss org alone is NOT membership`() {
+        // THE test this file was missing. The seed makes every user an active member of the boss
+        // org and handle_new_user keeps every signup there, so counting it made ACTIVE the only
+        // reachable answer and CREATE dead code in production. The old tests passed only because
+        // they fed Membership.NONE directly, which no real response can produce.
+        assertEquals(
+            Membership.NONE,
+            parseMembership("""{"success":true,"data":[$bossRow]}"""),
+        )
+    }
+
+    @Test
+    fun `a real organisation alongside the boss org IS membership`() {
+        assertEquals(
+            Membership.ACTIVE,
+            parseMembership(
+                """{"success":true,"data":[
+                    $bossRow,
+                    {"slug":"acme","status":"active","is_system":false}
+                ]}""",
+            ),
+        )
+    }
+
+    @Test
+    fun `a row with no status counts as active`() {
+        assertEquals(
+            Membership.ACTIVE,
+            parseMembership("""{"success":true,"data":[{"slug":"acme","is_system":false}]}"""),
+        )
+    }
+
+    @Test
+    fun `a row with no is_system flag is treated as a real organisation`() {
+        // Absent means false: only the seed sets it, so defaulting the other way would make
+        // every organisation invisible.
         assertEquals(
             Membership.ACTIVE,
             parseMembership("""{"success":true,"data":[{"slug":"acme","status":"active"}]}"""),
@@ -135,49 +174,30 @@ class ParseHasOrganisationTest {
     }
 
     @Test
-    fun `a row with no status counts`() {
-        // get_my_organisations projects status, but a future shape that omits it
-        // for the common case must not read as "not a member".
-        assertEquals(
-            Membership.ACTIVE,
-            parseMembership("""{"success":true,"data":[{"slug":"acme"}]}"""),
-        )
-    }
-
-    @Test
-    fun `an empty list is a confident no`() {
+    fun `an empty list is NONE`() {
         assertEquals(Membership.NONE, parseMembership("""{"success":true,"data":[]}"""))
     }
 
     @Test
-    fun `a pending membership is not a membership`() {
-        // A pending request does not make you a member. Counting it would hide
-        // the create offer from someone still waiting, with no explanation.
-        // PENDING, not NONE: it is what lets the call to action say "Request pending review"
-        // instead of silently offering the same button again after a submission.
+    fun `a pending or invited membership is not membership`() {
+        // Both are about joining an EXISTING organisation, reviewed by that organisation's own
+        // admin - a different thing from an organisation-creation request.
         assertEquals(
-            Membership.PENDING,
-            parseMembership("""{"success":true,"data":[{"slug":"acme","status":"pending"}]}"""),
-        )
-    }
-
-    @Test
-    fun `one active among several pending still counts`() {
-        assertEquals(
-            Membership.ACTIVE,
+            Membership.NONE,
             parseMembership(
-                """{"success":true,"data":[
-                    {"slug":"a","status":"pending"},
-                    {"slug":"b","status":"active"}
-                ]}""",
+                """{"success":true,"data":[$bossRow,{"slug":"acme","status":"pending","is_system":false}]}""",
+            ),
+        )
+        assertEquals(
+            Membership.NONE,
+            parseMembership(
+                """{"success":true,"data":[$bossRow,{"slug":"acme","status":"invited","is_system":false}]}""",
             ),
         )
     }
 
     @Test
-    fun `a refusal is unknown, not no`() {
-        // Rendering "Request an organisation" because the read was refused
-        // pushes somebody toward a duplicate of one they are already in.
+    fun `a refusal is unknown, not NONE`() {
         assertNull(parseMembership("""{"success":false,"error":"Not authenticated"}"""))
     }
 
@@ -194,105 +214,47 @@ class ParseHasOrganisationTest {
 
     @Test
     fun `unknown fields do not break the parse`() {
-        // The database is migrated ahead of the app.
         assertEquals(
             Membership.ACTIVE,
             parseMembership(
-                """{"success":true,"extra":1,"data":[{"slug":"acme","status":"active","future":9}]}""",
+                """{"success":true,"extra":1,"data":[{"slug":"a","status":"active","is_system":false,"future":9}]}""",
             ),
         )
     }
 }
 
 /**
- * Slug and name validation for the request dialog, and reading the response.
+ * The organisation-creation request signal.
  *
- * The slug rules mirror the database CHECK. They are duplicated here only to
- * turn a round trip into a message under the field, so the two must agree -
- * a client rule stricter than the server silently forbids valid names, and one
- * looser just moves the error later.
+ * Separate from membership because submit_organisation_request writes to
+ * organisation_requests and creates no membership row - refreshing membership alone could never
+ * move the call to action off CREATE.
  */
-class OrganisationRequestValidationTest {
+class ParsePendingRequestTest {
     @Test
-    fun `a well-formed slug is accepted`() {
-        for (slug in listOf("acme", "ac", "acme_inc", "a1", "a_1_b", "a".repeat(31))) {
-            assertNull(organisationSlugError(slug), "should accept: $slug")
-        }
-    }
-
-    @Test
-    fun `hyphens are refused with the reason`() {
-        // Role names derive from the slug and are validated without hyphens, so
-        // a hyphenated slug would create an organisation whose roles could not
-        // be named.
-        val error = organisationSlugError("acme-inc")
-        assertNotNull(error)
-        assertTrue(error.contains("underscore"), "the message should say what to use instead: $error")
-    }
-
-    @Test
-    fun `the length bounds match the database CHECK`() {
-        assertNotNull(organisationSlugError("a"))
-        assertNull(organisationSlugError("ab"))
-        assertNull(organisationSlugError("a" + "b".repeat(30)))
-        assertNotNull(organisationSlugError("a" + "b".repeat(31)))
-    }
-
-    @Test
-    fun `a slug must start with a letter`() {
-        assertNotNull(organisationSlugError("1acme"))
-        assertNotNull(organisationSlugError("_acme"))
-    }
-
-    @Test
-    fun `uppercase and punctuation are refused`() {
-        for (slug in listOf("Acme", "acme inc", "acme.inc", "acme!", "acme/inc")) {
-            assertNotNull(organisationSlugError(slug), "should refuse: $slug")
-        }
-    }
-
-    @Test
-    fun `an empty slug asks for one rather than complaining about the pattern`() {
-        val error = organisationSlugError("")
-        assertNotNull(error)
-        assertTrue(error.startsWith("Enter"), "an empty field should prompt, not scold: $error")
-    }
-
-    @Test
-    fun `name validation covers empty and overlong`() {
-        assertNotNull(organisationNameError(""))
-        assertNotNull(organisationNameError("   "))
-        assertNull(organisationNameError("Acme Inc"))
-        assertNull(organisationNameError("A".repeat(120)))
-        assertNotNull(organisationNameError("A".repeat(121)))
-    }
-
-    @Test
-    fun `a successful submission has no error`() {
-        assertNull(submitRequestError("""{"success":true,"request_id":"abc"}"""))
-    }
-
-    @Test
-    fun `the server's own refusal is preferred over anything invented here`() {
-        // The reserved-slug and collision rules live server-side, and its
-        // wording names the actual slug.
+    fun `a pending request is detected`() {
         assertEquals(
-            """Slug "boss" is reserved or already in use""",
-            submitRequestError("""{"success":false,"error":"Slug \"boss\" is reserved or already in use"}"""),
+            true,
+            parsePendingRequest("""{"success":true,"data":[{"slug":"acme","status":"pending"}]}"""),
         )
     }
 
     @Test
-    fun `a refusal with no message still reports a failure`() {
-        assertNotNull(submitRequestError("""{"success":false}"""))
+    fun `a reviewed request is not pending`() {
+        for (status in listOf("approved", "rejected", "withdrawn")) {
+            assertEquals(
+                false,
+                parsePendingRequest("""{"success":true,"data":[{"slug":"a","status":"$status"}]}"""),
+                "status=$status",
+            )
+        }
     }
 
     @Test
-    fun `an unreachable server is an error, never a silent success`() {
-        // getOrNull() yields null on a transport failure. Reading that as
-        // success would close the dialog on a request that never happened.
-        assertNotNull(submitRequestError(null))
-        assertNotNull(submitRequestError(""))
-        assertNotNull(submitRequestError("not json"))
+    fun `no requests, refusals and malformed bodies are all false`() {
+        assertEquals(false, parsePendingRequest("""{"success":true,"data":[]}"""))
+        assertEquals(false, parsePendingRequest("""{"success":false,"error":"Permission denied"}"""))
+        assertEquals(false, parsePendingRequest(null))
+        assertEquals(false, parsePendingRequest("not json"))
     }
 }

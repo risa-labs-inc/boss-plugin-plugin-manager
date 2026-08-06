@@ -126,9 +126,10 @@ import androidx.compose.ui.window.Dialog
 private fun OrganisationCtaCard(
     membership: Membership?,
     pluginInstalled: Boolean,
+    hasPendingRequest: Boolean,
     onAction: () -> Unit
 ) {
-    val cta = organisationCta(membership, pluginInstalled) ?: return
+    val cta = organisationCta(membership, pluginInstalled, hasPendingRequest) ?: return
 
     BossSection(
         title = "Organisation",
@@ -884,6 +885,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         OrganisationCtaCard(
                             membership = state.membership,
                             pluginInstalled = viewModel.isOrganisationPluginInstalled(),
+                            hasPendingRequest = state.hasPendingOrgRequest,
                             onAction = { viewModel.onOrganisationCta() }
                         )
                         InstalledPluginsTab(

@@ -53,13 +53,16 @@ enum class OrganisationCta {
 fun organisationCta(
     membership: Membership?,
     pluginInstalled: Boolean,
+    hasPendingRequest: Boolean = false,
 ): OrganisationCta? =
     when (membership) {
         null -> null
-        Membership.NONE -> OrganisationCta.CREATE
-        Membership.PENDING -> OrganisationCta.REQUEST_PENDING
         Membership.ACTIVE ->
             if (pluginInstalled) OrganisationCta.OPEN else OrganisationCta.INSTALL_PLUGIN
+        // Membership wins over a pending request: someone who has since been added to an
+        // organisation should be pointed at it, not at a request that is now moot.
+        Membership.NONE ->
+            if (hasPendingRequest) OrganisationCta.REQUEST_PENDING else OrganisationCta.CREATE
     }
 
 /**
@@ -69,13 +72,10 @@ fun organisationCta(
  * treating it as absence hides the fact that a request was submitted at all.
  */
 enum class Membership {
-    /** An active membership in at least one organisation. */
+    /** An active membership in at least one NON-system organisation. */
     ACTIVE,
 
-    /** No active membership, but at least one request awaiting review. */
-    PENDING,
-
-    /** Nothing at all. */
+    /** None. The seeded boss organisation does not count - see [parseMembership]. */
     NONE,
 }
 
@@ -105,8 +105,12 @@ fun organisationCtaDescription(cta: OrganisationCta): String =
                 "administrator reviews it before the organisation is created."
 
         OrganisationCta.REQUEST_PENDING ->
-            "Your request has been submitted and is waiting for a BOSS administrator to review " +
-                "it. Nothing more to do here."
+            // Accurate now that this state comes from organisation_requests: those really are
+            // reviewed by a BOSS administrator holding organisation.approve. It was wrong while
+            // the state came from a `pending` MEMBERSHIP, which is a request to join an existing
+            // organisation and is approved by that organisation's own admin.
+            "Your request to create an organisation is waiting for a BOSS administrator to " +
+                "review it. Nothing more to do here."
 
         OrganisationCta.INSTALL_PLUGIN ->
             "You belong to an organisation, but the Organisation plugin is not installed. " +
@@ -125,14 +129,21 @@ object OrganisationPlugin {
 /**
  * Read this user's membership state out of a `get_my_organisations` response body.
  *
- * Returns null for anything that is not a confident yes or no - a transport
- * failure, a refusal envelope, malformed JSON. Null hides the call to action,
- * which is the right failure: offering "Request an organisation" because a read
- * failed pushes somebody toward creating a duplicate of one they are already in.
+ * Returns null for anything that is not a confident answer - a transport failure, a refusal
+ * envelope, malformed JSON. Null hides the call to action, which is the right failure: offering
+ * "Request an organisation" because a read failed pushes somebody toward duplicating one they are
+ * already in.
  *
- * A pending row is reported as PENDING, not as membership and not as nothing: it is what lets
- * the call to action say "Request pending review" instead of silently offering the same button
- * again after a submission.
+ * SYSTEM ORGANISATIONS ARE IGNORED, and this is the whole correctness of the CREATE branch.
+ * The seed makes every user an active member of the `boss` organisation and `handle_new_user`
+ * keeps every future signup there, so `get_my_organisations` returns at least one active row for
+ * literally everybody. Counting it made ACTIVE the only reachable answer and CREATE dead code in
+ * production - the unit tests passed only because they fed `Membership.NONE` directly, which no
+ * real response can produce.
+ *
+ * Only an ACTIVE membership of a NON-system organisation counts. A `pending` or `invited` row is
+ * about joining an existing organisation and is deliberately not membership here - see
+ * [parsePendingRequest] for the state that actually drives REQUEST_PENDING.
  */
 fun parseMembership(raw: String?): Membership? {
     if (raw.isNullOrBlank()) return null
@@ -141,20 +152,44 @@ fun parseMembership(raw: String?): Membership? {
         if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return null
         val rows = root["data"] as? JsonArray ?: return null
 
-        val statuses =
-            rows.map { element ->
-                (element as? JsonObject)?.get("status")?.jsonPrimitive?.contentOrNull
+        val realActive =
+            rows.any { element ->
+                val row = element as? JsonObject ?: return@any false
+                val isSystem = row["is_system"]?.jsonPrimitive?.booleanOrNull ?: false
+                val status = row["status"]?.jsonPrimitive?.contentOrNull
+                // Absent status counts as active: get_my_organisations projects it today, but a
+                // future shape that omits it for the common case must not read as "not a member".
+                !isSystem && (status == null || status == "active")
             }
 
-        when {
-            // Absent status counts as active: get_my_organisations projects it today, but a
-            // future shape that omits it for the common case must not read as "not a member".
-            statuses.any { it == null || it == "active" } -> Membership.ACTIVE
-            statuses.isNotEmpty() -> Membership.PENDING
-            else -> Membership.NONE
-        }
+        if (realActive) Membership.ACTIVE else Membership.NONE
     }.getOrNull()
 }
+
+/**
+ * Does this user have an organisation-creation request awaiting review?
+ *
+ * A SEPARATE read, from `list_organisation_requests`, and it has to be:
+ * `submit_organisation_request` writes to `organisation_requests` and creates no membership row
+ * at all, while `get_my_organisations` reads `organisation_members`. Refreshing membership after a
+ * submission therefore could never move the button off CREATE - the exact failure
+ * REQUEST_PENDING was added to prevent.
+ *
+ * The RPC already scopes to the caller's own requests for a non-reviewer, so no filtering is
+ * needed here beyond the status.
+ */
+fun parsePendingRequest(raw: String?): Boolean {
+    if (raw.isNullOrBlank()) return false
+    return runCatching {
+        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return false
+        if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return false
+        val rows = root["data"] as? JsonArray ?: return false
+        rows.any { element ->
+            (element as? JsonObject)?.get("status")?.jsonPrimitive?.contentOrNull == "pending"
+        }
+    }.getOrDefault(false)
+}
+
 
 /**
  * Slug validation, mirroring the database CHECK exactly.

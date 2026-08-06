@@ -10,6 +10,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -73,6 +74,14 @@ data class PluginManagerState(
      * every existing member for the length of a round trip.
      */
     val membership: Membership? = null,
+    /**
+     * Whether an organisation-creation request is awaiting review.
+     *
+     * A SEPARATE read from membership: submit_organisation_request writes to
+     * organisation_requests and creates no membership row, so refreshing membership alone could
+     * never move the call to action off CREATE.
+     */
+    val hasPendingOrgRequest: Boolean = false,
     /** True while the "request an organisation" dialog is open. */
     val organisationRequestOpen: Boolean = false,
     /** True while a request is in flight, so the dialog can disable its submit. */
@@ -402,7 +411,26 @@ class PluginManagerViewModel(
             // promises this is quiet; without the catch it takes the coroutine down instead.
             val raw =
                 runCatching { supabase.rpc("get_my_organisations", "{}").getOrNull() }.getOrNull()
-            _state.value = _state.value.copy(membership = parseMembership(raw))
+            val membership = parseMembership(raw)
+
+            // Only asked when it can change the answer. A member already gets
+            // INSTALL_PLUGIN or OPEN, so the extra round trip would buy nothing.
+            val pending =
+                if (membership == Membership.NONE) {
+                    val requests =
+                        runCatching {
+                            supabase.rpc(
+                                "list_organisation_requests",
+                                """{"p_status":"pending"}""",
+                            ).getOrNull()
+                        }.getOrNull()
+                    parsePendingRequest(requests)
+                } else {
+                    false
+                }
+
+            _state.value =
+                _state.value.copy(membership = membership, hasPendingOrgRequest = pending)
         }
     }
 
@@ -489,7 +517,11 @@ class PluginManagerViewModel(
      * opening a panel that does not exist yet.
      */
     fun onOrganisationCta() {
-        when (organisationCta(_state.value.membership, isOrganisationPluginInstalled())) {
+        when (organisationCta(
+                _state.value.membership,
+                isOrganisationPluginInstalled(),
+                _state.value.hasPendingOrgRequest,
+            )) {
             OrganisationCta.CREATE ->
                 // In-app, NOT a web page. submit_organisation_request is
                 // authenticated-only, and the handoff-token mechanism that
