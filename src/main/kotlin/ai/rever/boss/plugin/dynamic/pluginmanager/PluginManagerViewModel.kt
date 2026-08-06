@@ -487,7 +487,12 @@ class PluginManagerViewModel(
                             PanelId(
                                 panelId = OrganisationPlugin.PANEL_ID,
                                 defaultOrder = 0,
-                                pluginId = "ai.rever.boss",
+                                // The plugin's own id, NOT the "ai.rever.boss" default: the
+                                // host matches panel-open events on panelId AND pluginId, and
+                                // the Organisation panel registers under its real id.
+                                // Defaulting here would silently never match, and the event
+                                // would be dropped as "panel never registered".
+                                pluginId = OrganisationPlugin.PLUGIN_ID,
                             ),
                             wid,
                         )
