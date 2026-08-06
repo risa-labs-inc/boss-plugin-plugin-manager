@@ -20,15 +20,15 @@ class OrganisationGateTest {
         // The case that matters. Treating "not asked yet" as "has none" would
         // show "Request an organisation" to every existing member for the
         // length of a round trip, every time the panel opens.
-        assertNull(organisationCta(hasOrganisation = null, pluginInstalled = false))
-        assertNull(organisationCta(hasOrganisation = null, pluginInstalled = true))
+        assertNull(organisationCta(membership = null, pluginInstalled = false))
+        assertNull(organisationCta(membership = null, pluginInstalled = true))
     }
 
     @Test
     fun `no organisation offers to request one`() {
         assertEquals(
             OrganisationCta.CREATE,
-            organisationCta(hasOrganisation = false, pluginInstalled = false),
+            organisationCta(Membership.NONE, pluginInstalled = false),
         )
     }
 
@@ -38,7 +38,7 @@ class OrganisationGateTest {
         // offer is unchanged.
         assertEquals(
             OrganisationCta.CREATE,
-            organisationCta(hasOrganisation = false, pluginInstalled = true),
+            organisationCta(Membership.NONE, pluginInstalled = true),
         )
     }
 
@@ -46,7 +46,7 @@ class OrganisationGateTest {
     fun `a member without the plugin is offered the install`() {
         assertEquals(
             OrganisationCta.INSTALL_PLUGIN,
-            organisationCta(hasOrganisation = true, pluginInstalled = false),
+            organisationCta(Membership.ACTIVE, pluginInstalled = false),
         )
     }
 
@@ -54,8 +54,26 @@ class OrganisationGateTest {
     fun `a member with the plugin is offered the panel`() {
         assertEquals(
             OrganisationCta.OPEN,
-            organisationCta(hasOrganisation = true, pluginInstalled = true),
+            organisationCta(Membership.ACTIVE, pluginInstalled = true),
         )
+    }
+
+    @Test
+    fun `a pending request offers no action`() {
+        assertEquals(
+            OrganisationCta.REQUEST_PENDING,
+            organisationCta(Membership.PENDING, pluginInstalled = false),
+        )
+        assertEquals(
+            OrganisationCta.REQUEST_PENDING,
+            organisationCta(Membership.PENDING, pluginInstalled = true),
+        )
+        // Rendered, but not clickable: there is nothing to do but wait, and a live button would
+        // submit a duplicate that comes back as "already in use" and reads as a failure.
+        assertEquals(false, organisationCtaEnabled(OrganisationCta.REQUEST_PENDING))
+        assertEquals(true, organisationCtaEnabled(OrganisationCta.CREATE))
+        assertEquals(true, organisationCtaEnabled(OrganisationCta.INSTALL_PLUGIN))
+        assertEquals(true, organisationCtaEnabled(OrganisationCta.OPEN))
     }
 
     @Test
@@ -90,7 +108,7 @@ class OrganisationGateTest {
     fun `the decision is total over its inputs`() {
         // Three states for membership, two for the plugin: no combination may
         // throw, and only the null-membership pair may be absent.
-        val memberships = listOf<Boolean?>(null, false, true)
+        val memberships = listOf(null, Membership.NONE, Membership.PENDING, Membership.ACTIVE)
         val installed = listOf(false, true)
         for (m in memberships) {
             for (i in installed) {
@@ -111,8 +129,8 @@ class ParseHasOrganisationTest {
     @Test
     fun `an active membership counts`() {
         assertEquals(
-            true,
-            parseHasOrganisation("""{"success":true,"data":[{"slug":"acme","status":"active"}]}"""),
+            Membership.ACTIVE,
+            parseMembership("""{"success":true,"data":[{"slug":"acme","status":"active"}]}"""),
         )
     }
 
@@ -121,31 +139,33 @@ class ParseHasOrganisationTest {
         // get_my_organisations projects status, but a future shape that omits it
         // for the common case must not read as "not a member".
         assertEquals(
-            true,
-            parseHasOrganisation("""{"success":true,"data":[{"slug":"acme"}]}"""),
+            Membership.ACTIVE,
+            parseMembership("""{"success":true,"data":[{"slug":"acme"}]}"""),
         )
     }
 
     @Test
     fun `an empty list is a confident no`() {
-        assertEquals(false, parseHasOrganisation("""{"success":true,"data":[]}"""))
+        assertEquals(Membership.NONE, parseMembership("""{"success":true,"data":[]}"""))
     }
 
     @Test
     fun `a pending membership is not a membership`() {
         // A pending request does not make you a member. Counting it would hide
         // the create offer from someone still waiting, with no explanation.
+        // PENDING, not NONE: it is what lets the call to action say "Request pending review"
+        // instead of silently offering the same button again after a submission.
         assertEquals(
-            false,
-            parseHasOrganisation("""{"success":true,"data":[{"slug":"acme","status":"pending"}]}"""),
+            Membership.PENDING,
+            parseMembership("""{"success":true,"data":[{"slug":"acme","status":"pending"}]}"""),
         )
     }
 
     @Test
     fun `one active among several pending still counts`() {
         assertEquals(
-            true,
-            parseHasOrganisation(
+            Membership.ACTIVE,
+            parseMembership(
                 """{"success":true,"data":[
                     {"slug":"a","status":"pending"},
                     {"slug":"b","status":"active"}
@@ -158,26 +178,26 @@ class ParseHasOrganisationTest {
     fun `a refusal is unknown, not no`() {
         // Rendering "Request an organisation" because the read was refused
         // pushes somebody toward a duplicate of one they are already in.
-        assertNull(parseHasOrganisation("""{"success":false,"error":"Not authenticated"}"""))
+        assertNull(parseMembership("""{"success":false,"error":"Not authenticated"}"""))
     }
 
     @Test
     fun `malformed and empty bodies are unknown`() {
-        assertNull(parseHasOrganisation(null))
-        assertNull(parseHasOrganisation(""))
-        assertNull(parseHasOrganisation("   "))
-        assertNull(parseHasOrganisation("not json"))
-        assertNull(parseHasOrganisation("[]"))
-        assertNull(parseHasOrganisation("""{"success":true}"""))
-        assertNull(parseHasOrganisation("""{"success":true,"data":{"not":"a list"}}"""))
+        assertNull(parseMembership(null))
+        assertNull(parseMembership(""))
+        assertNull(parseMembership("   "))
+        assertNull(parseMembership("not json"))
+        assertNull(parseMembership("[]"))
+        assertNull(parseMembership("""{"success":true}"""))
+        assertNull(parseMembership("""{"success":true,"data":{"not":"a list"}}"""))
     }
 
     @Test
     fun `unknown fields do not break the parse`() {
         // The database is migrated ahead of the app.
         assertEquals(
-            true,
-            parseHasOrganisation(
+            Membership.ACTIVE,
+            parseMembership(
                 """{"success":true,"extra":1,"data":[{"slug":"acme","status":"active","future":9}]}""",
             ),
         )

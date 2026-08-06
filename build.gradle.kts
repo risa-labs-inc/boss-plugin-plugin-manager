@@ -61,14 +61,19 @@ repositories {
 dependencies {
     if (useLocalDependencies) {
         // Local development: use boss-plugin-api JAR from sibling repo
+        // `files { ... }` takes a lazy callable, so the error is raised when the classpath is
+        // RESOLVED rather than while the script is configured. Throwing at configuration time
+        // made `./gradlew tasks`, `./gradlew clean` and IDE sync all fail for anyone who has not
+        // built the sibling checkout - a harsher failure than the unresolved references it
+        // replaced. This keeps the useful message and confines it to builds that need the jar.
         compileOnly(
-            files(
+            files({
                 localBossPluginApiJar
                     ?: error(
                         "No boss-plugin-api jar in $bossPluginApiPath/build/libs - " +
                             "run ./gradlew jar in the sibling boss-plugin-api checkout first.",
-                    ),
-            ),
+                    )
+            }),
         )
     } else {
         // CI: use downloaded JAR

@@ -24,6 +24,8 @@ import ai.rever.boss.plugin.ui.BossThemeColors
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
 import ai.rever.boss.plugin.ui.BossToggle
@@ -109,6 +111,45 @@ import androidx.compose.ui.window.Dialog
  * knows the full list, and `boss` deriving the existing global `boss_admin`
  * role is the reason that list exists.
  */
+/**
+ * The organisation call to action.
+ *
+ * On the INSTALLED tab, not the Create tab, and that placement is the point: the Create tab is
+ * gated on `canPublish` (store admin or plugins.create), while the CREATE branch here targets
+ * users who belong to no organisation - by definition the least likely to hold plugins.create.
+ * Behind that gate, the people who most need the request form were the ones who could not reach
+ * it. Organisations are account-level anyway, not a publishing concern.
+ *
+ * Renders nothing while membership is unknown: see organisationCta.
+ */
+@Composable
+private fun OrganisationCtaCard(
+    membership: Membership?,
+    pluginInstalled: Boolean,
+    onAction: () -> Unit
+) {
+    val cta = organisationCta(membership, pluginInstalled) ?: return
+
+    BossSection(
+        title = "Organisation",
+        description = "Organisations own plugins, roles and shared secrets"
+    ) {
+        Text(
+            text = organisationCtaDescription(cta),
+            fontSize = 13.sp,
+            color = BossThemeColors.TextSecondary,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        BossPrimaryButton(
+            text = organisationCtaLabel(cta),
+            onClick = onAction,
+            enabled = organisationCtaEnabled(cta),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+    Spacer(Modifier.height(16.dp))
+}
+
 @Composable
 private fun RequestOrganisationDialog(
     busy: Boolean,
@@ -839,7 +880,13 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 modifier = Modifier.weight(1f).fillMaxWidth()
             ) {
                 when (state.currentTab) {
-                    PluginManagerTab.INSTALLED -> InstalledPluginsTab(
+                    PluginManagerTab.INSTALLED -> Column {
+                        OrganisationCtaCard(
+                            membership = state.membership,
+                            pluginInstalled = viewModel.isOrganisationPluginInstalled(),
+                            onAction = { viewModel.onOrganisationCta() }
+                        )
+                        InstalledPluginsTab(
                         plugins = filterPlugins(state.installedPlugins, state.searchQuery),
                         inaccessiblePlugins = state.inaccessiblePlugins,
                         updateIds = state.updates.map { it.pluginId }.toSet(),
@@ -858,7 +905,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         mcpToolRegistry = viewModel.mcpToolRegistry,
                         permissionDescriptions = state.permissionDescriptions,
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
-                    )
+                        )
+                    }
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
                         plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
                         installedIds = state.installedPlugins.map { it.pluginId }.toSet(),
@@ -882,9 +930,6 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
-                        hasOrganisation = state.hasOrganisation,
-                        organisationPluginInstalled = viewModel.isOrganisationPluginInstalled(),
-                        onOrganisationCta = { viewModel.onOrganisationCta() },
                         toolCreatorInstalled = state.installedPlugins.any {
                             it.pluginId == PluginManagerViewModel.TOOL_CREATOR_PLUGIN_ID
                         },
@@ -2312,10 +2357,6 @@ private enum class JarSource {
 @Composable
 private fun PublishTab(
     toolCreatorInstalled: Boolean,
-    /** Null while the membership lookup is in flight; null hides the call to action. */
-    hasOrganisation: Boolean?,
-    organisationPluginInstalled: Boolean,
-    onOrganisationCta: () -> Unit,
     onOpenToolCreator: () -> Unit,
     onFetchFromGitHub: (
         url: String,
@@ -2376,30 +2417,6 @@ private fun PublishTab(
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
-        // Organisation call to action. Rendered only when the membership lookup
-        // has answered: `organisationCta` returns null while it is unknown, so
-        // an existing member never sees "Request an organisation" flash by.
-        organisationCta(hasOrganisation, organisationPluginInstalled)?.let { cta ->
-            BossSection(
-                title = "Organisation",
-                description = "Organisations own plugins, roles and shared secrets"
-            ) {
-                Text(
-                    text = organisationCtaDescription(cta),
-                    fontSize = 13.sp,
-                    color = BossThemeColors.TextSecondary,
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-                BossPrimaryButton(
-                    text = organisationCtaLabel(cta),
-                    onClick = onOrganisationCta,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
         BossSection(
             title = "Create a new plugin",
             description = "Scaffold a new BOSS plugin and build it with an AI coding agent"

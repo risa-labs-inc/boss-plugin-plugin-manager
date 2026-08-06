@@ -8,7 +8,8 @@ import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHasOrganisation
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -71,7 +72,7 @@ data class PluginManagerState(
      * A Boolean defaulting to false would show "Request an organisation" to
      * every existing member for the length of a round trip.
      */
-    val hasOrganisation: Boolean? = null,
+    val membership: Membership? = null,
     /** True while the "request an organisation" dialog is open. */
     val organisationRequestOpen: Boolean = false,
     /** True while a request is in flight, so the dialog can disable its submit. */
@@ -247,6 +248,11 @@ class PluginManagerViewModel(
      * Refresh all data.
      */
     fun refresh() {
+        // Included here, not only at construction: after an admin approves a request the user
+        // would otherwise keep the stale call to action for the life of the panel - and this is
+        // a system plugin with canUnload:false, so that means until the app restarts.
+        refreshOrganisationMembership()
+
         scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
@@ -391,9 +397,12 @@ class PluginManagerViewModel(
     fun refreshOrganisationMembership() {
         val supabase = supabaseDataProvider ?: return
         scope.launch {
-            val result = supabase.rpc("get_my_organisations", "{}")
-            val has = parseHasOrganisation(result.getOrNull())
-            _state.value = _state.value.copy(hasOrganisation = has)
+            // runCatching, because rpc() can THROW rather than return a failed Result
+            // (serialization, cancellation, a transport that does not wrap). The KDoc above
+            // promises this is quiet; without the catch it takes the coroutine down instead.
+            val raw =
+                runCatching { supabase.rpc("get_my_organisations", "{}").getOrNull() }.getOrNull()
+            _state.value = _state.value.copy(membership = parseMembership(raw))
         }
     }
 
@@ -421,33 +430,51 @@ class PluginManagerViewModel(
         _state.value = _state.value.copy(organisationRequestBusy = true, organisationRequestError = null)
 
         scope.launch {
-            val params =
-                buildJsonObject {
+            // Wrapped, because everything that clears `busy` lives on the success and failure
+            // paths only. An rpc() that THREW left the dialog showing "Sending..." with both of
+            // its exits disabled - permanently unclosable short of shutting the panel.
+            try {
+                val params =
+                    buildJsonObject {
                     put("p_slug", slug.trim())
                     put("p_name", name.trim())
                     if (description.isNotBlank()) put("p_description", description.trim())
                     if (justification.isNotBlank()) put("p_justification", justification.trim())
                 }.toString()
 
-            val raw = supabase.rpc("submit_organisation_request", params).getOrNull()
-            val error = submitRequestError(raw)
+                val raw = supabase.rpc("submit_organisation_request", params).getOrNull()
+                val error = submitRequestError(raw)
 
-            if (error != null) {
+                if (error != null) {
+                    _state.value =
+                        _state.value.copy(
+                            organisationRequestBusy = false,
+                            organisationRequestError = error,
+                        )
+                    return@launch
+                }
+
                 _state.value =
-                    _state.value.copy(organisationRequestBusy = false, organisationRequestError = error)
-                return@launch
+                    _state.value.copy(
+                        organisationRequestBusy = false,
+                        organisationRequestOpen = false,
+                        organisationRequestError = null,
+                    )
+                // The request is pending, not approved. Refreshing is what turns the call to
+                // action into "Request pending review"; without it the button is byte-for-byte
+                // unchanged after a submission and the natural response is to submit again.
+                refreshOrganisationMembership()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Must propagate, or a cancelled scope leaks this coroutine.
+                _state.value = _state.value.copy(organisationRequestBusy = false)
+                throw e
+            } catch (_: Throwable) {
+                _state.value =
+                    _state.value.copy(
+                        organisationRequestBusy = false,
+                        organisationRequestError = "Could not send the request. Please try again.",
+                    )
             }
-
-            _state.value =
-                _state.value.copy(
-                    organisationRequestBusy = false,
-                    organisationRequestOpen = false,
-                    organisationRequestError = null,
-                )
-            // The request is pending, not approved, so membership is unchanged -
-            // refreshed anyway so the call to action reflects whatever the
-            // server now reports rather than what this side assumed.
-            refreshOrganisationMembership()
         }
     }
 
@@ -462,7 +489,7 @@ class PluginManagerViewModel(
      * opening a panel that does not exist yet.
      */
     fun onOrganisationCta() {
-        when (organisationCta(_state.value.hasOrganisation, isOrganisationPluginInstalled())) {
+        when (organisationCta(_state.value.membership, isOrganisationPluginInstalled())) {
             OrganisationCta.CREATE ->
                 // In-app, NOT a web page. submit_organisation_request is
                 // authenticated-only, and the handoff-token mechanism that
@@ -500,7 +527,8 @@ class PluginManagerViewModel(
                 }
             }
 
-            null -> Unit
+            // A pending request has nothing to act on; the button is disabled anyway.
+            OrganisationCta.REQUEST_PENDING, null -> Unit
         }
     }
 

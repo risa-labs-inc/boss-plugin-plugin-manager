@@ -20,6 +20,16 @@ enum class OrganisationCta {
     /** No organisation yet: offer to request one. */
     CREATE,
 
+    /**
+     * A request is in the queue.
+     *
+     * Rendered rather than collapsed into CREATE because without it, submitting a request changes
+     * nothing on screen at all - the same button with the same text - and the natural response is
+     * to submit again, which returns "already in use" and reads as a failure rather than a
+     * duplicate.
+     */
+    REQUEST_PENDING,
+
     /** Has one, but the Organisation plugin is not installed: offer to install it. */
     INSTALL_PLUGIN,
 
@@ -41,14 +51,36 @@ enum class OrganisationCta {
  * known synchronously.
  */
 fun organisationCta(
-    hasOrganisation: Boolean?,
+    membership: Membership?,
     pluginInstalled: Boolean,
 ): OrganisationCta? =
-    when (hasOrganisation) {
+    when (membership) {
         null -> null
-        false -> OrganisationCta.CREATE
-        true -> if (pluginInstalled) OrganisationCta.OPEN else OrganisationCta.INSTALL_PLUGIN
+        Membership.NONE -> OrganisationCta.CREATE
+        Membership.PENDING -> OrganisationCta.REQUEST_PENDING
+        Membership.ACTIVE ->
+            if (pluginInstalled) OrganisationCta.OPEN else OrganisationCta.INSTALL_PLUGIN
     }
+
+/**
+ * What the server says about this user's organisations.
+ *
+ * Three states, not a Boolean, because a pending request is neither membership nor its absence:
+ * treating it as absence hides the fact that a request was submitted at all.
+ */
+enum class Membership {
+    /** An active membership in at least one organisation. */
+    ACTIVE,
+
+    /** No active membership, but at least one request awaiting review. */
+    PENDING,
+
+    /** Nothing at all. */
+    NONE,
+}
+
+/** True when this call to action should be clickable. A pending request has nothing to do. */
+fun organisationCtaEnabled(cta: OrganisationCta): Boolean = cta != OrganisationCta.REQUEST_PENDING
 
 /**
  * Button label for a call to action.
@@ -60,6 +92,7 @@ fun organisationCta(
 fun organisationCtaLabel(cta: OrganisationCta): String =
     when (cta) {
         OrganisationCta.CREATE -> "Request an organisation"
+        OrganisationCta.REQUEST_PENDING -> "Request pending review"
         OrganisationCta.INSTALL_PLUGIN -> "Install the Organisation plugin"
         OrganisationCta.OPEN -> "Open Organisation"
     }
@@ -70,6 +103,10 @@ fun organisationCtaDescription(cta: OrganisationCta): String =
         OrganisationCta.CREATE ->
             "You are not a member of any organisation. Requesting one opens a form; a BOSS " +
                 "administrator reviews it before the organisation is created."
+
+        OrganisationCta.REQUEST_PENDING ->
+            "Your request has been submitted and is waiting for a BOSS administrator to review " +
+                "it. Nothing more to do here."
 
         OrganisationCta.INSTALL_PLUGIN ->
             "You belong to an organisation, but the Organisation plugin is not installed. " +
@@ -86,29 +123,35 @@ object OrganisationPlugin {
 }
 
 /**
- * Read "does this user belong to any organisation" out of a
- * `get_my_organisations` response body.
+ * Read this user's membership state out of a `get_my_organisations` response body.
  *
  * Returns null for anything that is not a confident yes or no - a transport
  * failure, a refusal envelope, malformed JSON. Null hides the call to action,
  * which is the right failure: offering "Request an organisation" because a read
  * failed pushes somebody toward creating a duplicate of one they are already in.
  *
- * A row is only counted when its status is active or absent. The RPC returns
- * pending memberships too, and a pending request does not make you a member -
- * counting it would hide the create offer from someone still waiting, with no
- * explanation of why.
+ * A pending row is reported as PENDING, not as membership and not as nothing: it is what lets
+ * the call to action say "Request pending review" instead of silently offering the same button
+ * again after a submission.
  */
-fun parseHasOrganisation(raw: String?): Boolean? {
+fun parseMembership(raw: String?): Membership? {
     if (raw.isNullOrBlank()) return null
     return runCatching {
         val root = Json.parseToJsonElement(raw) as? JsonObject ?: return null
         if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return null
         val rows = root["data"] as? JsonArray ?: return null
-        rows.any { element ->
-            val status =
+
+        val statuses =
+            rows.map { element ->
                 (element as? JsonObject)?.get("status")?.jsonPrimitive?.contentOrNull
-            status == null || status == "active"
+            }
+
+        when {
+            // Absent status counts as active: get_my_organisations projects it today, but a
+            // future shape that omits it for the common case must not read as "not a member".
+            statuses.any { it == null || it == "active" } -> Membership.ACTIVE
+            statuses.isNotEmpty() -> Membership.PENDING
+            else -> Membership.NONE
         }
     }.getOrNull()
 }
