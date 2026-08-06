@@ -11,6 +11,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePendingRequest
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.retainPendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -66,7 +67,7 @@ data class PluginManagerState(
      */
     val permissionDescriptions: Map<String, String> = emptyMap(),
     /**
-     * Whether the signed-in user belongs to any organisation.
+     * The signed-in user's organisation membership.
      *
      * NULL while the lookup is in flight, or when there is no Supabase provider
      * to ask. Null renders no call to action at all -- see [organisationCta].
@@ -430,7 +431,13 @@ class PluginManagerViewModel(
                 }
 
             _state.value =
-                _state.value.copy(membership = membership, hasPendingOrgRequest = pending)
+                _state.value.copy(
+                    membership = membership,
+                    // Never downgraded by a refresh - see retainPendingRequest for why a
+                    // server `false` is not evidence of absence.
+                    hasPendingOrgRequest =
+                        retainPendingRequest(_state.value.hasPendingOrgRequest, pending),
+                )
         }
     }
 

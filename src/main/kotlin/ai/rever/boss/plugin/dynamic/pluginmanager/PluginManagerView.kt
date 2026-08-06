@@ -25,6 +25,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
@@ -95,23 +96,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 
 /**
- * Confirmation dialog for destructive actions.
- */
-/**
- * Request a new organisation.
- *
- * In-app rather than a web page, and that is not a style preference:
- * `submit_organisation_request` is authenticated-only, and the handoff-token
- * mechanism that authenticates the other organisation web pages is org-scoped.
- * A user with no organisation has nothing to hand off for, so a web form could
- * not authenticate at all.
- *
- * Validation mirrors the database CHECK so a typo is a message under the field.
- * The reserved-slug and collision rules stay server-side - only the database
- * knows the full list, and `boss` deriving the existing global `boss_admin`
- * role is the reason that list exists.
- */
-/**
  * The organisation call to action.
  *
  * On the INSTALLED tab, not the Create tab, and that placement is the point: the Create tab is
@@ -151,6 +135,20 @@ private fun OrganisationCtaCard(
     Spacer(Modifier.height(16.dp))
 }
 
+/**
+ * Request a new organisation.
+ *
+ * In-app rather than a web page, and that is not a style preference:
+ * `submit_organisation_request` is authenticated-only, and the handoff-token
+ * mechanism that authenticates the other organisation web pages is org-scoped.
+ * A user with no organisation has nothing to hand off for, so a web form could
+ * not authenticate at all.
+ *
+ * Validation mirrors the database CHECK so a typo is a message under the field.
+ * The reserved-slug and collision rules stay server-side - only the database
+ * knows the full list, and `boss` deriving the existing global `boss_admin`
+ * role is the reason that list exists.
+ */
 @Composable
 private fun RequestOrganisationDialog(
     busy: Boolean,
@@ -260,6 +258,9 @@ private fun FieldError(message: String) {
     )
 }
 
+/**
+ * Confirmation dialog for destructive actions.
+ */
 @Composable
 private fun ConfirmationDialog(
     title: String,
@@ -881,33 +882,42 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 modifier = Modifier.weight(1f).fillMaxWidth()
             ) {
                 when (state.currentTab) {
-                    PluginManagerTab.INSTALLED -> Column {
+                    // The wrapper carries the tab's padding, and InstalledPluginsTab's own
+                    // Column drops it - otherwise the CTA renders flush against the panel edge
+                    // while every other card on the tab is inset by 12dp.
+                    PluginManagerTab.INSTALLED -> Column(Modifier.fillMaxSize().padding(12.dp)) {
                         OrganisationCtaCard(
                             membership = state.membership,
-                            pluginInstalled = viewModel.isOrganisationPluginInstalled(),
+                            // Read from the COLLECTED state, not viewModel._state: everything
+                            // else here observes `state`, and reading the flow's value directly
+                            // from composition only recomposes correctly by accident.
+                            pluginInstalled =
+                                state.installedPlugins.any {
+                                    it.pluginId == OrganisationPlugin.PLUGIN_ID
+                                },
                             hasPendingRequest = state.hasPendingOrgRequest,
                             onAction = { viewModel.onOrganisationCta() }
                         )
                         InstalledPluginsTab(
-                        plugins = filterPlugins(state.installedPlugins, state.searchQuery),
-                        inaccessiblePlugins = state.inaccessiblePlugins,
-                        updateIds = state.updates.map { it.pluginId }.toSet(),
-                        onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
-                        onUninstall = { id -> viewModel.uninstallPlugin(id) },
-                        onUpdate = { id -> viewModel.updatePlugin(id) },
-                        onInstallFromFile = { viewModel.installFromFilePicker() },
-                        onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
-                        onOpenHomepage = { url -> viewModel.openUrl(url) },
-                        isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins,
-                        versionSheet = state.versionSheet,
-                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
-                        onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
-                        onCloseVersions = { viewModel.closeVersions() },
-                        mcpToolRegistry = viewModel.mcpToolRegistry,
-                        permissionDescriptions = state.permissionDescriptions,
-                        onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
-                        )
+                            plugins = filterPlugins(state.installedPlugins, state.searchQuery),
+                            inaccessiblePlugins = state.inaccessiblePlugins,
+                            updateIds = state.updates.map { it.pluginId }.toSet(),
+                            onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
+                            onUninstall = { id -> viewModel.uninstallPlugin(id) },
+                            onUpdate = { id -> viewModel.updatePlugin(id) },
+                            onInstallFromFile = { viewModel.installFromFilePicker() },
+                            onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
+                            onOpenHomepage = { url -> viewModel.openUrl(url) },
+                            isLoading = state.isLoading,
+                            busyPlugins = state.busyPlugins,
+                            versionSheet = state.versionSheet,
+                            onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
+                            onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
+                            onCloseVersions = { viewModel.closeVersions() },
+                            mcpToolRegistry = viewModel.mcpToolRegistry,
+                            permissionDescriptions = state.permissionDescriptions,
+                            onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
+                            )
                     }
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
                         plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
@@ -1314,8 +1324,7 @@ private fun InstalledPluginsTab(
 
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(12.dp)
+            .fillMaxSize()  // padding now comes from the tab wrapper, which also hosts the CTA
     ) {
         // Banner: installed plugins hidden from this user for lack of permissions.
         if (inaccessiblePlugins.isNotEmpty()) {

@@ -35,11 +35,27 @@ val bossPluginApiPath = "../boss-plugin-api"
  * plainly exist. Newest-by-mtime rather than by version string, because 1.0.9 sorts above 1.0.71
  * lexicographically and the jar you just built is the one you meant.
  */
-val localBossPluginApiJar: File? =
+/**
+ * The most recently built api jar in the sibling checkout, resolved LAZILY.
+ *
+ * A function, not a top-level `val`: as a val the listFiles/lastModified scan ran at
+ * CONFIGURATION time, and under Gradle's configuration cache that snapshot is reused across
+ * invocations - so a jar you just rebuilt next door would not be picked up until something else
+ * invalidated the cache. That is the stale-pin problem this replaced, in a subtler form.
+ *
+ * Newest by mtime rather than version string, because 1.0.9 sorts above 1.0.71 lexicographically
+ * and the jar you just built is the one you meant.
+ */
+fun latestBossPluginApiJar(): File =
     file("$bossPluginApiPath/build/libs")
         .listFiles { f: File -> f.name.startsWith("boss-plugin-api-") && f.name.endsWith(".jar") }
-        ?.filterNot { it.name.contains("-sources") || it.name.contains("-thin") }
-        ?.maxByOrNull { it.lastModified() }
+        ?.filterNot {
+            it.name.contains("-sources") || it.name.contains("-javadoc") || it.name.contains("-thin")
+        }?.maxByOrNull { it.lastModified() }
+        ?: error(
+            "No boss-plugin-api jar in $bossPluginApiPath/build/libs - " +
+                "run ./gradlew jar in the sibling boss-plugin-api checkout first.",
+        )
 
 // Supabase anon key: CI env var > gradle.properties > error
 val supabaseAnonKey: String = System.getenv("SUPABASE_ANON_KEY")
@@ -66,15 +82,7 @@ dependencies {
         // made `./gradlew tasks`, `./gradlew clean` and IDE sync all fail for anyone who has not
         // built the sibling checkout - a harsher failure than the unresolved references it
         // replaced. This keeps the useful message and confines it to builds that need the jar.
-        compileOnly(
-            files({
-                localBossPluginApiJar
-                    ?: error(
-                        "No boss-plugin-api jar in $bossPluginApiPath/build/libs - " +
-                            "run ./gradlew jar in the sibling boss-plugin-api checkout first.",
-                    )
-            }),
-        )
+        compileOnly(files({ latestBossPluginApiJar() }))
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))

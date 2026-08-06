@@ -255,3 +255,25 @@ fun submitRequestError(raw: String?): String? {
     return parsed["error"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         ?: "The request was refused."
 }
+
+/**
+ * Combine a freshly-read pending-request flag with what we already believed.
+ *
+ * A refresh may only ever turn this ON, never off, and the reason is that a `false` from the
+ * server is not evidence of absence in two distinct cases:
+ *
+ *  - [parsePendingRequest] returns false for a REVIEWER, because the queue it sees is not
+ *    theirs. A BOSS admin who submits a request would otherwise watch the button revert to
+ *    "Request an organisation" one round trip later - the resubmit path the pending state exists
+ *    to close.
+ *  - A transport failure or a refusal also yields false, which would discard a known-true value
+ *    on a failed read.
+ *
+ * Both are the same "unknown is not no" rule the rest of this file is built on. The flag is
+ * session-scoped, so it resets when the panel is rebuilt, which is the right lifetime for an
+ * optimistic hint.
+ */
+fun retainPendingRequest(
+    previouslyKnown: Boolean,
+    fromServer: Boolean,
+): Boolean = fromServer || previouslyKnown

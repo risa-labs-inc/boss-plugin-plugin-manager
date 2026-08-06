@@ -377,3 +377,35 @@ class OrganisationRequestValidationTest {
         assertNotNull(submitRequestError("not json"))
     }
 }
+
+/**
+ * The pending flag may only ever be turned on by a refresh, never off.
+ */
+class RetainPendingRequestTest {
+    @Test
+    fun `a server false does not clear a flag we already set`() {
+        // The case that matters: parsePendingRequest returns false for a REVIEWER, so a BOSS
+        // admin who submits a request would otherwise watch the button revert to "Request an
+        // organisation" one round trip later - the exact resubmit path the state exists to close.
+        assertEquals(true, retainPendingRequest(previouslyKnown = true, fromServer = false))
+    }
+
+    @Test
+    fun `a server true sets it`() {
+        assertEquals(true, retainPendingRequest(previouslyKnown = false, fromServer = true))
+    }
+
+    @Test
+    fun `both false stays false`() {
+        assertEquals(false, retainPendingRequest(previouslyKnown = false, fromServer = false))
+    }
+
+    @Test
+    fun `it is monotonic, so repeated refreshes cannot flip it back`() {
+        var flag = false
+        flag = retainPendingRequest(flag, fromServer = true)
+        // Every later read fails or comes from a reviewer's queue.
+        repeat(5) { flag = retainPendingRequest(flag, fromServer = false) }
+        assertEquals(true, flag)
+    }
+}
