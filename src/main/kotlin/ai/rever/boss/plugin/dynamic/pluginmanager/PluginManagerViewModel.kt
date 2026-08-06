@@ -487,6 +487,11 @@ class PluginManagerViewModel(
                         organisationRequestBusy = false,
                         organisationRequestOpen = false,
                         organisationRequestError = null,
+                        // Optimistic, and it closes a real window: without it the CTA stays
+                        // CREATE and enabled for the length of the refresh below, so the user
+                        // can reopen the dialog and submit again - and the second attempt
+                        // returns the "already exists" refusal this state exists to prevent.
+                        hasPendingOrgRequest = true,
                     )
                 // The request is pending, not approved. Refreshing is what turns the call to
                 // action into "Request pending review"; without it the button is byte-for-byte

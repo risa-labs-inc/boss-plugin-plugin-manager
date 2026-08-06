@@ -63,10 +63,10 @@ class PluginManagerComponent(
     )
 
     init {
-        // Asked once per panel instance rather than per composition. The answer
-        // decides which organisation call to action the Create tab renders, and
-        // until it arrives the call to action is hidden rather than guessed.
-        viewModel.refreshOrganisationMembership()
+        // NOT calling refreshOrganisationMembership() here: the ViewModel's own init already
+        // runs refresh(), which covers it. Both fired concurrently at construction, so every
+        // panel open cost two get_my_organisations round trips - four RPCs for a user with no
+        // organisation, since each also chases the request queue.
 
         lifecycle.subscribe(object : Lifecycle.Callbacks {
             override fun onDestroy() {

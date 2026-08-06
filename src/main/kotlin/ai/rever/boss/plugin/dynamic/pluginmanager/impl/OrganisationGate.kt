@@ -40,7 +40,7 @@ enum class OrganisationCta {
 /**
  * Decide the call to action.
  *
- * [hasOrganisation] is null while the membership lookup is in flight, or when
+ * [membership] is null while the membership lookup is in flight, or when
  * there is no Supabase provider to ask. **Null renders nothing.** That is the
  * whole reason this is a nullable Boolean rather than a Boolean defaulting to
  * false: "we have not asked yet" and "you belong to none" are different states
@@ -167,7 +167,7 @@ fun parseMembership(raw: String?): Membership? {
 }
 
 /**
- * Does this user have an organisation-creation request awaiting review?
+ * Does the CALLER have an organisation-creation request awaiting review?
  *
  * A SEPARATE read, from `list_organisation_requests`, and it has to be:
  * `submit_organisation_request` writes to `organisation_requests` and creates no membership row
@@ -175,14 +175,23 @@ fun parseMembership(raw: String?): Membership? {
  * submission therefore could never move the button off CREATE - the exact failure
  * REQUEST_PENDING was added to prevent.
  *
- * The RPC already scopes to the caller's own requests for a non-reviewer, so no filtering is
- * needed here beyond the status.
+ * REVIEWERS GET `false`, WHATEVER THE QUEUE HOLDS. The RPC scopes to the caller's own requests
+ * only for a NON-reviewer; for a BOSS admin holding `organisation.approve` it returns the whole
+ * queue, and the envelope's `is_reviewer` flag is how we know which we got. Without this a BOSS
+ * admin who belongs to no organisation - reachable, since that is the branch we are in - would
+ * see "Request pending review" against somebody else's request, with the button disabled, and
+ * could not request an organisation at all until the queue drained.
+ *
+ * The plugin cannot filter by owner instead: PluginContext exposes no current-user id, so there
+ * is nothing to match `requester_id` against. The cost is that a reviewer does not see their own
+ * pending state, which is a missing hint rather than a lockout - the safe direction.
  */
 fun parsePendingRequest(raw: String?): Boolean {
     if (raw.isNullOrBlank()) return false
     return runCatching {
         val root = Json.parseToJsonElement(raw) as? JsonObject ?: return false
         if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return false
+        if (root["is_reviewer"]?.jsonPrimitive?.booleanOrNull == true) return false
         val rows = root["data"] as? JsonArray ?: return false
         rows.any { element ->
             (element as? JsonObject)?.get("status")?.jsonPrimitive?.contentOrNull == "pending"
