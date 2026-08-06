@@ -1,3 +1,6 @@
+// Fully qualifying this inline does not work: `java` resolves to Gradle's JavaPluginExtension
+// in the script scope and shadows the package.
+import java.util.concurrent.Callable
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -26,15 +29,6 @@ kotlin {
 val useLocalDependencies = System.getenv("CI") != "true"
 val bossPluginApiPath = "../boss-plugin-api"
 
-/**
- * The most recently built api jar in the sibling checkout, whatever its version.
- *
- * Local development only - CI uses the downloaded jar. Deliberately not a hardcoded file name:
- * this was pinned to boss-plugin-api-1.0.64.jar, the sibling checkout had moved on to 1.0.72, and
- * the whole `ai.rever.boss.plugin.api` package read as "Unresolved reference" on symbols that
- * plainly exist. Newest-by-mtime rather than by version string, because 1.0.9 sorts above 1.0.71
- * lexicographically and the jar you just built is the one you meant.
- */
 /**
  * The most recently built api jar in the sibling checkout, resolved LAZILY.
  *
@@ -82,7 +76,11 @@ dependencies {
         // made `./gradlew tasks`, `./gradlew clean` and IDE sync all fail for anyone who has not
         // built the sibling checkout - a harsher failure than the unresolved references it
         // replaced. This keeps the useful message and confines it to builds that need the jar.
-        compileOnly(files({ latestBossPluginApiJar() }))
+        // An explicit Callable. `files()` takes Any, so Kotlin does NO SAM conversion on a bare
+        // lambda - that would be a kotlin Function0, and Gradle documents Callable, Provider and
+        // Closure as its lazy inputs. Relying on unpacking that is not in the contract is how this
+        // silently becomes eager again.
+        compileOnly(files(Callable { latestBossPluginApiJar() }))
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
