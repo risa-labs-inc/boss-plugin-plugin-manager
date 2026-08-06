@@ -183,3 +183,96 @@ class ParseHasOrganisationTest {
         )
     }
 }
+
+/**
+ * Slug and name validation for the request dialog, and reading the response.
+ *
+ * The slug rules mirror the database CHECK. They are duplicated here only to
+ * turn a round trip into a message under the field, so the two must agree -
+ * a client rule stricter than the server silently forbids valid names, and one
+ * looser just moves the error later.
+ */
+class OrganisationRequestValidationTest {
+    @Test
+    fun `a well-formed slug is accepted`() {
+        for (slug in listOf("acme", "ac", "acme_inc", "a1", "a_1_b", "a".repeat(31))) {
+            assertNull(organisationSlugError(slug), "should accept: $slug")
+        }
+    }
+
+    @Test
+    fun `hyphens are refused with the reason`() {
+        // Role names derive from the slug and are validated without hyphens, so
+        // a hyphenated slug would create an organisation whose roles could not
+        // be named.
+        val error = organisationSlugError("acme-inc")
+        assertNotNull(error)
+        assertTrue(error.contains("underscore"), "the message should say what to use instead: $error")
+    }
+
+    @Test
+    fun `the length bounds match the database CHECK`() {
+        assertNotNull(organisationSlugError("a"))
+        assertNull(organisationSlugError("ab"))
+        assertNull(organisationSlugError("a" + "b".repeat(30)))
+        assertNotNull(organisationSlugError("a" + "b".repeat(31)))
+    }
+
+    @Test
+    fun `a slug must start with a letter`() {
+        assertNotNull(organisationSlugError("1acme"))
+        assertNotNull(organisationSlugError("_acme"))
+    }
+
+    @Test
+    fun `uppercase and punctuation are refused`() {
+        for (slug in listOf("Acme", "acme inc", "acme.inc", "acme!", "acme/inc")) {
+            assertNotNull(organisationSlugError(slug), "should refuse: $slug")
+        }
+    }
+
+    @Test
+    fun `an empty slug asks for one rather than complaining about the pattern`() {
+        val error = organisationSlugError("")
+        assertNotNull(error)
+        assertTrue(error.startsWith("Enter"), "an empty field should prompt, not scold: $error")
+    }
+
+    @Test
+    fun `name validation covers empty and overlong`() {
+        assertNotNull(organisationNameError(""))
+        assertNotNull(organisationNameError("   "))
+        assertNull(organisationNameError("Acme Inc"))
+        assertNull(organisationNameError("A".repeat(120)))
+        assertNotNull(organisationNameError("A".repeat(121)))
+    }
+
+    @Test
+    fun `a successful submission has no error`() {
+        assertNull(submitRequestError("""{"success":true,"request_id":"abc"}"""))
+    }
+
+    @Test
+    fun `the server's own refusal is preferred over anything invented here`() {
+        // The reserved-slug and collision rules live server-side, and its
+        // wording names the actual slug.
+        assertEquals(
+            """Slug "boss" is reserved or already in use""",
+            submitRequestError("""{"success":false,"error":"Slug \"boss\" is reserved or already in use"}"""),
+        )
+    }
+
+    @Test
+    fun `a refusal with no message still reports a failure`() {
+        assertNotNull(submitRequestError("""{"success":false}"""))
+    }
+
+    @Test
+    fun `an unreachable server is an error, never a silent success`() {
+        // getOrNull() yields null on a transport failure. Reading that as
+        // success would close the dialog on a request that never happened.
+        assertNotNull(submitRequestError(null))
+        assertNotNull(submitRequestError(""))
+        assertNotNull(submitRequestError("not json"))
+    }
+}

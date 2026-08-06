@@ -9,6 +9,9 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHasOrganisation
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import ai.rever.boss.plugin.api.McpToolRegistry
 import ai.rever.boss.plugin.api.PanelEventProvider
 import ai.rever.boss.plugin.api.PanelId
@@ -68,7 +71,13 @@ data class PluginManagerState(
      * A Boolean defaulting to false would show "Request an organisation" to
      * every existing member for the length of a round trip.
      */
-    val hasOrganisation: Boolean? = null
+    val hasOrganisation: Boolean? = null,
+    /** True while the "request an organisation" dialog is open. */
+    val organisationRequestOpen: Boolean = false,
+    /** True while a request is in flight, so the dialog can disable its submit. */
+    val organisationRequestBusy: Boolean = false,
+    /** Server-side refusal to show inside the dialog, or null. */
+    val organisationRequestError: String? = null
 )
 
 /**
@@ -388,6 +397,60 @@ class PluginManagerViewModel(
         }
     }
 
+    fun dismissOrganisationRequest() {
+        _state.value =
+            _state.value.copy(organisationRequestOpen = false, organisationRequestError = null)
+    }
+
+    /**
+     * Submit a request for a new organisation.
+     *
+     * Validation runs server-side regardless; the client checks first only so a
+     * typo is a message under the field rather than a round trip. The reserved
+     * slug and collision rules are the server's alone - a slug like `boss`
+     * would derive `boss_admin`, an existing global role, and only the database
+     * knows the full list.
+     */
+    fun submitOrganisationRequest(
+        slug: String,
+        name: String,
+        description: String,
+        justification: String,
+    ) {
+        val supabase = supabaseDataProvider ?: return
+        _state.value = _state.value.copy(organisationRequestBusy = true, organisationRequestError = null)
+
+        scope.launch {
+            val params =
+                buildJsonObject {
+                    put("p_slug", slug.trim())
+                    put("p_name", name.trim())
+                    if (description.isNotBlank()) put("p_description", description.trim())
+                    if (justification.isNotBlank()) put("p_justification", justification.trim())
+                }.toString()
+
+            val raw = supabase.rpc("submit_organisation_request", params).getOrNull()
+            val error = submitRequestError(raw)
+
+            if (error != null) {
+                _state.value =
+                    _state.value.copy(organisationRequestBusy = false, organisationRequestError = error)
+                return@launch
+            }
+
+            _state.value =
+                _state.value.copy(
+                    organisationRequestBusy = false,
+                    organisationRequestOpen = false,
+                    organisationRequestError = null,
+                )
+            // The request is pending, not approved, so membership is unchanged -
+            // refreshed anyway so the call to action reflects whatever the
+            // server now reports rather than what this side assumed.
+            refreshOrganisationMembership()
+        }
+    }
+
     /** Is the Organisation plugin installed in this host? */
     fun isOrganisationPluginInstalled(): Boolean =
         _state.value.installedPlugins.any { it.pluginId == OrganisationPlugin.PLUGIN_ID }
@@ -401,9 +464,15 @@ class PluginManagerViewModel(
     fun onOrganisationCta() {
         when (organisationCta(_state.value.hasOrganisation, isOrganisationPluginInstalled())) {
             OrganisationCta.CREATE ->
-                // The request form lives on the web, next to the review queue an
-                // administrator uses to act on it.
-                onOpenUrl?.invoke(ORGANISATION_REQUEST_URL)
+                // In-app, NOT a web page. submit_organisation_request is
+                // authenticated-only, and the handoff-token mechanism that
+                // authenticates the other web pages is org-scoped - a user with
+                // no organisation has nothing to hand off for, so a web form
+                // could not authenticate at all.
+                _state.value = _state.value.copy(
+                    organisationRequestOpen = true,
+                    organisationRequestError = null,
+                )
 
             OrganisationCta.INSTALL_PLUGIN ->
                 installFromRemote(OrganisationPlugin.PLUGIN_ID)
@@ -895,15 +964,5 @@ class PluginManagerViewModel(
         const val TOOL_CREATOR_PANEL_ID = "tool-creator"
         /** Must match ToolCreatorDynamicPlugin.OPEN_NEW_TOOL_EVENT. */
         const val TOOL_CREATOR_OPEN_EVENT = "open-new-tool"
-
-        /**
-         * Where "Request an organisation" goes.
-         *
-         * The custom domain, not the project-ref host: Supabase rewrites
-         * text/html to text/plain on <ref>.supabase.co, so the page would
-         * arrive as raw source with no error anywhere.
-         */
-        const val ORGANISATION_REQUEST_URL =
-            "https://api.risaboss.com/functions/v1/organisation/request"
     }
 }

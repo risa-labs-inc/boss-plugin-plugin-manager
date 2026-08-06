@@ -24,6 +24,8 @@ import ai.rever.boss.plugin.ui.BossThemeColors
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -93,6 +95,129 @@ import androidx.compose.ui.window.Dialog
 /**
  * Confirmation dialog for destructive actions.
  */
+/**
+ * Request a new organisation.
+ *
+ * In-app rather than a web page, and that is not a style preference:
+ * `submit_organisation_request` is authenticated-only, and the handoff-token
+ * mechanism that authenticates the other organisation web pages is org-scoped.
+ * A user with no organisation has nothing to hand off for, so a web form could
+ * not authenticate at all.
+ *
+ * Validation mirrors the database CHECK so a typo is a message under the field.
+ * The reserved-slug and collision rules stay server-side - only the database
+ * knows the full list, and `boss` deriving the existing global `boss_admin`
+ * role is the reason that list exists.
+ */
+@Composable
+private fun RequestOrganisationDialog(
+    busy: Boolean,
+    serverError: String?,
+    onSubmit: (slug: String, name: String, description: String, justification: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var slug by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var justification by remember { mutableStateOf("") }
+    var touched by remember { mutableStateOf(false) }
+
+    val nameError = if (touched) organisationNameError(name) else null
+    val slugError = if (touched) organisationSlugError(slug) else null
+    val valid = organisationNameError(name) == null && organisationSlugError(slug) == null
+
+    Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+        BossCard(modifier = Modifier.width(420.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Request an organisation",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "A BOSS administrator reviews the request before the organisation is created.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.height(14.dp))
+
+                BossTextField(
+                    value = name,
+                    onValueChange = { name = it; touched = true },
+                    label = "Name",
+                    placeholder = "Acme Inc"
+                )
+                nameError?.let { FieldError(it) }
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = slug,
+                    onValueChange = { slug = it.lowercase(); touched = true },
+                    label = "Identifier",
+                    placeholder = "acme"
+                )
+                slugError?.let { FieldError(it) }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    // Stated up front because it is permanent: the roles derive
+                    // from it and renaming would orphan them.
+                    text = "Permanent. Roles are named ${slug.ifBlank { "acme" }}_admin and " +
+                        "${slug.ifBlank { "acme" }}_user.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = "Description (optional)",
+                    placeholder = "What this organisation is for"
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = justification,
+                    onValueChange = { justification = it },
+                    label = "Note for the reviewer (optional)",
+                    placeholder = "Why you need it"
+                )
+
+                serverError?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(text = it, color = BossThemeColors.ErrorColor, fontSize = 12.sp)
+                }
+
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    BossSecondaryButton(text = "Cancel", onClick = onDismiss, enabled = !busy)
+                    Spacer(Modifier.width(8.dp))
+                    BossPrimaryButton(
+                        text = if (busy) "Sending..." else "Send request",
+                        onClick = { touched = true; onSubmit(slug, name, description, justification) },
+                        enabled = valid && !busy
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FieldError(message: String) {
+    Text(
+        text = message,
+        color = BossThemeColors.ErrorColor,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp)
+    )
+}
+
 @Composable
 private fun ConfirmationDialog(
     title: String,
@@ -826,6 +951,21 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                 }
             }
+        }
+
+        // Rendered at the root, alongside the other dialogs, rather than inside
+        // the Create tab: the tab unmounts when the user switches away, and a
+        // dialog that disappears mid-typing because a click landed elsewhere is
+        // worse than one that stays put.
+        if (state.organisationRequestOpen) {
+            RequestOrganisationDialog(
+                busy = state.organisationRequestBusy,
+                serverError = state.organisationRequestError,
+                onSubmit = { slug, name, description, justification ->
+                    viewModel.submitOrganisationRequest(slug, name, description, justification)
+                },
+                onDismiss = { viewModel.dismissOrganisationRequest() }
+            )
         }
     }
 }

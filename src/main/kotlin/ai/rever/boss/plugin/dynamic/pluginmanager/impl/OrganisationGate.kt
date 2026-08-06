@@ -112,3 +112,59 @@ fun parseHasOrganisation(raw: String?): Boolean? {
         }
     }.getOrNull()
 }
+
+/**
+ * Slug validation, mirroring the database CHECK exactly.
+ *
+ * Checked here as well as server-side so a typo is a message under the field
+ * rather than a round trip that comes back with a constraint error. The pattern
+ * is `^[a-z][a-z0-9_]{1,30}$`.
+ *
+ * UNDERSCORES, NEVER HYPHENS. Organisation role names derive from the slug
+ * (`<slug>_admin`, `<slug>_user`) and `roles.name` is validated
+ * `^[a-z][a-z0-9_]{2,50}$`, so a hyphen would make the mapping partial - the
+ * organisation would be created and its roles would not.
+ *
+ * Returns null when valid, or the reason it is not.
+ */
+fun organisationSlugError(slug: String): String? {
+    val value = slug.trim()
+    return when {
+        value.isEmpty() -> "Enter a short identifier."
+        value.length < 2 -> "Too short - at least 2 characters."
+        value.length > 31 -> "Too long - at most 31 characters."
+        value.contains('-') -> "Use underscores, not hyphens. Role names derive from this."
+        !value[0].isLetter() -> "Start with a letter."
+        !Regex("^[a-z][a-z0-9_]{1,30}$").matches(value) ->
+            "Use lowercase letters, digits and underscores only."
+        else -> null
+    }
+}
+
+/** Validation for the organisation name. */
+fun organisationNameError(name: String): String? {
+    val value = name.trim()
+    return when {
+        value.isEmpty() -> "Enter a name."
+        value.length > 120 -> "Too long - at most 120 characters."
+        else -> null
+    }
+}
+
+/**
+ * Read a `submit_organisation_request` response.
+ *
+ * Returns null on success, or the message to show. The server's own wording is
+ * preferred where it gives one: "Slug \"boss\" is reserved or already in use"
+ * is more useful than anything this side could invent, and the reserved-slug and
+ * collision rules live there.
+ */
+fun submitRequestError(raw: String?): String? {
+    if (raw.isNullOrBlank()) return "Could not reach the server. Please try again."
+    val parsed =
+        runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+            ?: return "Could not reach the server. Please try again."
+    if (parsed["success"]?.jsonPrimitive?.booleanOrNull == true) return null
+    return parsed["error"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        ?: "The request was refused."
+}
