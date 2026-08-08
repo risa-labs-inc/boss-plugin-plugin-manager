@@ -28,8 +28,10 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationDomainError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationWebsiteError
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -161,18 +163,27 @@ private fun OrganisationCtaCard(
 private fun RequestOrganisationDialog(
     busy: Boolean,
     serverError: String?,
-    onSubmit: (slug: String, name: String, description: String, justification: String) -> Unit,
+    onSubmit: (slug: String, name: String, description: String, justification: String,
+               domain: String, website: String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var slug by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var justification by remember { mutableStateOf("") }
+    var domain by remember { mutableStateOf("") }
+    var website by remember { mutableStateOf("") }
     var touched by remember { mutableStateOf(false) }
 
     val nameError = if (touched) organisationNameError(name) else null
     val slugError = if (touched) organisationSlugError(slug) else null
-    val valid = organisationNameError(name) == null && organisationSlugError(slug) == null
+    // Shown as soon as there is something to be wrong about, rather than waiting for
+    // `touched`: both are optional, so a user who types one and leaves it malformed
+    // would otherwise learn about it from a server round trip.
+    val domainError = organisationDomainError(domain)
+    val websiteError = organisationWebsiteError(website)
+    val valid = organisationNameError(name) == null && organisationSlugError(slug) == null &&
+        domainError == null && websiteError == null
 
     BossDialog(onDismissRequest = { if (!busy) onDismiss() }) {
         BossCard(modifier = Modifier.width(420.dp)) {
@@ -219,6 +230,34 @@ private fun RequestOrganisationDialog(
                 Spacer(Modifier.height(10.dp))
 
                 BossTextField(
+                    value = website,
+                    onValueChange = { website = it },
+                    label = "Website (optional)",
+                    placeholder = "https://acme.com"
+                )
+                websiteError?.let { FieldError(it) }
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = domain,
+                    onValueChange = { domain = it.lowercase() },
+                    label = "Email domain (optional)",
+                    placeholder = "acme.com"
+                )
+                domainError?.let { FieldError(it) }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    // Worth saying plainly: this one is not decoration. Once verified it
+                    // decides who may join without an invite, which is a different kind of
+                    // field from the website beside it.
+                    text = "Once you verify it with a DNS record, people with a matching " +
+                        "address can find and join this organisation.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
                     value = description,
                     onValueChange = { description = it },
                     label = "Description (optional)",
@@ -247,7 +286,10 @@ private fun RequestOrganisationDialog(
                     Spacer(Modifier.width(8.dp))
                     BossPrimaryButton(
                         text = if (busy) "Sending..." else "Send request",
-                        onClick = { touched = true; onSubmit(slug, name, description, justification) },
+                        onClick = {
+                            touched = true
+                            onSubmit(slug, name, description, justification, domain, website)
+                        },
                         enabled = valid && !busy
                     )
                 }
@@ -1026,8 +1068,10 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
             RequestOrganisationDialog(
                 busy = state.organisationRequestBusy,
                 serverError = state.organisationRequestError,
-                onSubmit = { slug, name, description, justification ->
-                    viewModel.submitOrganisationRequest(slug, name, description, justification)
+                onSubmit = { slug, name, description, justification, domain, website ->
+                    viewModel.submitOrganisationRequest(
+                        slug, name, description, justification, domain, website,
+                    )
                 },
                 onDismiss = { viewModel.dismissOrganisationRequest() }
             )

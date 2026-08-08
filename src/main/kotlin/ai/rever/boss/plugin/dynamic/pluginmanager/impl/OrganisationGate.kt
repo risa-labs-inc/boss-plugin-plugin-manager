@@ -285,3 +285,48 @@ fun retainPendingRequest(
     previouslyKnown: Boolean,
     fromServer: Boolean?,
 ): Boolean = fromServer ?: previouslyKnown
+
+/**
+ * Validation for the optional website.
+ *
+ * Mirrors the server's rule rather than inventing a looser one: http and https
+ * only, because this value is rendered as a LINK on the organisation's web pages,
+ * and a `javascript:` or `data:` URL there would be script execution from a field
+ * any authenticated user can fill in. The database refuses it too - this is only
+ * so a typo is a message under the field instead of a round trip.
+ *
+ * Returns null when valid or empty, since the field is optional.
+ */
+fun organisationWebsiteError(website: String): String? {
+    val value = website.trim()
+    if (value.isEmpty()) return null
+    return when {
+        !Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(value) ->
+            "Start with http:// or https://"
+        value.length > 500 -> "Too long - at most 500 characters."
+        value.contains(' ') -> "A web address cannot contain spaces."
+        else -> null
+    }
+}
+
+/**
+ * Validation for the optional email domain.
+ *
+ * The domain is NOT cosmetic: once verified by a DNS TXT record it lets anyone
+ * with a matching address find and join the organisation, so it is worth getting
+ * right at request time. A scheme here is the common mistake - people paste the
+ * website - and it is worth naming rather than refusing generically.
+ */
+fun organisationDomainError(domain: String): String? {
+    val value = domain.trim().lowercase()
+    if (value.isEmpty()) return null
+    return when {
+        value.startsWith("http://") || value.startsWith("https://") ->
+            "Just the domain, without http:// - for example acme.com"
+        value.contains('@') -> "Just the domain, without the @ - for example acme.com"
+        value.contains('/') -> "Just the domain, with no path."
+        !Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$").matches(value) ->
+            "That does not look like a domain."
+        else -> null
+    }
+}

@@ -462,6 +462,8 @@ class PluginManagerViewModel(
         name: String,
         description: String,
         justification: String,
+        domain: String,
+        website: String,
     ) {
         val supabase = supabaseDataProvider ?: return
         _state.value = _state.value.copy(organisationRequestBusy = true, organisationRequestError = null)
@@ -477,6 +479,10 @@ class PluginManagerViewModel(
                     put("p_name", name.trim())
                     if (description.isNotBlank()) put("p_description", description.trim())
                     if (justification.isNotBlank()) put("p_justification", justification.trim())
+                    // Omitted rather than sent empty: the server treats NULL as "not
+                    // supplied" and an empty string would fail its format check.
+                    if (domain.isNotBlank()) put("p_domain", domain.trim().lowercase())
+                    if (website.isNotBlank()) put("p_website", website.trim())
                 }.toString()
 
                 val raw = supabase.rpc("submit_organisation_request", params).getOrNull()
