@@ -423,4 +423,55 @@ class RetainPendingRequestTest {
         flag = retainPendingRequest(flag, fromServer = false)
         assertEquals(false, flag, "a rejection must")
     }
+
+    // ---- the two optional fields on the request form ------------------------------------
+
+    @Test
+    fun `a website must carry an http scheme`() {
+        // Not tidiness. This value is rendered as a LINK on the organisation's web
+        // pages and is filled in by any authenticated user submitting a request, so a
+        // javascript: or data: URL here would be stored XSS with a self-service entry
+        // point. The database refuses it too; this is the copy that explains why.
+        assertNotNull(organisationWebsiteError("javascript:alert(1)"))
+        assertNotNull(organisationWebsiteError("data:text/html,<script>"))
+        assertNotNull(organisationWebsiteError("acme.com"))
+        assertNull(organisationWebsiteError("https://acme.com"))
+        assertNull(organisationWebsiteError("http://acme.com/path?q=1"))
+    }
+
+    @Test
+    fun `an empty website is fine, because the field is optional`() {
+        assertNull(organisationWebsiteError(""))
+        assertNull(organisationWebsiteError("   "))
+    }
+
+    @Test
+    fun `a website that is too long or has spaces is refused`() {
+        assertNotNull(organisationWebsiteError("https://" + "a".repeat(500) + ".com"))
+        assertNotNull(organisationWebsiteError("https://acme.com/a path"))
+    }
+
+    @Test
+    fun `the domain names the common mistake rather than refusing generically`() {
+        // People paste the website into the domain field. "That does not look like a
+        // domain" is true and useless; saying which part to remove is the difference
+        // between a fixable message and a guess.
+        assertEquals(
+            "Just the domain, without http:// - for example acme.com",
+            organisationDomainError("https://acme.com"),
+        )
+        assertEquals(
+            "Just the domain, without the @ - for example acme.com",
+            organisationDomainError("someone@acme.com"),
+        )
+        assertNotNull(organisationDomainError("acme.com/team"))
+    }
+
+    @Test
+    fun `a plain domain is accepted and an empty one is optional`() {
+        assertNull(organisationDomainError("acme.com"))
+        assertNull(organisationDomainError("mail.acme.co.uk"))
+        assertNull(organisationDomainError(""))
+        assertNotNull(organisationDomainError("not a domain"))
+    }
 }
