@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -94,6 +95,39 @@ class OrganisationGateTest {
         assertTrue(organisationCtaLabel(OrganisationCta.CREATE).startsWith("Request"))
         assertTrue(organisationCtaLabel(OrganisationCta.INSTALL_PLUGIN).startsWith("Install"))
         assertTrue(organisationCtaLabel(OrganisationCta.OPEN).startsWith("Open"))
+    }
+
+    @Test
+    fun `only the branches with nowhere else to live reveal the Create tab`() {
+        // These two are the whole reason the gate exists: the Create tab is otherwise behind
+        // canPublish, and the user with no organisation is the least likely to hold
+        // plugins.create - so without this the request form is unreachable by the people it
+        // is for.
+        assertTrue(organisationCtaNeedsCreateTab(OrganisationCta.CREATE))
+        assertTrue(organisationCtaNeedsCreateTab(OrganisationCta.REQUEST_PENDING))
+
+        // A member reaches the Organisation plugin through the store and its own sidebar
+        // panel. Revealing an otherwise-empty Create tab for them would show it to nearly
+        // everybody and buy nothing.
+        assertFalse(organisationCtaNeedsCreateTab(OrganisationCta.INSTALL_PLUGIN))
+        assertFalse(organisationCtaNeedsCreateTab(OrganisationCta.OPEN))
+    }
+
+    @Test
+    fun `no call to action reveals no tab`() {
+        // Membership unknown renders nothing, so there is nothing to reveal a tab for.
+        assertFalse(organisationCtaNeedsCreateTab(null))
+    }
+
+    @Test
+    fun `every outcome is classified deliberately`() {
+        // entries-driven, like the label and description tests: a new OrganisationCta member
+        // must be considered here rather than silently defaulting to hidden - which is the
+        // failure this function's own KDoc worries about.
+        assertEquals(
+            setOf(OrganisationCta.CREATE, OrganisationCta.REQUEST_PENDING),
+            OrganisationCta.entries.filter { organisationCtaNeedsCreateTab(it) }.toSet(),
+        )
     }
 
     @Test

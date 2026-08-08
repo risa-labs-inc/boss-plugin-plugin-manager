@@ -83,6 +83,21 @@ enum class Membership {
 fun organisationCtaEnabled(cta: OrganisationCta): Boolean = cta != OrganisationCta.REQUEST_PENDING
 
 /**
+ * Should the Create tab be revealed to a user who cannot publish, purely to carry this call to
+ * action?
+ *
+ * Only for the two branches that have nowhere else to live. CREATE is the request form, which
+ * exists in no other surface; REQUEST_PENDING is its follow-up state, and hiding it would put the
+ * user back on a button that resubmits a request they already made.
+ *
+ * INSTALL_PLUGIN and OPEN are deliberately excluded: a member's route to the Organisation plugin
+ * is the store and its own sidebar panel, so revealing an otherwise-empty Create tab for them
+ * would show the tab to nearly everybody and buy nothing.
+ */
+fun organisationCtaNeedsCreateTab(cta: OrganisationCta?): Boolean =
+    cta == OrganisationCta.CREATE || cta == OrganisationCta.REQUEST_PENDING
+
+/**
  * Button label for a call to action.
  *
  * Kept beside the decision rather than in the view so the two cannot drift, and

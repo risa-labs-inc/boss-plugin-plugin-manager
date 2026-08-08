@@ -59,6 +59,10 @@ class PluginManagerComponent(
         panelEventProvider = context.panelEventProvider,
         applicationEventBus = context.applicationEventBus,
         windowId = context.windowId,
+        // Resolve "open this plugin" to a real panel/tab — see PluginManagerViewModel.openPlugin.
+        panelRegistry = context.panelRegistry,
+        tabRegistry = context.tabRegistry,
+        splitViewOperations = context.splitViewOperations,
         supabaseDataProvider = context.supabaseDataProvider
     )
 

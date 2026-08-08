@@ -16,9 +16,13 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ai.rever.boss.plugin.api.McpToolRegistry
+import ai.rever.boss.plugin.api.NewTabContext
 import ai.rever.boss.plugin.api.PanelEventProvider
 import ai.rever.boss.plugin.api.PanelId
+import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.RoleManagementProvider
+import ai.rever.boss.plugin.api.SplitViewOperations
+import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import kotlinx.coroutines.*
@@ -119,7 +123,14 @@ data class PostUpdatePrompt(
 data class VersionSheetState(
     val pluginId: String,
     val displayName: String,
-    val installedVersion: String,
+    /**
+     * NULL when the plugin is not installed (the sheet is reachable from the store too).
+     *
+     * Nullable rather than a blank sentinel: `InstalledPluginState.version` is non-null but may
+     * be empty, so "" would make an installed plugin with no version string read as not
+     * installed - and offer Install on every row.
+     */
+    val installedVersion: String?,
     val isLoading: Boolean = true,
     val versions: List<PluginVersionInfo> = emptyList(),
     val hostIpcVersion: String? = IpcCompat.hostVersion,
@@ -156,6 +167,16 @@ class PluginManagerViewModel(
     private val applicationEventBus: ApplicationEventBus? = null,
     /** This window's id, needed to target panel-open events. */
     private val windowId: String? = null,
+    /**
+     * Registered panels, used to resolve "open this plugin" to a real panel id. The Toolbox
+     * cannot guess one: a panel id is the plugin's own choice and is not derivable from the
+     * plugin id, so the registry is the only source.
+     */
+    private val panelRegistry: PanelRegistry? = null,
+    /** Registered tab types, for plugins that contribute a tab rather than a panel. */
+    private val tabRegistry: TabRegistry? = null,
+    /** Opens a tab in the main area, for the tab-type branch of [openPlugin]. */
+    private val splitViewOperations: SplitViewOperations? = null,
     /**
      * Read-only Supabase access, for the one question the Toolbox asks about
      * organisations: does this user belong to any. Null when Supabase is
@@ -395,6 +416,67 @@ class PluginManagerViewModel(
             }
         }
     }
+
+    /**
+     * Open an installed plugin: reveal its panel, or open one of its tabs.
+     *
+     * Resolved through the registries rather than guessed. A panel id is the plugin's own
+     * choice ("plugin-manager", "organisation", …) and is not derivable from the plugin id, so
+     * openToolCreator's hard-coded constants are the only shape that can work without a lookup -
+     * and they only work because those two ids are known here.
+     *
+     * Falls back to [fallbackUrl] when the plugin contributes neither. A disabled plugin has
+     * unregistered everything, so this is also what a click on a disabled row does - and when
+     * there is no homepage either, the click reports why rather than doing nothing: the whole
+     * row is clickable, so silence would be an affordance promising a result it cannot deliver.
+     */
+    fun openPlugin(pluginId: String, fallbackUrl: String? = null) {
+        val wid = windowId
+
+        // Surfaced in the error banner rather than logged: this plugin has no logger, and a
+        // swallowed throwable here reads to the user as "clicking does nothing".
+        var failure: String? = null
+
+        val panel = runCatching {
+            panelRegistry?.getAllPanels()?.firstOrNull { it.id.pluginId == pluginId }
+        }.onFailure { failure = it.message }.getOrNull()
+        if (panel != null && panelEventProvider != null && wid != null) {
+            scope.launch { panelEventProvider.openPanel(panel.id, wid) }
+            return
+        }
+
+        // Tab-type plugins. createTabInfo returns null unless the plugin opted into the host's
+        // New Tab dialog, which is the same "can this be opened cold?" question we are asking -
+        // so a null there means there is nothing sensible to open, not that we should force one.
+        val opened = runCatching {
+            val tabType = tabRegistry?.getAllTabTypes()
+                ?.firstOrNull { it.typeId.pluginId == pluginId }
+                ?: return@runCatching false
+            val ops = splitViewOperations ?: return@runCatching false
+            // No invented window id: the panel branch above declines to act without one, and a
+            // tab opened against "" targets a window that does not exist.
+            val w = wid ?: return@runCatching false
+            val tab = tabType.createTabInfo("", NewTabContext(windowId = w))
+                ?: return@runCatching false
+            ops.openTab(tab)
+            true
+        }.onFailure { failure = it.message }.getOrDefault(false)
+        if (opened) return
+
+        fallbackUrl?.takeIf { it.isNotBlank() }?.let {
+            openUrl(it)
+            return
+        }
+
+        _state.value = _state.value.copy(
+            error = failure?.let { "Could not open ${displayNameOf(pluginId)}: $it" }
+                ?: "${displayNameOf(pluginId)} has no panel or tab to open."
+        )
+    }
+
+    /** Friendly name for an installed plugin id, falling back to the id itself. */
+    private fun displayNameOf(pluginId: String): String =
+        _state.value.installedPlugins.find { it.pluginId == pluginId }?.displayName ?: pluginId
 
     /**
      * Load whether the user belongs to any organisation.
@@ -740,7 +822,7 @@ class PluginManagerViewModel(
      * Open the version-history / downgrade sheet for a plugin and load its
      * published versions (each tagged with IPC compatibility).
      */
-    fun openVersions(pluginId: String, displayName: String, installedVersion: String) {
+    fun openVersions(pluginId: String, displayName: String, installedVersion: String?) {
         _state.value = _state.value.copy(
             versionSheet = VersionSheetState(
                 pluginId = pluginId,
