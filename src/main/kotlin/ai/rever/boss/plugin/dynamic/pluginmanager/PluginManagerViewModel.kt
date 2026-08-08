@@ -16,9 +16,13 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ai.rever.boss.plugin.api.McpToolRegistry
+import ai.rever.boss.plugin.api.NewTabContext
 import ai.rever.boss.plugin.api.PanelEventProvider
 import ai.rever.boss.plugin.api.PanelId
+import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.RoleManagementProvider
+import ai.rever.boss.plugin.api.SplitViewOperations
+import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import kotlinx.coroutines.*
@@ -156,6 +160,16 @@ class PluginManagerViewModel(
     private val applicationEventBus: ApplicationEventBus? = null,
     /** This window's id, needed to target panel-open events. */
     private val windowId: String? = null,
+    /**
+     * Registered panels, used to resolve "open this plugin" to a real panel id. The Toolbox
+     * cannot guess one: a panel id is the plugin's own choice and is not derivable from the
+     * plugin id, so the registry is the only source.
+     */
+    private val panelRegistry: PanelRegistry? = null,
+    /** Registered tab types, for plugins that contribute a tab rather than a panel. */
+    private val tabRegistry: TabRegistry? = null,
+    /** Opens a tab in the main area, for the tab-type branch of [openPlugin]. */
+    private val splitViewOperations: SplitViewOperations? = null,
     /**
      * Read-only Supabase access, for the one question the Toolbox asks about
      * organisations: does this user belong to any. Null when Supabase is
@@ -394,6 +408,46 @@ class PluginManagerViewModel(
                 )
             }
         }
+    }
+
+    /**
+     * Open an installed plugin: reveal its panel, or open one of its tabs.
+     *
+     * Resolved through the registries rather than guessed. A panel id is the plugin's own
+     * choice ("plugin-manager", "organisation", …) and is not derivable from the plugin id, so
+     * openToolCreator's hard-coded constants are the only shape that can work without a lookup -
+     * and they only work because those two ids are known here.
+     *
+     * Falls back to [fallbackUrl] when the plugin contributes neither. A disabled plugin has
+     * unregistered everything, so this is also what a click on a disabled row does.
+     */
+    fun openPlugin(pluginId: String, fallbackUrl: String? = null) {
+        val wid = windowId
+
+        val panel = runCatching {
+            panelRegistry?.getAllPanels()?.firstOrNull { it.id.pluginId == pluginId }
+        }.getOrNull()
+        if (panel != null && panelEventProvider != null && wid != null) {
+            scope.launch { panelEventProvider.openPanel(panel.id, wid) }
+            return
+        }
+
+        // Tab-type plugins. createTabInfo returns null unless the plugin opted into the host's
+        // New Tab dialog, which is the same "can this be opened cold?" question we are asking -
+        // so a null there means there is nothing sensible to open, not that we should force one.
+        val opened = runCatching {
+            val tabType = tabRegistry?.getAllTabTypes()
+                ?.firstOrNull { it.typeId.pluginId == pluginId }
+                ?: return@runCatching false
+            val ops = splitViewOperations ?: return@runCatching false
+            val tab = tabType.createTabInfo("", NewTabContext(windowId = wid.orEmpty()))
+                ?: return@runCatching false
+            ops.openTab(tab)
+            true
+        }.getOrDefault(false)
+        if (opened) return
+
+        fallbackUrl?.takeIf { it.isNotBlank() }?.let { openUrl(it) }
     }
 
     /**
