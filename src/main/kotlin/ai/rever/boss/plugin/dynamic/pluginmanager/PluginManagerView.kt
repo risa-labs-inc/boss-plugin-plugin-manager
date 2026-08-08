@@ -503,9 +503,12 @@ private fun VersionSheetDialog(
             )
             Text(
                 text = "This host speaks IPC ${sheet.hostIpcVersion ?: "unknown"} · " +
-                    // Blank when opened from the store for a plugin that isn't installed.
-                    if (sheet.installedVersion.isBlank()) "not installed"
-                    else "installed v${sheet.installedVersion}",
+                    when {
+                        // Null only when opened from the store for a plugin that isn't here.
+                        sheet.installedVersion == null -> "not installed"
+                        sheet.installedVersion.isBlank() -> "installed, version unknown"
+                        else -> "installed v${sheet.installedVersion}"
+                    },
                 color = BossThemeColors.TextMuted,
                 fontSize = 12.sp
             )
@@ -844,7 +847,8 @@ private fun PermissionsDialog(
 @Composable
 private fun VersionRow(
     version: PluginVersionInfo,
-    installedVersion: String,
+    /** Null when the plugin is not installed — see [VersionSheetState.installedVersion]. */
+    installedVersion: String?,
     busy: Boolean,
     onInstall: () -> Unit
 ) {
@@ -857,7 +861,7 @@ private fun VersionRow(
         )
         IpcBadge(version.compatibility)
         Spacer(Modifier.weight(1f))
-        val isInstalled = installedVersion.isNotBlank() && version.version == installedVersion
+        val isInstalled = installedVersion != null && version.version == installedVersion
         val installable = version.compatibility == IpcCompat.Status.COMPATIBLE ||
             version.compatibility == IpcCompat.Status.UNKNOWN
         when {
@@ -868,7 +872,7 @@ private fun VersionRow(
                 text = when {
                     // Opened from the store for a plugin that isn't installed: every version
                     // is a fresh install, not an up/downgrade of something already here.
-                    installedVersion.isBlank() -> "Install"
+                    installedVersion == null -> "Install"
                     ipcCompareSemver(version.version, installedVersion) > 0 -> "Update"
                     else -> "Downgrade"
                 },
@@ -922,6 +926,16 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
         organisationPluginInstalled,
         state.hasPendingOrgRequest
     )
+    val createTabVisible = state.canPublish || organisationCtaNeedsCreateTab(organisationCta)
+
+    // The tab BUTTON is derived state; currentTab is not. A non-publisher sitting on the Create
+    // tab they reached only for the call to action would otherwise be stranded there the moment
+    // an approval lands and the branch moves to OPEN - button gone, header showing no selection.
+    LaunchedEffect(createTabVisible) {
+        if (!createTabVisible && state.currentTab == PluginManagerTab.PUBLISH) {
+            viewModel.selectTab(PluginManagerTab.INSTALLED)
+        }
+    }
 
     BossTheme {
         Column(
@@ -940,7 +954,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 isLoading = state.isLoading,
                 // The Create tab also hosts the organisation call to action, so it is revealed
                 // for the branches a non-publisher could otherwise never reach.
-                canPublish = state.canPublish || organisationCtaNeedsCreateTab(organisationCta),
+                canPublish = createTabVisible,
                 realtimeConnected = state.realtimeConnected
             )
 
@@ -970,7 +984,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onOpenPlugin = { p -> viewModel.openPlugin(p.pluginId, p.url) },
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins,
-                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
+                        // Non-null: reaching this row means the plugin IS installed, whatever
+                        // its version string says.
+                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version) },
                         mcpToolRegistry = viewModel.mcpToolRegistry,
                         permissionDescriptions = state.permissionDescriptions,
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
@@ -987,10 +1003,10 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                             viewModel.openVersions(
                                 item.pluginId,
                                 item.displayName,
-                                // Blank when not installed — the sheet then offers "Install"
+                                // Null when not installed — the sheet then offers "Install"
                                 // per version instead of Update/Downgrade.
                                 state.installedPlugins
-                                    .find { it.pluginId == item.pluginId }?.version.orEmpty()
+                                    .find { it.pluginId == item.pluginId }?.version
                             )
                         },
                         canInstall = { item -> viewModel.canInstall(item) },
@@ -1495,8 +1511,6 @@ private fun InstalledPluginsTab(
             }
         }
 
-        item(key = "list-gap") { Spacer(Modifier.height(6.dp)) }
-
         // Installed plugins list
         if (plugins.isEmpty()) {
             item(key = "empty") {
@@ -1579,10 +1593,12 @@ private fun InstalledPluginCard(
                         Icon(
                             Icons.Default.OpenInNew,
                             contentDescription = "Open homepage",
+                            // Generous padding on purpose: this sits INSIDE a now-clickable
+                            // full-width row, so a near miss opens the plugin instead.
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
                                 .clickable { onOpenHomepage() }
-                                .padding(2.dp)
+                                .padding(6.dp)
                                 .size(12.dp),
                             tint = BossThemeColors.AccentColor
                         )
@@ -1958,8 +1974,9 @@ private fun AvailablePluginCard(
                 val isSystemComponent = plugin.type.equals("service", ignoreCase = true)
                 // Version picker — the same sheet the Installed tab opens, so a specific
                 // version can be installed from the store rather than only the latest.
-                // Hidden for system components and for users who may not install at all,
-                // matching the Install button's own gate.
+                // Hidden for system components, and for users who can neither install this
+                // plugin nor already have it — deliberately broader than the Install button,
+                // since an installed plugin stays re-versionable however it got here.
                 if (!isSystemComponent && (canInstall || isInstalled)) {
                     Box(
                         modifier = Modifier

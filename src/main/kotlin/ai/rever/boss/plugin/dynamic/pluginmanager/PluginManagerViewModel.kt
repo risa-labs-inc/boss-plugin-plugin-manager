@@ -123,7 +123,14 @@ data class PostUpdatePrompt(
 data class VersionSheetState(
     val pluginId: String,
     val displayName: String,
-    val installedVersion: String,
+    /**
+     * NULL when the plugin is not installed (the sheet is reachable from the store too).
+     *
+     * Nullable rather than a blank sentinel: `InstalledPluginState.version` is non-null but may
+     * be empty, so "" would make an installed plugin with no version string read as not
+     * installed - and offer Install on every row.
+     */
+    val installedVersion: String?,
     val isLoading: Boolean = true,
     val versions: List<PluginVersionInfo> = emptyList(),
     val hostIpcVersion: String? = IpcCompat.hostVersion,
@@ -419,14 +426,20 @@ class PluginManagerViewModel(
      * and they only work because those two ids are known here.
      *
      * Falls back to [fallbackUrl] when the plugin contributes neither. A disabled plugin has
-     * unregistered everything, so this is also what a click on a disabled row does.
+     * unregistered everything, so this is also what a click on a disabled row does - and when
+     * there is no homepage either, the click reports why rather than doing nothing: the whole
+     * row is clickable, so silence would be an affordance promising a result it cannot deliver.
      */
     fun openPlugin(pluginId: String, fallbackUrl: String? = null) {
         val wid = windowId
 
+        // Surfaced in the error banner rather than logged: this plugin has no logger, and a
+        // swallowed throwable here reads to the user as "clicking does nothing".
+        var failure: String? = null
+
         val panel = runCatching {
             panelRegistry?.getAllPanels()?.firstOrNull { it.id.pluginId == pluginId }
-        }.getOrNull()
+        }.onFailure { failure = it.message }.getOrNull()
         if (panel != null && panelEventProvider != null && wid != null) {
             scope.launch { panelEventProvider.openPanel(panel.id, wid) }
             return
@@ -440,15 +453,30 @@ class PluginManagerViewModel(
                 ?.firstOrNull { it.typeId.pluginId == pluginId }
                 ?: return@runCatching false
             val ops = splitViewOperations ?: return@runCatching false
-            val tab = tabType.createTabInfo("", NewTabContext(windowId = wid.orEmpty()))
+            // No invented window id: the panel branch above declines to act without one, and a
+            // tab opened against "" targets a window that does not exist.
+            val w = wid ?: return@runCatching false
+            val tab = tabType.createTabInfo("", NewTabContext(windowId = w))
                 ?: return@runCatching false
             ops.openTab(tab)
             true
-        }.getOrDefault(false)
+        }.onFailure { failure = it.message }.getOrDefault(false)
         if (opened) return
 
-        fallbackUrl?.takeIf { it.isNotBlank() }?.let { openUrl(it) }
+        fallbackUrl?.takeIf { it.isNotBlank() }?.let {
+            openUrl(it)
+            return
+        }
+
+        _state.value = _state.value.copy(
+            error = failure?.let { "Could not open ${displayNameOf(pluginId)}: $it" }
+                ?: "${displayNameOf(pluginId)} has no panel or tab to open."
+        )
     }
+
+    /** Friendly name for an installed plugin id, falling back to the id itself. */
+    private fun displayNameOf(pluginId: String): String =
+        _state.value.installedPlugins.find { it.pluginId == pluginId }?.displayName ?: pluginId
 
     /**
      * Load whether the user belongs to any organisation.
@@ -794,7 +822,7 @@ class PluginManagerViewModel(
      * Open the version-history / downgrade sheet for a plugin and load its
      * published versions (each tagged with IPC compatibility).
      */
-    fun openVersions(pluginId: String, displayName: String, installedVersion: String) {
+    fun openVersions(pluginId: String, displayName: String, installedVersion: String?) {
         _state.value = _state.value.copy(
             versionSheet = VersionSheetState(
                 pluginId = pluginId,
