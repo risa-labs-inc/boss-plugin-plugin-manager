@@ -3,14 +3,17 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.realtime
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.realtime.Realtime
-import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.PostgresAction
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -30,20 +33,21 @@ sealed class StoreChangeEvent {
 /**
  * Client that subscribes to Supabase Realtime for plugin store changes.
  *
- * Uses [withHostClassLoader] to temporarily swap the thread's context classloader
- * to the parent (host) classloader before creating the SupabaseClient. This allows
- * Ktor's ServiceLoader to discover the CIO engine and WebSocket plugin from the
- * host's classpath, which is not possible with the plugin's sandboxed classloader.
+ * The subscription runs inside a **reconnect loop**: if the WebSocket drops (laptop sleep/wake, a
+ * network change, an idle timeout) the loop tears the client down and re-subscribes with capped
+ * exponential backoff, flipping [isConnected] false→true across the gap. Without this a single drop
+ * left the toolbox permanently blind to newly published versions until the whole app was restarted.
+ * Consumers should re-fetch the catalog when [isConnected] transitions back to true, to catch any
+ * change published while the socket was down.
+ *
+ * Uses [withHostClassLoader] to temporarily swap the thread's context classloader to the parent
+ * (host) classloader before creating the SupabaseClient, so Ktor's ServiceLoader can discover the
+ * CIO engine and WebSocket plugin from the host's classpath.
  */
 class PluginStoreRealtimeClient(
     private val supabaseUrl: String,
     private val supabaseAnonKey: String
 ) {
-    // Capture plugin classloader at construction time (runs on plugin's thread)
-    // Coroutine threads on Dispatchers.Default use the system classloader,
-    // which can't find plugin classes like StoreChangeEvent.PluginChanged
-    private val pluginClassLoader: ClassLoader = Thread.currentThread().contextClassLoader
-
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private val _storeChanges = MutableSharedFlow<StoreChangeEvent>()
@@ -53,123 +57,130 @@ class PluginStoreRealtimeClient(
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
     private var supabaseClient: SupabaseClient? = null
-    private var pluginsChannel: RealtimeChannel? = null
-    private var versionsChannel: RealtimeChannel? = null
+    private var managerJob: Job? = null
+
+    @Volatile
+    private var running = false
 
     /**
-     * Connect to Supabase Realtime and subscribe to plugin store changes.
+     * Connect to Supabase Realtime and keep the subscription alive across drops. Idempotent — a
+     * second call while already running is a no-op.
      */
     fun connect() {
-        if (supabaseClient != null) return
+        if (managerJob != null) return
+        running = true
+        managerJob = scope.launch { runWithReconnect() }
+    }
 
-        try {
-            supabaseClient = withHostClassLoader {
-                createSupabaseClient(
-                    supabaseUrl = supabaseUrl,
-                    supabaseKey = supabaseAnonKey
-                ) {
-                    install(Realtime)
+    /** Subscribe, stream changes, and on any failure reconnect with capped exponential backoff. */
+    private suspend fun runWithReconnect() {
+        var attempt = 0
+        while (running) {
+            try {
+                val client = withHostClassLoader {
+                    createSupabaseClient(
+                        supabaseUrl = supabaseUrl,
+                        supabaseKey = supabaseAnonKey
+                    ) {
+                        install(Realtime)
+                    }
                 }
+                supabaseClient = client
+
+                // coroutineScope suspends here until a collector ends or throws (i.e. the socket
+                // dropped); a throw propagates out and is handled below, triggering a reconnect.
+                coroutineScope {
+                    val pluginsChannel = client.channel("pm-plugins-changes")
+                    val versionsChannel = client.channel("pm-versions-changes")
+                    val pluginFlow = pluginsChannel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                        table = "plugins"
+                    }
+                    val versionFlow = versionsChannel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                        table = "plugin_versions"
+                    }
+                    pluginsChannel.subscribe()
+                    versionsChannel.subscribe()
+
+                    _isConnected.value = true
+                    attempt = 0 // healthy connection — reset backoff
+
+                    launch { pluginFlow.collect { onPluginAction(it) } }
+                    launch { versionFlow.collect { onVersionAction(it) } }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Fall through to teardown + backoff + retry.
             }
 
-            subscribeToPlugins()
-            subscribeToVersions()
-        } catch (_: Exception) {
-            // Silently fail - manual refresh still works
+            _isConnected.value = false
+            runCatching { supabaseClient?.close() }
+            supabaseClient = null
+
+            if (!running) break
+            attempt++
+            delay(backoffMillis(attempt))
         }
     }
 
-    private fun subscribeToPlugins() {
-        scope.launch {
-            try {
-                val client = supabaseClient ?: return@launch
-
-                pluginsChannel = client.channel("pm-plugins-changes")
-                val changeFlow = pluginsChannel!!.postgresChangeFlow<PostgresAction>(schema = "public") {
-                    table = "plugins"
-                }
-
-                pluginsChannel!!.subscribe()
-
-                _isConnected.value = true
-
-                changeFlow.collect { action ->
-                    when (action) {
-                        is PostgresAction.Insert -> {
-                            val pluginId = action.record["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
-                            _storeChanges.emit(StoreChangeEvent.PluginChanged(pluginId, "INSERT"))
-                        }
-                        is PostgresAction.Update -> {
-                            val pluginId = action.record["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
-                            _storeChanges.emit(StoreChangeEvent.PluginChanged(pluginId, "UPDATE"))
-                        }
-                        is PostgresAction.Delete -> {
-                            val pluginId = action.oldRecord["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
-                            _storeChanges.emit(StoreChangeEvent.PluginChanged(pluginId, "DELETE"))
-                        }
-                        else -> {}
-                    }
-                }
-            } catch (_: Exception) {
-                _isConnected.value = false
+    private suspend fun onPluginAction(action: PostgresAction) {
+        when (action) {
+            is PostgresAction.Insert -> {
+                val pluginId = action.record["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
+                _storeChanges.emit(StoreChangeEvent.PluginChanged(pluginId, "INSERT"))
             }
+            is PostgresAction.Update -> {
+                val pluginId = action.record["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
+                _storeChanges.emit(StoreChangeEvent.PluginChanged(pluginId, "UPDATE"))
+            }
+            is PostgresAction.Delete -> {
+                val pluginId = action.oldRecord["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
+                _storeChanges.emit(StoreChangeEvent.PluginChanged(pluginId, "DELETE"))
+            }
+            else -> {}
         }
     }
 
-    private fun subscribeToVersions() {
-        scope.launch {
-            try {
-                val client = supabaseClient ?: return@launch
-
-                versionsChannel = client.channel("pm-versions-changes")
-                val changeFlow = versionsChannel!!.postgresChangeFlow<PostgresAction>(schema = "public") {
-                    table = "plugin_versions"
-                }
-
-                versionsChannel!!.subscribe()
-
-                changeFlow.collect { action ->
-                    when (action) {
-                        is PostgresAction.Insert -> {
-                            val pluginId = action.record["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
-                            val version = action.record["version"]?.toString()?.removeSurrounding("\"") ?: ""
-                            _storeChanges.emit(StoreChangeEvent.VersionAdded(pluginId, version))
-                        }
-                        else -> {}
-                    }
-                }
-            } catch (_: Exception) {
-                // Versions channel failure is non-fatal
-            }
+    private suspend fun onVersionAction(action: PostgresAction) {
+        if (action is PostgresAction.Insert) {
+            val pluginId = action.record["plugin_id"]?.toString()?.removeSurrounding("\"") ?: ""
+            val version = action.record["version"]?.toString()?.removeSurrounding("\"") ?: ""
+            _storeChanges.emit(StoreChangeEvent.VersionAdded(pluginId, version))
         }
+    }
+
+    /** 1s, 2s, 4s … capped at [MAX_BACKOFF_MS]. */
+    private fun backoffMillis(attempt: Int): Long {
+        val step = (attempt - 1).coerceIn(0, 5)
+        return (BASE_BACKOFF_MS shl step).coerceAtMost(MAX_BACKOFF_MS)
     }
 
     /**
-     * Disconnect from Supabase Realtime and clean up resources.
+     * Stop the reconnect loop and disconnect from Supabase Realtime.
      */
     fun disconnect() {
+        running = false
+        managerJob?.cancel()
+        managerJob = null
         scope.launch {
-            try {
-                pluginsChannel?.unsubscribe()
-                versionsChannel?.unsubscribe()
-                supabaseClient?.close()
-            } catch (_: Exception) {
-                // Best-effort cleanup
-            } finally {
-                supabaseClient = null
-                pluginsChannel = null
-                versionsChannel = null
-                _isConnected.value = false
-            }
+            runCatching { supabaseClient?.close() }
+            supabaseClient = null
+            _isConnected.value = false
         }
     }
 
     /**
-     * Dispose of all resources including the coroutine scope.
+     * Dispose of all resources including the coroutine scope. [disconnect] launches the (suspending)
+     * client close on [scope] as best-effort cleanup before the scope is cancelled.
      */
     fun dispose() {
         disconnect()
         scope.cancel()
+    }
+
+    private companion object {
+        const val BASE_BACKOFF_MS = 1_000L
+        const val MAX_BACKOFF_MS = 30_000L
     }
 }
 
