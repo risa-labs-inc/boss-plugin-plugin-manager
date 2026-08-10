@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.realtime
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -40,6 +41,40 @@ class RealtimeBackoffTest {
         // rather than a tight retry loop.
         for (attempt in intArrayOf(Int.MIN_VALUE, -1, 0, 1)) {
             assertTrue(backoffMillis(attempt) >= 1_000L, "attempt=$attempt")
+        }
+    }
+}
+
+/**
+ * Unit tests for [shouldResync], the "realtime came back" edge behind the catalog catch-up.
+ *
+ * The rule is subtle in exactly the way that costs a redundant network fetch on every panel open,
+ * and the distinction it turns on - no observation yet, versus observed disconnected - is invisible
+ * in a Boolean. Pinning it here is cheaper than rediscovering it from a duplicated request log.
+ */
+class ShouldResyncTest {
+    @Test
+    fun `a first emission of connected is not a reconnect`() {
+        // Realtime connects at plugin load, so a panel opening later sees true first. Treating
+        // that as an edge duplicates the initial load's own fetch every time a panel opens.
+        assertFalse(shouldResync(previous = null, connected = true))
+    }
+
+    @Test
+    fun `connected after disconnected is a reconnect`() {
+        assertTrue(shouldResync(previous = false, connected = true))
+    }
+
+    @Test
+    fun `staying connected is not a reconnect`() {
+        // StateFlow conflates duplicates, but a re-collect can still replay the current value.
+        assertFalse(shouldResync(previous = true, connected = true))
+    }
+
+    @Test
+    fun `no disconnected emission ever triggers a resync`() {
+        for (previous in arrayOf(null, false, true)) {
+            assertFalse(shouldResync(previous, connected = false), "previous=$previous")
         }
     }
 }

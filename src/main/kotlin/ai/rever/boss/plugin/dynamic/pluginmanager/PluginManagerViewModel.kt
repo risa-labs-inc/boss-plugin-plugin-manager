@@ -25,6 +25,7 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
+import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.shouldResync
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
@@ -226,7 +227,10 @@ class PluginManagerViewModel(
                 .debounce(500)
                 .collect { event ->
                     when (event) {
-                        is StoreChangeEvent.PluginChanged -> refreshStoreInternal()
+                        // Silent: someone else publishing a plugin is the most background-y
+                        // trigger in this file, and it must not clear an error banner raised by
+                        // something the user actually did, such as a failed install.
+                        is StoreChangeEvent.PluginChanged -> refreshStoreInternal(silent = true)
                         is StoreChangeEvent.VersionAdded -> checkForUpdatesInternal()
                     }
                 }
@@ -236,18 +240,12 @@ class PluginManagerViewModel(
         // re-sync on *re*connect: a dropped-then-restored socket may have missed VersionAdded
         // events, so pull the catalog + update check whenever we transition back to connected.
         //
-        // The trigger is specifically a true that follows a false, which is why `previous` starts
-        // null rather than false. PluginManagerCore connects realtime at plugin load, long before
-        // any panel opens, so a panel opening later sees `true` as its first emission - treating
-        // that as a transition would duplicate the init block's refresh() on every panel open.
-        // A cold start whose join has not landed yet does still fetch twice (once from init, once
-        // when the join completes); that is the deliberate side the tradeoff falls on, because the
-        // same emission pattern is how an app that started offline catches up.
+        // See [shouldResync] for why the edge is "true after false" and not "first true".
         scope.launch {
             var previous: Boolean? = null
             apiImpl.realtimeClient.isConnected.collect { connected ->
                 _state.update { it.copy(realtimeConnected = connected) }
-                if (connected && previous == false) {
+                if (shouldResync(previous, connected)) {
                     refreshStoreInternal(silent = true)
                     checkForUpdatesInternal()
                 }
@@ -255,17 +253,21 @@ class PluginManagerViewModel(
             }
         }
 
-        // Safety net: while realtime is down, poll periodically so a socket the library cannot
-        // recover can't leave the catalog stale until the next app restart. No-op while healthy.
-        // Silent: this correlates with the network being down, which is precisely when a fetch
-        // fails, and an unattended failure must not plant an error banner the user never asked for.
+        // Safety net, and deliberately not gated on realtimeConnected. The original bug was that
+        // flag being stuck true while the socket was dead; hanging both recovery paths off it
+        // would mean any recurrence disables the net exactly when it is needed. So poll always,
+        // and vary the interval rather than the condition.
+        //
+        // Silent, because while disconnected this runs precisely when the network is down, and an
+        // unattended failure must not plant an error banner the user never asked for.
         scope.launch {
             while (true) {
-                delay(UPDATE_POLL_INTERVAL_MS)
-                if (!_state.value.realtimeConnected) {
-                    refreshStoreInternal(silent = true)
-                    checkForUpdatesInternal()
-                }
+                delay(
+                    if (_state.value.realtimeConnected) HEALTHY_POLL_INTERVAL_MS
+                    else UPDATE_POLL_INTERVAL_MS
+                )
+                refreshStoreInternal(silent = true)
+                checkForUpdatesInternal()
             }
         }
 
@@ -315,7 +317,7 @@ class PluginManagerViewModel(
         refreshOrganisationMembership()
 
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.update { it.copy(isLoading = true, error = null) }
             try {
                 // Refresh installed plugins first (needed by checkForUpdates)
                 apiImpl.refreshInstalledPlugins()
@@ -340,19 +342,20 @@ class PluginManagerViewModel(
                         } catch (e: Exception) {
                             emptyList()
                         }
-                        _state.value = _state.value.copy(
-                            isStoreAdmin = isAdmin,
-                            canPublish = canPublish,
-                            inaccessiblePlugins = inaccessible
-                        )
+                        _state.update {
+                            it.copy(
+                                isStoreAdmin = isAdmin,
+                                canPublish = canPublish,
+                                inaccessiblePlugins = inaccessible
+                            )
+                        }
                     }
                 }
-                _state.value = _state.value.copy(isLoading = false)
+                _state.update { it.copy(isLoading = false) }
             } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    error = e.message ?: "Refresh failed"
-                )
+                _state.update {
+                    it.copy(isLoading = false, error = e.message ?: "Refresh failed")
+                }
             }
         }
     }
@@ -412,7 +415,7 @@ class PluginManagerViewModel(
                     newVersion = newVersion
                 )
             }
-            _state.value = _state.value.copy(updates = updateInfos)
+            _state.update { it.copy(updates = updateInfos) }
         } catch (e: Exception) {
             // Silently fail update check
         }
@@ -1176,5 +1179,12 @@ class PluginManagerViewModel(
 
         /** How often to poll for store updates while realtime is disconnected (safety net). */
         const val UPDATE_POLL_INTERVAL_MS = 5 * 60_000L
+
+        /**
+         * How often to poll while realtime reports healthy. Realtime should make this redundant,
+         * which is the point: it is the backstop for realtime being wrong about itself, so it
+         * trades a fetch every half hour for staleness that no longer needs a restart to clear.
+         */
+        const val HEALTHY_POLL_INTERVAL_MS = 30 * 60_000L
     }
 }

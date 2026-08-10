@@ -9,6 +9,7 @@ import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -27,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Events emitted when plugin store data changes via Supabase Realtime.
@@ -51,10 +53,8 @@ sealed class StoreChangeEvent {
  * false->true across a drop. Consumers should re-fetch the catalog on that transition to pick up
  * anything published while the socket was gone.
  *
- * The retry loop here covers only *setup* failure (client or channel construction), which is the
- * one thing that genuinely throws. It is bounded: those failures are configuration or classloader
- * problems that fail identically on every attempt, so retrying forever would only burn a wakeup
- * every 30s with nothing to show for it. [lastError] records why setup gave up.
+ * The retry loop here covers only construction failure (the client or the channels), which is the
+ * one thing on this path that genuinely throws. Everything after that is the library's business.
  *
  * Uses [withHostClassLoader] to temporarily swap the thread's context classloader to the parent
  * (host) classloader before creating the SupabaseClient, so Ktor's ServiceLoader can discover the
@@ -74,37 +74,44 @@ class PluginStoreRealtimeClient(
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
     /**
-     * Why realtime is not running, when it gave up. Null while healthy. Exposed because a silent
-     * `catch` is what made the original staleness bug expensive to diagnose.
-     */
-    private val _lastError = MutableStateFlow<String?>(null)
-    val lastError: StateFlow<String?> = _lastError.asStateFlow()
-
-    /**
      * The subscription coroutine. Sole owner of the [SupabaseClient]: it creates it and closes it
      * in a `finally`, so no other thread can close a client out from under it.
+     *
+     * Cleared when the job completes, so [connect] is callable again. Holding a completed job here
+     * would make the idempotence guard permanent: realtime would stay dead for the session with no
+     * path back. Atomic rather than monitor-guarded because the completion handler runs on whatever
+     * thread finishes the job, and [disconnect] holds this instance's monitor while it joins.
      */
-    @Volatile
-    private var managerJob: Job? = null
+    private val managerJob = AtomicReference<Job?>(null)
 
     /**
      * Connect to Supabase Realtime and keep the subscription alive. Idempotent - a second call
-     * while already running is a no-op.
+     * while a subscription is live is a no-op, but a call after one has ended does restart it.
      *
      * Synchronized with [disconnect] so the check-then-launch cannot interleave with a teardown
      * and leave a started job unreferenced, or two jobs racing for the same channel topics.
      */
     @Synchronized
     fun connect() {
-        if (managerJob != null) return
-        managerJob = scope.launch { run() }
+        if (managerJob.get()?.isActive == true) return
+        val job = scope.launch { run() }
+        managerJob.set(job)
+        job.invokeOnCompletion { managerJob.compareAndSet(job, null) }
     }
 
     /**
-     * Create the client, stream changes, and retry a bounded number of times if *setup* fails.
+     * Create the client, stream changes, and retry with capped backoff if construction throws.
      * Cancellation propagates, but the client is still closed on the way out: the `finally` runs
      * on the cancellation path too, which is what keeps a plugin reload from leaking a live
      * WebSocket plus the Ktor engine's thread pool.
+     *
+     * Retries are unbounded on purpose. Giving up after N attempts sounds tidy for what should be
+     * deterministic config failures, but this `catch` is wider than that - anything thrown while
+     * building the channels lands here too, including a transient failure that a later attempt
+     * would get past. A wakeup every 30s costs nothing next to needing an app restart.
+     *
+     * `attempt` is never reset. A loop that keeps reaching the `catch` is failing, not recovering,
+     * and resetting on each pass would hold it at a flat one-second retry forever.
      */
     private suspend fun run() {
         var attempt = 0
@@ -119,21 +126,18 @@ class PluginStoreRealtimeClient(
                         install(Realtime)
                     }
                 }
-                _lastError.value = null
                 // Never returns: the channel-status and change-flow collectors do not complete.
                 stream(client)
                 return
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                _lastError.value = e.message ?: e::class.simpleName ?: "realtime setup failed"
+            } catch (_: Exception) {
                 attempt++
             } finally {
                 _isConnected.value = false
                 // NonCancellable so the close still completes when we got here by cancellation.
                 withContext(NonCancellable) { runCatching { client?.close() } }
             }
-            if (attempt >= MAX_SETUP_ATTEMPTS) return
             delay(backoffMillis(attempt))
         }
     }
@@ -159,11 +163,12 @@ class PluginStoreRealtimeClient(
             }.collect { _isConnected.value = it }
         }
 
-        // Collect before subscribing: a change flow registers its callback when collection
-        // starts, so joining first would drop anything that lands during the join round-trip.
-        // The consumer-side re-sync on the false->true transition covers that window regardless.
-        launch { pluginFlow.collect { onPluginAction(it) } }
-        launch { versionFlow.collect { onVersionAction(it) } }
+        // Collect before subscribing: a change flow registers its callback when collection starts,
+        // so joining first would drop anything that lands during the join round-trip. UNDISPATCHED
+        // is what makes that ordering true rather than merely intended - the default only
+        // *schedules* the child, so on a multi-threaded dispatcher subscribe() can win the race.
+        launch(start = CoroutineStart.UNDISPATCHED) { pluginFlow.collect { onPluginAction(it) } }
+        launch(start = CoroutineStart.UNDISPATCHED) { versionFlow.collect { onVersionAction(it) } }
 
         pluginsChannel.subscribe()
         versionsChannel.subscribe()
@@ -210,8 +215,7 @@ class PluginStoreRealtimeClient(
      */
     @Synchronized
     fun disconnect() {
-        val job = managerJob ?: return
-        managerJob = null
+        val job = managerJob.getAndSet(null) ?: return
         job.cancel()
         runCatching { runBlocking { withTimeoutOrNull(CLOSE_TIMEOUT_MS) { job.join() } } }
         _isConnected.value = false
@@ -228,12 +232,6 @@ class PluginStoreRealtimeClient(
         const val VERSIONS_TOPIC = "pm-versions-changes"
 
         /**
-         * Setup failures are deterministic (bad config, or Ktor's engine missing from the
-         * classloader), so give up rather than retry forever. [lastError] holds the reason.
-         */
-        const val MAX_SETUP_ATTEMPTS = 5
-
-        /**
          * Upper bound on how long plugin unload waits for the socket to close. Closing a
          * WebSocket is a matter of milliseconds; this only has to be generous enough not to
          * abandon a healthy close, and short enough not to read as a hang if one wedges.
@@ -242,15 +240,28 @@ class PluginStoreRealtimeClient(
     }
 }
 
-/** Backoff for setup retries: 1s, 2s, 4s ... capped at 30s. `attempt` is 1-based. */
+/** Backoff for retries: 1s, 2s, 4s ... capped at 30s. `attempt` is 1-based. */
 internal fun backoffMillis(attempt: Int): Long {
-    val step = (attempt - 1).coerceIn(0, MAX_BACKOFF_SHIFT)
+    // The shift is clamped only to stop `shl` wrapping - Kotlin masks the distance to 6 bits, so
+    // an unclamped `1000L shl 64` is 1000L again, turning the cap into a one-second busy loop.
+    // The cap itself is coerceAtMost, so this bound just has to be past where the cap bites.
+    val step = (attempt - 1).coerceIn(0, MAX_SAFE_SHIFT)
     return (BASE_BACKOFF_MS shl step).coerceAtMost(MAX_BACKOFF_MS)
 }
 
+/**
+ * Whether an [isConnected] emission is a *re*connect worth re-fetching the catalog for.
+ *
+ * The trigger is a true that follows a false, which is why [previous] is nullable: realtime is
+ * connected at plugin load, long before a panel opens, so a panel opening later sees `true` as its
+ * first emission. Treating that as an edge duplicates the initial load's own fetch on every open.
+ */
+internal fun shouldResync(previous: Boolean?, connected: Boolean): Boolean =
+    connected && previous == false
+
 private const val BASE_BACKOFF_MS = 1_000L
 private const val MAX_BACKOFF_MS = 30_000L
-private const val MAX_BACKOFF_SHIFT = 5
+private const val MAX_SAFE_SHIFT = 16
 
 /**
  * Execute a block with the host (parent) classloader as the thread's context classloader.
