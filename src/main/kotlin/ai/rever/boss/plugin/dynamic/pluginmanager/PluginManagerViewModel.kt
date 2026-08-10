@@ -383,10 +383,7 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Refresh store plugins internally (without changing loading state).
-     */
-    /**
-     * Fetch the store catalog.
+     * Fetch the store catalog. Does not touch the loading state.
      *
      * [silent] leaves [PluginManagerState.error] untouched either way, for refreshes the user did
      * not ask for. Without it a background poll both raises a banner nobody triggered and, on the
@@ -414,9 +411,21 @@ class PluginManagerViewModel(
     /**
      * Check for updates internally.
      */
+    /**
+     * Refresh the pending-update list.
+     *
+     * Uses the Result-returning variant so a failed check leaves [PluginManagerState.updates]
+     * alone. The plain `checkForUpdates()` reports a failure as an empty map, which a background
+     * caller would write straight over the user's pending updates - and the disconnected poll runs
+     * exactly when the network is down, so that is the common path rather than an edge.
+     *
+     * Unlike [refresh] this does not refresh installed plugins first. It works off the cached list
+     * on purpose: installs and uninstalls all go through this plugin, so the cache is authoritative,
+     * and a background check should not pay for a rescan.
+     */
     private suspend fun checkForUpdatesInternal() {
         try {
-            val updateMap = api.checkForUpdates()
+            val updateMap = apiImpl.checkForUpdatesResult().getOrElse { return }
             val updateInfos = updateMap.map { (pluginId, newVersion) ->
                 val installed = _state.value.installedPlugins.find { it.pluginId == pluginId }
                 UpdateInfo(

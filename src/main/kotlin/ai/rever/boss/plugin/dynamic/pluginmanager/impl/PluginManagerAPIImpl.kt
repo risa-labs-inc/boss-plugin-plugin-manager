@@ -88,6 +88,12 @@ class PluginManagerAPIImpl(
     val downloadTracker = DownloadProgressTracker()
 
     fun connectRealtime() = realtimeClient.connect()
+
+    /**
+     * **Blocks** the calling thread while the socket closes (bounded, see
+     * [PluginStoreRealtimeClient.disconnect]). Intended for the unload path; do not call it from a
+     * UI thread, or from a coroutine whose dispatcher the teardown also needs.
+     */
     fun disconnectRealtime() = realtimeClient.disconnect()
 
     init {
@@ -373,9 +379,20 @@ class PluginManagerAPIImpl(
         return result
     }
 
-    override suspend fun checkForUpdates(): Map<String, String> = withContext(Dispatchers.IO) {
+    override suspend fun checkForUpdates(): Map<String, String> =
+        checkForUpdatesResult().getOrDefault(emptyMap())
+
+    /**
+     * [checkForUpdates], but able to say it failed.
+     *
+     * The plain version collapses "nothing to update" and "could not reach the store" into the
+     * same empty map, which is fine for a caller that only acts on a non-empty result. It is not
+     * fine for a caller that writes the result to UI state: a background check running while the
+     * network is down would clear the user's pending-update list and make it look resolved.
+     */
+    suspend fun checkForUpdatesResult(): Result<Map<String, String>> = withContext(Dispatchers.IO) {
         val installed = getInstalledPlugins()
-        if (installed.isEmpty()) return@withContext emptyMap()
+        if (installed.isEmpty()) return@withContext Result.success(emptyMap())
 
         val installedIds = installed.map { it.pluginId }
         val installedVersionMap = installed.associate { it.pluginId to it.version }
@@ -389,15 +406,17 @@ class PluginManagerAPIImpl(
                 }
                 .decodeList<PluginUpdateRow>()
 
-            rows.mapNotNull { row ->
-                val latestVersion = row.latestVersion ?: return@mapNotNull null
-                val currentVersion = installedVersionMap[row.pluginId] ?: return@mapNotNull null
-                if (isNewerVersion(latestVersion, currentVersion)) {
-                    row.pluginId to latestVersion
-                } else null
-            }.toMap()
-        } catch (_: Exception) {
-            emptyMap()
+            Result.success(
+                rows.mapNotNull { row ->
+                    val latestVersion = row.latestVersion ?: return@mapNotNull null
+                    val currentVersion = installedVersionMap[row.pluginId] ?: return@mapNotNull null
+                    if (isNewerVersion(latestVersion, currentVersion)) {
+                        row.pluginId to latestVersion
+                    } else null
+                }.toMap()
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

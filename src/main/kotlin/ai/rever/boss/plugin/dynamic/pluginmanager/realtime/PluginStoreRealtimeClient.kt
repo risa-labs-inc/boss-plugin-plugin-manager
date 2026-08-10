@@ -48,10 +48,16 @@ sealed class StoreChangeEvent {
  * derived from a collector on [postgresChangeFlow], which is a `callbackFlow` that neither
  * completes nor throws when the socket dies, so the flag was set once and never moved again.
  *
- * [isConnected] therefore mirrors the two channels' own join state. The library marks channels
- * `UNSUBSCRIBED` while the socket is down and re-subscribes them on reconnect, so the flag flips
- * false->true across a drop. Consumers should re-fetch the catalog on that transition to pick up
- * anything published while the socket was gone.
+ * [isConnected] therefore mirrors the two channels' own join state. `RealtimeImpl.disconnect()`
+ * marks every channel `UNSUBSCRIBED`, and its `reconnect()` is `disconnect()` then `connect()`,
+ * so the flag flips false->true across a drop. Consumers should re-fetch the catalog on that
+ * transition to pick up anything published while the socket was gone.
+ *
+ * Note the lag: the flag drops when the library *notices* the socket is dead (an unacked heartbeat,
+ * so up to about two 15s beats), not the instant it dies. Anything keyed off "currently
+ * disconnected" is therefore approximate. The false->true edge is not, and it survives even if the
+ * library ever stops marking channels down on disconnect, because a rejoin passes through
+ * `SUBSCRIBING` either way.
  *
  * The retry loop here covers only construction failure (the client or the channels), which is the
  * one thing on this path that genuinely throws. Everything after that is the library's business.
@@ -220,13 +226,15 @@ class PluginStoreRealtimeClient(
      * a fresh one.
      *
      * Blocks briefly on the manager job's teardown rather than deferring it. `SupabaseClient.close()`
-     * suspends, and the two obvious ways to run it here are both wrong: launching it on [scope]
-     * loses the race with [dispose]'s `scope.cancel()`, and letting it outlive this call means an
-     * async teardown still touching Ktor after the plugin classloader has closed.
+     * suspends, and launching it on [scope] loses the race with [dispose]'s `scope.cancel()` - the
+     * coroutine is cancelled before its first statement, so the close never happens at all.
      *
      * The wait is bounded because this sits on the plugin-unload path. `withTimeoutOrNull` is
      * scheduled on `runBlocking`'s own event loop, so the bound holds even if the job never gets
      * a dispatcher thread - a saturated [Dispatchers.Default] costs a pause, never a deadlock.
+     * **This blocks the calling thread for up to [CLOSE_TIMEOUT_MS].** On the timeout path the
+     * teardown is abandoned mid-flight and can still outlive this call, which is the thing the
+     * bound trades away: a hung close should not wedge unload.
      */
     @Synchronized
     fun disconnect() {
