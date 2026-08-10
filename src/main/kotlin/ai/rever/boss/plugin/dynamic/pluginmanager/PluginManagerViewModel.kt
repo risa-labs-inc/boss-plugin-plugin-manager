@@ -233,27 +233,37 @@ class PluginManagerViewModel(
         }
 
         // Track realtime connection status (connection itself is owned by PluginManagerCore) and
-        // re-sync on (re)connect: a dropped-then-restored socket may have missed VersionAdded events,
-        // so pull the catalog + update check whenever we transition back to connected.
+        // re-sync on *re*connect: a dropped-then-restored socket may have missed VersionAdded
+        // events, so pull the catalog + update check whenever we transition back to connected.
+        //
+        // The trigger is specifically a true that follows a false, which is why `previous` starts
+        // null rather than false. PluginManagerCore connects realtime at plugin load, long before
+        // any panel opens, so a panel opening later sees `true` as its first emission - treating
+        // that as a transition would duplicate the init block's refresh() on every panel open.
+        // A cold start whose join has not landed yet does still fetch twice (once from init, once
+        // when the join completes); that is the deliberate side the tradeoff falls on, because the
+        // same emission pattern is how an app that started offline catches up.
         scope.launch {
-            var wasConnected = false
+            var previous: Boolean? = null
             apiImpl.realtimeClient.isConnected.collect { connected ->
-                _state.value = _state.value.copy(realtimeConnected = connected)
-                if (connected && !wasConnected) {
-                    refreshStoreInternal()
+                _state.update { it.copy(realtimeConnected = connected) }
+                if (connected && previous == false) {
+                    refreshStoreInternal(silent = true)
                     checkForUpdatesInternal()
                 }
-                wasConnected = connected
+                previous = connected
             }
         }
 
-        // Safety net: while realtime is down, poll for updates periodically so a dead socket can't
-        // leave the catalog stale until the next app restart. No-op when realtime is healthy.
+        // Safety net: while realtime is down, poll periodically so a socket the library cannot
+        // recover can't leave the catalog stale until the next app restart. No-op while healthy.
+        // Silent: this correlates with the network being down, which is precisely when a fetch
+        // fails, and an unattended failure must not plant an error banner the user never asked for.
         scope.launch {
             while (true) {
                 delay(UPDATE_POLL_INTERVAL_MS)
                 if (!_state.value.realtimeConnected) {
-                    refreshStoreInternal()
+                    refreshStoreInternal(silent = true)
                     checkForUpdatesInternal()
                 }
             }
@@ -361,16 +371,28 @@ class PluginManagerViewModel(
     /**
      * Refresh store plugins internally (without changing loading state).
      */
-    private suspend fun refreshStoreInternal() {
+    /**
+     * Fetch the store catalog.
+     *
+     * [silent] leaves [PluginManagerState.error] untouched either way, for refreshes the user did
+     * not ask for. Without it a background poll both raises a banner nobody triggered and, on the
+     * next success, clears an error some *other* operation (a failed install, say) had set.
+     */
+    private suspend fun refreshStoreInternal(silent: Boolean = false) {
         val result = api.fetchStorePlugins()
         result.fold(
             onSuccess = { plugins ->
-                _state.value = _state.value.copy(availablePlugins = plugins)
+                // Clearing the error on success is the half that was missing: a single failed
+                // fetch used to leave the banner up for the life of the panel.
+                _state.update {
+                    if (silent) it.copy(availablePlugins = plugins)
+                    else it.copy(availablePlugins = plugins, error = null)
+                }
             },
             onFailure = { e ->
-                _state.value = _state.value.copy(
-                    error = e.message ?: "Failed to fetch plugins"
-                )
+                if (!silent) {
+                    _state.update { it.copy(error = e.message ?: "Failed to fetch plugins") }
+                }
             }
         )
     }
