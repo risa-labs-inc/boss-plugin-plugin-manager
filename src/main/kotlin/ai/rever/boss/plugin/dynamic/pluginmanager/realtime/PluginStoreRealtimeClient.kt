@@ -7,6 +7,7 @@ import io.github.jan.supabase.realtime.PostgresAction
 import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
+import io.github.jan.supabase.realtime.realtime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -73,8 +74,32 @@ class PluginStoreRealtimeClient(
 ) {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private val _storeChanges = MutableSharedFlow<StoreChangeEvent>()
+    /**
+     * The host classloader, captured **here, on the constructing thread**, and not derived later.
+     *
+     * Ktor finds its CIO engine and WebSocket plugin through `ServiceLoader` on the thread's
+     * context classloader, and only the host's classpath registers those services. This class is
+     * constructed during plugin load, where the context classloader is the plugin's and its parent
+     * is therefore the host's. Client construction, however, now happens on a `Dispatchers.Default`
+     * worker, and those workers inherit whatever context classloader happened to create the pool -
+     * in a desktop host, usually the host's own, whose parent is the platform loader with no
+     * services registered at all. Resolving `parent` at that point would walk one level too far
+     * and fail the engine lookup on every retry.
+     */
+    private val hostClassLoader: ClassLoader =
+        Thread.currentThread().contextClassLoader.let { it.parent ?: it }
+
+    /**
+     * Buffered so a slow consumer cannot back-pressure the library's change-flow collector: the
+     * default rendezvous makes `emit` wait for every subscriber, and one of them does network work
+     * inside its `collect`.
+     */
+    private val _storeChanges = MutableSharedFlow<StoreChangeEvent>(extraBufferCapacity = 16)
     val storeChanges: SharedFlow<StoreChangeEvent> = _storeChanges.asSharedFlow()
+
+    /** Guards the one-shot failure log; re-armed whenever a connection succeeds. */
+    @Volatile
+    private var reportedFailure = false
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
@@ -121,11 +146,10 @@ class PluginStoreRealtimeClient(
      */
     private suspend fun run() {
         var attempt = 0
-        var reportedFailure = false
         while (true) {
             var client: SupabaseClient? = null
             try {
-                client = withHostClassLoader {
+                client = withClassLoader(hostClassLoader) {
                     createSupabaseClient(
                         supabaseUrl = supabaseUrl,
                         supabaseKey = supabaseAnonKey
@@ -177,11 +201,26 @@ class PluginStoreRealtimeClient(
             table = "plugin_versions"
         }
 
+        // Socket status is folded in alongside the two channel statuses so the edge rests on two
+        // independent library signals. `Realtime.reconnect()` is `disconnect()` then `connect()`,
+        // so the socket provably leaves CONNECTED on every recovery cycle even if a future version
+        // stopped marking channels UNSUBSCRIBED while down. Strictly tighter, never looser:
+        // channels cannot be SUBSCRIBED without a connected socket.
         launch {
-            combine(pluginsChannel.status, versionsChannel.status) { plugins, versions ->
-                plugins == RealtimeChannel.Status.SUBSCRIBED &&
+            combine(
+                client.realtime.status,
+                pluginsChannel.status,
+                versionsChannel.status
+            ) { socket, plugins, versions ->
+                socket == Realtime.Status.CONNECTED &&
+                    plugins == RealtimeChannel.Status.SUBSCRIBED &&
                     versions == RealtimeChannel.Status.SUBSCRIBED
-            }.collect { _isConnected.value = it }
+            }.collect { connected ->
+                _isConnected.value = connected
+                // Re-arm the one-shot log, so a different failure hours later is not swallowed
+                // because an unrelated one was reported at minute one.
+                if (connected) reportedFailure = false
+            }
         }
 
         // Collect before subscribing: a change flow registers its callback when collection starts,
@@ -265,10 +304,12 @@ class PluginStoreRealtimeClient(
 
 /** Backoff for retries: 1s, 2s, 4s ... capped at 30s. `attempt` is 1-based. */
 internal fun backoffMillis(attempt: Int): Long {
-    // The shift is clamped only to stop `shl` wrapping - Kotlin masks the distance to 6 bits, so
-    // an unclamped `1000L shl 64` is 1000L again, turning the cap into a one-second busy loop.
+    // coerceAtLeast BEFORE subtracting, so a non-positive attempt floors at the base delay rather
+    // than reaching it by integer overflow (Int.MIN_VALUE - 1 wraps to Int.MAX_VALUE).
+    // The shift is then clamped only to stop `shl` wrapping - Kotlin masks the distance to 6 bits,
+    // so an unclamped `1000L shl 64` is 1000L again, turning the cap into a one-second busy loop.
     // The cap itself is coerceAtMost, so this bound just has to be past where the cap bites.
-    val step = (attempt - 1).coerceIn(0, MAX_SAFE_SHIFT)
+    val step = (attempt.coerceAtLeast(1) - 1).coerceAtMost(MAX_SAFE_SHIFT)
     return (BASE_BACKOFF_MS shl step).coerceAtMost(MAX_BACKOFF_MS)
 }
 
@@ -282,6 +323,19 @@ internal fun backoffMillis(attempt: Int): Long {
 internal fun shouldResync(previous: Boolean?, connected: Boolean): Boolean =
     connected && previous == false
 
+/**
+ * Whether the safety-net poll should fetch on this tick.
+ *
+ * The tick is the short (disconnected) interval and health is re-read every tick, so the healthy
+ * cadence is a multiple of it. Choosing a sleep length up front instead would latch it for the
+ * whole sleep, and since realtime is healthy at almost every wake-up, a drop shortly after one
+ * would go unexamined for a full healthy interval - the disconnected cadence would effectively
+ * never apply. Counting ticks also cannot be starved by a flapping connection, which restarting a
+ * timer on every transition can.
+ */
+internal fun shouldPoll(ticksSincePoll: Int, healthy: Boolean, healthyPollTicks: Int): Boolean =
+    !healthy || ticksSincePoll >= healthyPollTicks
+
 private const val BASE_BACKOFF_MS = 1_000L
 private const val MAX_BACKOFF_MS = 30_000L
 private const val MAX_SAFE_SHIFT = 16
@@ -293,11 +347,21 @@ private const val MAX_SAFE_SHIFT = 16
  * [java.util.ServiceLoader] with [Thread.contextClassLoader] to discover
  * HTTP engines and WebSocket plugins. The parent classloader (host) has
  * these registered in META-INF/services, so we temporarily swap to it.
+ *
+ * Only correct on a thread whose context classloader is the plugin's, which means the
+ * plugin-loading thread. Off that thread, capture the host loader while you are still on it and
+ * use [withClassLoader] instead.
  */
 internal inline fun <T> withHostClassLoader(block: () -> T): T {
     val current = Thread.currentThread().contextClassLoader
+    return withClassLoader(current.parent ?: current, block)
+}
+
+/** Execute [block] with [loader] as the thread's context classloader, restoring it afterwards. */
+internal inline fun <T> withClassLoader(loader: ClassLoader, block: () -> T): T {
+    val current = Thread.currentThread().contextClassLoader
     return try {
-        Thread.currentThread().contextClassLoader = current.parent ?: current
+        Thread.currentThread().contextClassLoader = loader
         block()
     } finally {
         Thread.currentThread().contextClassLoader = current

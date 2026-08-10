@@ -85,3 +85,37 @@ class ShouldResyncTest {
         }
     }
 }
+
+/**
+ * Unit tests for [shouldPoll], the safety-net cadence.
+ *
+ * This is the one piece of genuinely new timing logic in the change, and the property that matters
+ * is not the arithmetic but that the disconnected cadence is honoured on *every* tick rather than
+ * only when a drop happens to straddle a long sleep. That is exactly what an "optimisation" to
+ * pick the sleep length up front would quietly undo.
+ */
+class ShouldPollTest {
+    private val healthyTicks = 6
+
+    @Test
+    fun `while disconnected every tick polls`() {
+        for (tick in 1..healthyTicks + 2) {
+            assertTrue(shouldPoll(tick, healthy = false, healthyPollTicks = healthyTicks), "tick=$tick")
+        }
+    }
+
+    @Test
+    fun `while healthy it waits for the full multiple`() {
+        for (tick in 1 until healthyTicks) {
+            assertFalse(shouldPoll(tick, healthy = true, healthyPollTicks = healthyTicks), "tick=$tick")
+        }
+        assertTrue(shouldPoll(healthyTicks, healthy = true, healthyPollTicks = healthyTicks))
+    }
+
+    @Test
+    fun `a healthy tick past the multiple still polls`() {
+        // The counter resets on every poll, so this should not arise - but drifting past the
+        // threshold must not latch the poll off.
+        assertTrue(shouldPoll(healthyTicks + 5, healthy = true, healthyPollTicks = healthyTicks))
+    }
+}

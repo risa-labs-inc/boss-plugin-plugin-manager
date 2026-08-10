@@ -415,6 +415,10 @@ class PluginManagerAPIImpl(
                     } else null
                 }.toMap()
             )
+        } catch (e: CancellationException) {
+            // A cancelled check is not a failed one: absorbing it into Result.failure would
+            // report "the store is unreachable" every time a panel closes mid-check.
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

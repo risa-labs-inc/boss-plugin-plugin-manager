@@ -25,6 +25,7 @@ import ai.rever.boss.plugin.api.SplitViewOperations
 import ai.rever.boss.plugin.api.TabRegistry
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
+import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.shouldPoll
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.shouldResync
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -260,18 +261,13 @@ class PluginManagerViewModel(
         //
         // Silent, because while disconnected this runs precisely when the network is down, and an
         // unattended failure must not plant an error banner the user never asked for.
-        // The tick is the short interval and health is re-read every tick, deliberately: choosing
-        // the sleep length up front latches it for the whole sleep, and since realtime is healthy
-        // at almost every wake-up, a drop at minute 6 would not be looked at for another half
-        // hour. Counting ticks keeps the disconnected cadence honest, and unlike restarting a
-        // timer on each transition it cannot be starved by a flapping connection.
+        // See [shouldPoll] for why the tick is the short interval and health is re-read on each.
         scope.launch {
             var ticksSincePoll = 0
             while (true) {
                 delay(POLL_TICK_MS)
                 ticksSincePoll++
-                val healthy = _state.value.realtimeConnected
-                if (!healthy || ticksSincePoll >= HEALTHY_POLL_TICKS) {
+                if (shouldPoll(ticksSincePoll, _state.value.realtimeConnected, HEALTHY_POLL_TICKS)) {
                     ticksSincePoll = 0
                     refreshStoreInternal(silent = true)
                     checkForUpdatesInternal()
@@ -409,9 +405,6 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Check for updates internally.
-     */
-    /**
      * Refresh the pending-update list.
      *
      * Uses the Result-returning variant so a failed check leaves [PluginManagerState.updates]
@@ -436,6 +429,8 @@ class PluginManagerViewModel(
                 )
             }
             _state.update { it.copy(updates = updateInfos) }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // Silently fail update check
         }
@@ -1201,7 +1196,7 @@ class PluginManagerViewModel(
          * Poll cadence while realtime is disconnected, and the granularity at which the safety
          * net re-reads whether it still is.
          */
-        const val POLL_TICK_MS = 5 * 60_000L
+        private const val POLL_TICK_MS = 5 * 60_000L
 
         /**
          * Ticks between polls while realtime reports healthy, so every half hour. Realtime should
@@ -1209,6 +1204,6 @@ class PluginManagerViewModel(
          * about itself, and it trades one fetch per half hour for staleness that no longer needs
          * an app restart to clear.
          */
-        const val HEALTHY_POLL_TICKS = 6
+        private const val HEALTHY_POLL_TICKS = 6
     }
 }
