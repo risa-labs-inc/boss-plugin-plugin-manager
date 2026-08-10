@@ -51,6 +51,13 @@ class RealtimeBackoffTest {
  * The rule is subtle in exactly the way that costs a redundant network fetch on every panel open,
  * and the distinction it turns on - no observation yet, versus observed disconnected - is invisible
  * in a Boolean. Pinning it here is cheaper than rediscovering it from a duplicated request log.
+ *
+ * It suppresses the duplicate for a panel attaching to an already-connected client, which is the
+ * common case, and not for one attaching mid-connect: `isConnected` starts false, and combining
+ * two channel statuses means an intermediate false is normal even on a healthy first connect,
+ * since one channel reaches SUBSCRIBED before the other. That startup case still costs one extra
+ * fetch. Erring that way is deliberate - the same emission pattern is how an app that started
+ * offline catches up, and suppressing it would trade a redundant fetch for a missed one.
  */
 class ShouldResyncTest {
     @Test

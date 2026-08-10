@@ -260,14 +260,22 @@ class PluginManagerViewModel(
         //
         // Silent, because while disconnected this runs precisely when the network is down, and an
         // unattended failure must not plant an error banner the user never asked for.
+        // The tick is the short interval and health is re-read every tick, deliberately: choosing
+        // the sleep length up front latches it for the whole sleep, and since realtime is healthy
+        // at almost every wake-up, a drop at minute 6 would not be looked at for another half
+        // hour. Counting ticks keeps the disconnected cadence honest, and unlike restarting a
+        // timer on each transition it cannot be starved by a flapping connection.
         scope.launch {
+            var ticksSincePoll = 0
             while (true) {
-                delay(
-                    if (_state.value.realtimeConnected) HEALTHY_POLL_INTERVAL_MS
-                    else UPDATE_POLL_INTERVAL_MS
-                )
-                refreshStoreInternal(silent = true)
-                checkForUpdatesInternal()
+                delay(POLL_TICK_MS)
+                ticksSincePoll++
+                val healthy = _state.value.realtimeConnected
+                if (!healthy || ticksSincePoll >= HEALTHY_POLL_TICKS) {
+                    ticksSincePoll = 0
+                    refreshStoreInternal(silent = true)
+                    checkForUpdatesInternal()
+                }
             }
         }
 
@@ -365,9 +373,12 @@ class PluginManagerViewModel(
      */
     private fun refreshStore() {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            // update rather than a plain write: this brackets a suspending fetch, so the trailing
+            // isLoading write is computed from a snapshot taken before it. A poll landing in that
+            // window would otherwise have its freshly fetched catalog dropped.
+            _state.update { it.copy(isLoading = true, error = null) }
             refreshStoreInternal()
-            _state.value = _state.value.copy(isLoading = false)
+            _state.update { it.copy(isLoading = false) }
         }
     }
 
@@ -1177,14 +1188,18 @@ class PluginManagerViewModel(
         /** Must match ToolCreatorDynamicPlugin.OPEN_NEW_TOOL_EVENT. */
         const val TOOL_CREATOR_OPEN_EVENT = "open-new-tool"
 
-        /** How often to poll for store updates while realtime is disconnected (safety net). */
-        const val UPDATE_POLL_INTERVAL_MS = 5 * 60_000L
+        /**
+         * Poll cadence while realtime is disconnected, and the granularity at which the safety
+         * net re-reads whether it still is.
+         */
+        const val POLL_TICK_MS = 5 * 60_000L
 
         /**
-         * How often to poll while realtime reports healthy. Realtime should make this redundant,
-         * which is the point: it is the backstop for realtime being wrong about itself, so it
-         * trades a fetch every half hour for staleness that no longer needs a restart to clear.
+         * Ticks between polls while realtime reports healthy, so every half hour. Realtime should
+         * make those redundant, which is the point: this is the backstop for realtime being wrong
+         * about itself, and it trades one fetch per half hour for staleness that no longer needs
+         * an app restart to clear.
          */
-        const val HEALTHY_POLL_INTERVAL_MS = 30 * 60_000L
+        const val HEALTHY_POLL_TICKS = 6
     }
 }

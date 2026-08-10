@@ -110,11 +110,12 @@ class PluginStoreRealtimeClient(
      * building the channels lands here too, including a transient failure that a later attempt
      * would get past. A wakeup every 30s costs nothing next to needing an app restart.
      *
-     * `attempt` is never reset. A loop that keeps reaching the `catch` is failing, not recovering,
-     * and resetting on each pass would hold it at a flat one-second retry forever.
+     * `attempt` is never reset. A loop that keeps going round is failing, not recovering, and
+     * resetting on each pass would hold it at a flat one-second retry forever.
      */
     private suspend fun run() {
         var attempt = 0
+        var reportedFailure = false
         while (true) {
             var client: SupabaseClient? = null
             try {
@@ -126,12 +127,26 @@ class PluginStoreRealtimeClient(
                         install(Realtime)
                     }
                 }
-                // Never returns: the channel-status and change-flow collectors do not complete.
                 stream(client)
-                return
+                // stream() is not supposed to return: its collectors do not complete. That is a
+                // claim about library internals, and this whole class exists because one such
+                // claim turned out to be wrong - so treat an unexpected return as a drop and
+                // reconnect, rather than ending the subscription for the session. A deliberate
+                // teardown is still distinguishable: disconnect() cancels, which rethrows above.
+                attempt++
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (!reportedFailure) {
+                    reportedFailure = true
+                    // No logger is available to plugins, and a fully silent retry loop is what
+                    // made the original staleness expensive to diagnose. One line, first failure
+                    // only, so a permanent failure does not turn into a 30s-interval spam loop.
+                    System.err.println(
+                        "[plugin-manager] realtime setup failed, retrying: " +
+                            "${e::class.simpleName}: ${e.message}"
+                    )
+                }
                 attempt++
             } finally {
                 _isConnected.value = false
