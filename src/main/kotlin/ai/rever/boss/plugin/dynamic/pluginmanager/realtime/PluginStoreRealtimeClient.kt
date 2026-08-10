@@ -11,6 +11,7 @@ import io.github.jan.supabase.realtime.realtime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -87,14 +88,22 @@ class PluginStoreRealtimeClient(
      * and fail the engine lookup on every retry.
      */
     private val hostClassLoader: ClassLoader =
-        Thread.currentThread().contextClassLoader.let { it.parent ?: it }
+        // contextClassLoader is a platform type and may be null. This is a field initializer
+        // reached from PluginManagerAPIImpl's constructor, so an NPE here fails plugin
+        // construction outright rather than one call.
+        (Thread.currentThread().contextClassLoader ?: javaClass.classLoader)
+            .let { it.parent ?: it }
 
     /**
-     * Buffered so a slow consumer cannot back-pressure the library's change-flow collector: the
-     * default rendezvous makes `emit` wait for every subscriber, and one of them does network work
-     * inside its `collect`.
+     * Buffered, and dropping rather than suspending, so a slow consumer cannot back-pressure the
+     * library's change-flow collector: the default rendezvous makes `emit` wait for every
+     * subscriber, and one of them does network work inside its `collect`. Dropping is safe here
+     * because every consumer responds by refetching, so a dropped event coalesces into the next.
      */
-    private val _storeChanges = MutableSharedFlow<StoreChangeEvent>(extraBufferCapacity = 16)
+    private val _storeChanges = MutableSharedFlow<StoreChangeEvent>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     val storeChanges: SharedFlow<StoreChangeEvent> = _storeChanges.asSharedFlow()
 
     /** Guards the one-shot failure log; re-armed whenever a connection succeeds. */
@@ -148,6 +157,7 @@ class PluginStoreRealtimeClient(
         var attempt = 0
         while (true) {
             var client: SupabaseClient? = null
+            val cycleStart = System.nanoTime()
             try {
                 client = withClassLoader(hostClassLoader) {
                     createSupabaseClient(
@@ -183,6 +193,11 @@ class PluginStoreRealtimeClient(
                 // NonCancellable so the close still completes when we got here by cancellation.
                 withContext(NonCancellable) { runCatching { client?.close() } }
             }
+            // A cycle that ran longer than the cap was working, not failing, so its end is a drop
+            // to recover from rather than another failed attempt. Without this the two paths into
+            // `attempt++` are conflated: a dozen healthy multi-hour cycles would leave every
+            // subsequent reconnect waiting the full 30s with nothing actually wrong.
+            if (System.nanoTime() - cycleStart >= HEALTHY_CYCLE_NANOS) attempt = 0
             delay(backoffMillis(attempt))
         }
     }
@@ -225,8 +240,10 @@ class PluginStoreRealtimeClient(
 
         // Collect before subscribing: a change flow registers its callback when collection starts,
         // so joining first would drop anything that lands during the join round-trip. UNDISPATCHED
-        // is what makes that ordering true rather than merely intended - the default only
-        // *schedules* the child, so on a multi-threaded dispatcher subscribe() can win the race.
+        // closes the outer half of that race by entering the child inline; it cannot close all of
+        // it, because collecting a callbackFlow reaches its producer through a dispatched child.
+        // In practice registration is local while subscribe() suspends on a network round-trip,
+        // and the resync on the false->true edge covers the window either way.
         launch(start = CoroutineStart.UNDISPATCHED) { pluginFlow.collect { onPluginAction(it) } }
         launch(start = CoroutineStart.UNDISPATCHED) { versionFlow.collect { onVersionAction(it) } }
 
@@ -294,11 +311,20 @@ class PluginStoreRealtimeClient(
         const val VERSIONS_TOPIC = "pm-versions-changes"
 
         /**
-         * Upper bound on how long plugin unload waits for the socket to close. Closing a
-         * WebSocket is a matter of milliseconds; this only has to be generous enough not to
-         * abandon a healthy close, and short enough not to read as a hang if one wedges.
+         * Upper bound on how long plugin unload waits for the socket to close.
+         *
+         * Short on purpose. The host's `unloadPlugin` adds no dispatcher of its own, and
+         * plugin-management work is dispatched to `Dispatchers.Main` in places, so this can land
+         * on the UI thread - and unload is not only shutdown, an API swap reloads every plugin
+         * with the UI up. A healthy local close takes milliseconds, so this still covers the
+         * normal case synchronously. Nothing is leaked when it does expire: the close runs in a
+         * `NonCancellable` block on a global dispatcher, so it completes regardless of this wait.
+         * The bound trades synchronicity only.
          */
-        const val CLOSE_TIMEOUT_MS = 1_500L
+        const val CLOSE_TIMEOUT_MS = 250L
+
+        /** A cycle lasting at least this long counts as having been healthy. */
+        val HEALTHY_CYCLE_NANOS = MAX_BACKOFF_MS * 1_000_000
     }
 }
 

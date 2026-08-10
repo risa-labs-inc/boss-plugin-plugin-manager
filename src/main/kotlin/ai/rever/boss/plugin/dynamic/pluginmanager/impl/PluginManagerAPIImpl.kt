@@ -246,6 +246,10 @@ class PluginManagerAPIImpl(
 
             _events.emit(PluginEvent.StoreRefreshed(storeItems.size))
             Result.success(storeItems)
+        } catch (e: CancellationException) {
+            // Same reason as checkForUpdatesResult: a panel closing mid-fetch is a cancellation,
+            // and folding it into a failed Result writes "the store is unreachable" to the banner.
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
