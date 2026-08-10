@@ -58,10 +58,20 @@ class PluginManagerComponent(
         roleManagementProvider = context.roleManagementProvider,
         panelEventProvider = context.panelEventProvider,
         applicationEventBus = context.applicationEventBus,
-        windowId = context.windowId
+        windowId = context.windowId,
+        // Resolve "open this plugin" to a real panel/tab — see PluginManagerViewModel.openPlugin.
+        panelRegistry = context.panelRegistry,
+        tabRegistry = context.tabRegistry,
+        splitViewOperations = context.splitViewOperations,
+        supabaseDataProvider = context.supabaseDataProvider
     )
 
     init {
+        // NOT calling refreshOrganisationMembership() here: the ViewModel's own init already
+        // runs refresh(), which covers it. Both fired concurrently at construction, so every
+        // panel open cost two get_my_organisations round trips - four RPCs for a user with no
+        // organisation, since each also chases the request queue.
+
         lifecycle.subscribe(object : Lifecycle.Callbacks {
             override fun onDestroy() {
                 viewModel.dispose()

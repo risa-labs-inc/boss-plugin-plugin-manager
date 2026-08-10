@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.ui.BossDialog
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.DefinedPermissionData
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstalledPluginState
@@ -21,6 +22,17 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaNeedsCreateTab
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationDomainError
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationWebsiteError
 import ai.rever.boss.plugin.ui.BossToggle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -85,7 +97,218 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
+
+/**
+ * The organisation call to action.
+ *
+ * On the CREATE tab: creating an organisation belongs beside the other "make something new"
+ * actions, not in the list of what is already installed.
+ *
+ * The Create tab is normally gated on `canPublish` (store admin or plugins.create), while the
+ * CREATE branch here targets users who belong to no organisation - by definition the least likely
+ * to hold plugins.create. So the tab is ALSO revealed for the two branches that have nowhere else
+ * to live ([organisationCtaNeedsCreateTab]); without that, the people who most need the request
+ * form are exactly the ones who cannot reach it.
+ *
+ * Renders nothing while membership is unknown: see organisationCta.
+ */
+// Every dialog in this file uses BossDialog, not Dialog. Under JxBrowser HARDWARE_ACCELERATED - the
+// host default on every platform since BossConsole 9.4.1 - Chromium composites its own native window
+// over the Compose scene, so a plain Compose Dialog in a plugin panel is drawn BEHIND the page.
+// Reported live against the version/downgrade sheet, which was cropped at the browser's rendering
+// area whenever the store sat beside a browser tab. BossDialog routes through the host's
+// always-on-top overlay window and falls back to exactly this Dialog wherever the browser is
+// off-screen.
+
+@Composable
+private fun OrganisationCtaCard(
+    cta: OrganisationCta?,
+    onAction: () -> Unit
+) {
+    if (cta == null) return
+
+    BossSection(
+        title = "Organisation",
+        description = "Organisations own plugins, roles and shared secrets"
+    ) {
+        Text(
+            text = organisationCtaDescription(cta),
+            fontSize = 13.sp,
+            color = BossThemeColors.TextSecondary,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        BossPrimaryButton(
+            text = organisationCtaLabel(cta),
+            onClick = onAction,
+            enabled = organisationCtaEnabled(cta),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+    Spacer(Modifier.height(16.dp))
+}
+
+/**
+ * Request a new organisation.
+ *
+ * In-app rather than a web page, and that is not a style preference:
+ * `submit_organisation_request` is authenticated-only, and the handoff-token
+ * mechanism that authenticates the other organisation web pages is org-scoped.
+ * A user with no organisation has nothing to hand off for, so a web form could
+ * not authenticate at all.
+ *
+ * Validation mirrors the database CHECK so a typo is a message under the field.
+ * The reserved-slug and collision rules stay server-side - only the database
+ * knows the full list, and `boss` deriving the existing global `boss_admin`
+ * role is the reason that list exists.
+ */
+@Composable
+private fun RequestOrganisationDialog(
+    busy: Boolean,
+    serverError: String?,
+    onSubmit: (slug: String, name: String, description: String, justification: String,
+               domain: String, website: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var slug by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var justification by remember { mutableStateOf("") }
+    var domain by remember { mutableStateOf("") }
+    var website by remember { mutableStateOf("") }
+    var touched by remember { mutableStateOf(false) }
+
+    val nameError = if (touched) organisationNameError(name) else null
+    val slugError = if (touched) organisationSlugError(slug) else null
+    // Shown as soon as there is something to be wrong about, rather than waiting for
+    // `touched`: both are optional, so a user who types one and leaves it malformed
+    // would otherwise learn about it from a server round trip.
+    val domainError = organisationDomainError(domain)
+    val websiteError = organisationWebsiteError(website)
+    val valid = organisationNameError(name) == null && organisationSlugError(slug) == null &&
+        domainError == null && websiteError == null
+
+    BossDialog(onDismissRequest = { if (!busy) onDismiss() }) {
+        BossCard(modifier = Modifier.width(420.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Request an organisation",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "A BOSS administrator reviews the request before the organisation is created.",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 12.sp
+                )
+                Spacer(Modifier.height(14.dp))
+
+                BossTextField(
+                    value = name,
+                    onValueChange = { name = it; touched = true },
+                    label = "Name",
+                    placeholder = "Acme Inc"
+                )
+                nameError?.let { FieldError(it) }
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = slug,
+                    onValueChange = { slug = it.lowercase(); touched = true },
+                    label = "Identifier",
+                    placeholder = "acme"
+                )
+                slugError?.let { FieldError(it) }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    // Stated up front because it is permanent: the roles derive
+                    // from it and renaming would orphan them.
+                    text = "Permanent. Roles are named ${slug.ifBlank { "acme" }}_admin and " +
+                        "${slug.ifBlank { "acme" }}_user.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = website,
+                    onValueChange = { website = it },
+                    label = "Website (optional)",
+                    placeholder = "https://acme.com"
+                )
+                websiteError?.let { FieldError(it) }
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = domain,
+                    onValueChange = { domain = it.lowercase() },
+                    label = "Email domain (optional)",
+                    placeholder = "acme.com"
+                )
+                domainError?.let { FieldError(it) }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    // Worth saying plainly: this one is not decoration. Once verified it
+                    // decides who may join without an invite, which is a different kind of
+                    // field from the website beside it.
+                    text = "Once you verify it with a DNS record, people with a matching " +
+                        "address can find and join this organisation.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = "Description (optional)",
+                    placeholder = "What this organisation is for"
+                )
+                Spacer(Modifier.height(10.dp))
+
+                BossTextField(
+                    value = justification,
+                    onValueChange = { justification = it },
+                    label = "Note for the reviewer (optional)",
+                    placeholder = "Why you need it"
+                )
+
+                serverError?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(text = it, color = BossThemeColors.ErrorColor, fontSize = 12.sp)
+                }
+
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    BossSecondaryButton(text = "Cancel", onClick = onDismiss, enabled = !busy)
+                    Spacer(Modifier.width(8.dp))
+                    BossPrimaryButton(
+                        text = if (busy) "Sending..." else "Send request",
+                        onClick = {
+                            touched = true
+                            onSubmit(slug, name, description, justification, domain, website)
+                        },
+                        enabled = valid && !busy
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FieldError(message: String) {
+    Text(
+        text = message,
+        color = BossThemeColors.ErrorColor,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(top = 2.dp)
+    )
+}
 
 /**
  * Confirmation dialog for destructive actions.
@@ -98,7 +321,7 @@ private fun ConfirmationDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         BossCard(
             modifier = Modifier.width(320.dp)
         ) {
@@ -157,7 +380,7 @@ private fun PasswordDialog(
     var showPassword by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf(false) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         BossCard(
             modifier = Modifier.width(320.dp)
         ) {
@@ -264,7 +487,7 @@ private fun VersionSheetDialog(
     onInstall: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .width(460.dp)
@@ -279,7 +502,13 @@ private fun VersionSheetDialog(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "This host speaks IPC ${sheet.hostIpcVersion ?: "unknown"} · installed v${sheet.installedVersion}",
+                text = "This host speaks IPC ${sheet.hostIpcVersion ?: "unknown"} · " +
+                    when {
+                        // Null only when opened from the store for a plugin that isn't here.
+                        sheet.installedVersion == null -> "not installed"
+                        sheet.installedVersion.isBlank() -> "installed, version unknown"
+                        else -> "installed v${sheet.installedVersion}"
+                    },
                 color = BossThemeColors.TextMuted,
                 fontSize = 12.sp
             )
@@ -353,7 +582,7 @@ private fun McpToolsDialog(
             ?: permissionDescriptions[perm]?.takeIf { it.isNotBlank() }
             ?: if (perm == "admin") "Administrator access — only admins can use this." else "No description available."
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .width(460.dp)
@@ -484,7 +713,7 @@ private fun PermissionsDialog(
             ?: permissionDescriptions[perm]?.takeIf { it.isNotBlank() }
             ?: if (perm == "admin") "Administrator access — only admins can use this." else "No description available."
 
-    Dialog(onDismissRequest = onDismiss) {
+    BossDialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .width(460.dp)
@@ -618,7 +847,8 @@ private fun PermissionsDialog(
 @Composable
 private fun VersionRow(
     version: PluginVersionInfo,
-    installedVersion: String,
+    /** Null when the plugin is not installed — see [VersionSheetState.installedVersion]. */
+    installedVersion: String?,
     busy: Boolean,
     onInstall: () -> Unit
 ) {
@@ -631,7 +861,7 @@ private fun VersionRow(
         )
         IpcBadge(version.compatibility)
         Spacer(Modifier.weight(1f))
-        val isInstalled = version.version == installedVersion
+        val isInstalled = installedVersion != null && version.version == installedVersion
         val installable = version.compatibility == IpcCompat.Status.COMPATIBLE ||
             version.compatibility == IpcCompat.Status.UNKNOWN
         when {
@@ -639,7 +869,13 @@ private fun VersionRow(
             !installable -> Text("Needs newer BOSS", color = BossThemeColors.WarningColor, fontSize = 11.sp)
             busy -> Text("…", color = BossThemeColors.TextMuted, fontSize = 12.sp)
             else -> BossSecondaryButton(
-                text = if (ipcCompareSemver(version.version, installedVersion) > 0) "Update" else "Downgrade",
+                text = when {
+                    // Opened from the store for a plugin that isn't installed: every version
+                    // is a fresh install, not an up/downgrade of something already here.
+                    installedVersion == null -> "Install"
+                    ipcCompareSemver(version.version, installedVersion) > 0 -> "Update"
+                    else -> "Downgrade"
+                },
                 onClick = onInstall
             )
         }
@@ -679,6 +915,28 @@ private fun ipcCompareSemver(a: String, b: String): Int {
 fun PluginManagerView(viewModel: PluginManagerViewModel) {
     val state by viewModel.state.collectAsState()
 
+    val organisationPluginInstalled = state.installedPlugins.any {
+        it.pluginId == OrganisationPlugin.PLUGIN_ID
+    }
+    // Read from the COLLECTED state, not viewModel._state: everything else here observes
+    // `state`, and reading the flow's value directly from composition only recomposes
+    // correctly by accident.
+    val organisationCta = organisationCta(
+        state.membership,
+        organisationPluginInstalled,
+        state.hasPendingOrgRequest
+    )
+    val createTabVisible = state.canPublish || organisationCtaNeedsCreateTab(organisationCta)
+
+    // The tab BUTTON is derived state; currentTab is not. A non-publisher sitting on the Create
+    // tab they reached only for the call to action would otherwise be stranded there the moment
+    // an approval lands and the branch moves to OPEN - button gone, header showing no selection.
+    LaunchedEffect(createTabVisible) {
+        if (!createTabVisible && state.currentTab == PluginManagerTab.PUBLISH) {
+            viewModel.selectTab(PluginManagerTab.INSTALLED)
+        }
+    }
+
     BossTheme {
         Column(
             modifier = Modifier
@@ -694,7 +952,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 onTabSelected = { viewModel.selectTab(it) },
                 onRefresh = { viewModel.refresh() },
                 isLoading = state.isLoading,
-                canPublish = state.canPublish,
+                // The Create tab also hosts the organisation call to action, so it is revealed
+                // for the branches a non-publisher could otherwise never reach.
+                canPublish = createTabVisible,
                 realtimeConnected = state.realtimeConnected
             )
 
@@ -721,12 +981,12 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onInstallFromFile = { viewModel.installFromFilePicker() },
                         onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        onOpenPlugin = { p -> viewModel.openPlugin(p.pluginId, p.url) },
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins,
-                        versionSheet = state.versionSheet,
-                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version ?: "") },
-                        onInstallVersion = { id, v -> viewModel.installVersion(id, v) },
-                        onCloseVersions = { viewModel.closeVersions() },
+                        // Non-null: reaching this row means the plugin IS installed, whatever
+                        // its version string says.
+                        onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version) },
                         mcpToolRegistry = viewModel.mcpToolRegistry,
                         permissionDescriptions = state.permissionDescriptions,
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
@@ -739,6 +999,16 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdate = { pluginId -> viewModel.updatePlugin(pluginId) },
                         onDeleteFromStore = { pluginId -> viewModel.deleteFromStore(pluginId) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        onShowVersions = { item ->
+                            viewModel.openVersions(
+                                item.pluginId,
+                                item.displayName,
+                                // Null when not installed — the sheet then offers "Install"
+                                // per version instead of Update/Downgrade.
+                                state.installedPlugins
+                                    .find { it.pluginId == item.pluginId }?.version
+                            )
+                        },
                         canInstall = { item -> viewModel.canInstall(item) },
                         isStoreAdmin = state.isStoreAdmin,
                         isLoading = state.isLoading,
@@ -754,6 +1024,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
+                        canPublish = state.canPublish,
+                        organisationCta = organisationCta,
+                        onOrganisationAction = { viewModel.onOrganisationCta() },
                         toolCreatorInstalled = state.installedPlugins.any {
                             it.pluginId == PluginManagerViewModel.TOOL_CREATOR_PLUGIN_ID
                         },
@@ -789,6 +1062,18 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
             }
         }
 
+        // Version-history / downgrade sheet, at the root rather than inside a tab: it is
+        // opened from BOTH the Installed and Store tabs, and its state lives in the shared
+        // view state.
+        state.versionSheet?.let { sheet ->
+            VersionSheetDialog(
+                sheet = sheet,
+                busy = sheet.pluginId in state.busyPlugins,
+                onInstall = { version -> viewModel.installVersion(sheet.pluginId, version) },
+                onDismiss = { viewModel.closeVersions() }
+            )
+        }
+
         // After an update, prompt to reset running instances (or restart BOSS) so the
         // newly-installed version actually takes effect.
         state.postUpdatePrompt?.let { prompt ->
@@ -820,6 +1105,23 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                 }
             }
+        }
+
+        // Rendered at the root, alongside the other dialogs, rather than inside
+        // the Create tab: the tab unmounts when the user switches away, and a
+        // dialog that disappears mid-typing because a click landed elsewhere is
+        // worse than one that stays put.
+        if (state.organisationRequestOpen) {
+            RequestOrganisationDialog(
+                busy = state.organisationRequestBusy,
+                serverError = state.organisationRequestError,
+                onSubmit = { slug, name, description, justification, domain, website ->
+                    viewModel.submitOrganisationRequest(
+                        slug, name, description, justification, domain, website,
+                    )
+                },
+                onDismiss = { viewModel.dismissOrganisationRequest() }
+            )
         }
     }
 }
@@ -1021,12 +1323,11 @@ private fun InstalledPluginsTab(
     onInstallFromFile: () -> Unit,
     onInstallFromGitHub: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
+    /** Reveal the plugin's own panel/tab; falls back to its homepage when it has neither. */
+    onOpenPlugin: (InstalledPluginState) -> Unit = {},
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
-    versionSheet: VersionSheetState? = null,
     onShowVersions: (InstalledPluginState) -> Unit = {},
-    onInstallVersion: (String, String) -> Unit = { _, _ -> },
-    onCloseVersions: () -> Unit = {},
     mcpToolRegistry: McpToolRegistry? = null,
     permissionDescriptions: Map<String, String> = emptyMap(),
     onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) }
@@ -1084,16 +1385,6 @@ private fun InstalledPluginsTab(
         )
     }
 
-    // Version-history / downgrade sheet
-    versionSheet?.let { sheet ->
-        VersionSheetDialog(
-            sheet = sheet,
-            busy = sheet.pluginId in busyPlugins,
-            onInstall = { version -> onInstallVersion(sheet.pluginId, version) },
-            onDismiss = onCloseVersions
-        )
-    }
-
     // Per-plugin MCP tools dialog (mirrors the versions sheet).
     mcpDialogPlugin?.let { plugin ->
         if (mcpToolRegistry != null) {
@@ -1119,134 +1410,137 @@ private fun InstalledPluginsTab(
         )
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(12.dp)
+    // ONE scrollable surface for the whole tab. The banner, the install buttons and the GitHub
+    // form used to sit in a fixed Column above a LazyColumn, so only the plugin list scrolled —
+    // on a short panel that left the list a two-row window under an immovable header.
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         // Banner: installed plugins hidden from this user for lack of permissions.
         if (inaccessiblePlugins.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        BossThemeColors.WarningColor.copy(alpha = 0.12f),
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "${inaccessiblePlugins.size} installed plugin(s) hidden — you lack the required permission(s)",
-                    color = BossThemeColors.TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                inaccessiblePlugins.forEach { p ->
+            item(key = "inaccessible-banner") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            BossThemeColors.WarningColor.copy(alpha = 0.12f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
-                        text = "• ${p.displayName} — ask an admin to grant: ${p.missingPermissions.joinToString(", ")}",
-                        color = BossThemeColors.TextSecondary,
-                        fontSize = 12.sp
+                        text = "${inaccessiblePlugins.size} installed plugin(s) hidden — you lack the required permission(s)",
+                        color = BossThemeColors.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
+                    inaccessiblePlugins.forEach { p ->
+                        Text(
+                            text = "• ${p.displayName} — ask an admin to grant: ${p.missingPermissions.joinToString(", ")}",
+                            color = BossThemeColors.TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
-            Spacer(Modifier.height(12.dp))
         }
 
         // Install section
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            BossSecondaryButton(
-                text = "From File",
-                onClick = onInstallFromFile,
-                enabled = !isLoading,
-                icon = Icons.Default.Download,
-                modifier = Modifier.weight(1f)
-            )
-            BossPrimaryButton(
-                text = "From GitHub",
-                onClick = { showGitHubDialog = true },
-                enabled = !isLoading,
-                modifier = Modifier.weight(1f)
-            )
+        item(key = "install-actions") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                BossSecondaryButton(
+                    text = "From File",
+                    onClick = onInstallFromFile,
+                    enabled = !isLoading,
+                    icon = Icons.Default.Download,
+                    modifier = Modifier.weight(1f)
+                )
+                BossPrimaryButton(
+                    text = "From GitHub",
+                    onClick = { showGitHubDialog = true },
+                    enabled = !isLoading,
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
 
         // GitHub URL input
         if (showGitHubDialog) {
-            Spacer(Modifier.height(8.dp))
-            BossCard {
-                BossTextField(
-                    value = gitHubUrl,
-                    onValueChange = { gitHubUrl = it },
-                    label = "GitHub URL",
-                    placeholder = "https://github.com/owner/repo",
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    BossSecondaryButton(
-                        text = "Cancel",
-                        onClick = {
-                            showGitHubDialog = false
-                            gitHubUrl = ""
-                        }
+            item(key = "github-form") {
+                BossCard {
+                    BossTextField(
+                        value = gitHubUrl,
+                        onValueChange = { gitHubUrl = it },
+                        label = "GitHub URL",
+                        placeholder = "https://github.com/owner/repo",
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(Modifier.width(8.dp))
-                    BossPrimaryButton(
-                        text = "Install",
-                        onClick = {
-                            val trimmedUrl = gitHubUrl.trim()
-                            if (trimmedUrl.isNotBlank()) {
-                                onInstallFromGitHub(trimmedUrl)
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        BossSecondaryButton(
+                            text = "Cancel",
+                            onClick = {
                                 showGitHubDialog = false
                                 gitHubUrl = ""
                             }
-                        },
-                        enabled = gitHubUrl.trim().isNotBlank()
-                    )
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        BossPrimaryButton(
+                            text = "Install",
+                            onClick = {
+                                val trimmedUrl = gitHubUrl.trim()
+                                if (trimmedUrl.isNotBlank()) {
+                                    onInstallFromGitHub(trimmedUrl)
+                                    showGitHubDialog = false
+                                    gitHubUrl = ""
+                                }
+                            },
+                            enabled = gitHubUrl.trim().isNotBlank()
+                        )
+                    }
                 }
             }
         }
 
-        Spacer(Modifier.height(12.dp))
-
         // Installed plugins list
         if (plugins.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                BossEmptyState(
-                    icon = Icons.Default.Extension,
-                    message = "No plugins installed",
-                    description = "Install from file or GitHub"
-                )
-            }
-        } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                items(plugins, key = { it.pluginId }) { plugin ->
-                    InstalledPluginCard(
-                        plugin = plugin,
-                        hasUpdate = plugin.pluginId in updateIds,
-                        onToggleEnabled = { onToggleEnabled(plugin.pluginId, it) },
-                        onUninstall = { pluginToUninstall = plugin },
-                        onUpdate = { onUpdate(plugin.pluginId) },
-                        onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
-                        onShowVersions = { onShowVersions(plugin) },
-                        isLoading = plugin.pluginId in busyPlugins,
-                        mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
-                        onShowMcp = { mcpDialogPlugin = plugin },
-                        onShowPermissions = { permDialogPlugin = plugin }
+            item(key = "empty") {
+                Box(
+                    modifier = Modifier.fillParentMaxWidth().fillParentMaxHeight(0.6f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    BossEmptyState(
+                        icon = Icons.Default.Extension,
+                        message = "No plugins installed",
+                        description = "Install from file or GitHub"
                     )
                 }
+            }
+        } else {
+            items(plugins, key = { it.pluginId }) { plugin ->
+                InstalledPluginCard(
+                    plugin = plugin,
+                    hasUpdate = plugin.pluginId in updateIds,
+                    onToggleEnabled = { onToggleEnabled(plugin.pluginId, it) },
+                    onUninstall = { pluginToUninstall = plugin },
+                    onUpdate = { onUpdate(plugin.pluginId) },
+                    onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
+                    onOpenPlugin = { onOpenPlugin(plugin) },
+                    onShowVersions = { onShowVersions(plugin) },
+                    isLoading = plugin.pluginId in busyPlugins,
+                    mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
+                    onShowMcp = { mcpDialogPlugin = plugin },
+                    onShowPermissions = { permDialogPlugin = plugin }
+                )
             }
         }
     }
@@ -1260,6 +1554,8 @@ private fun InstalledPluginCard(
     onUninstall: () -> Unit,
     onUpdate: () -> Unit,
     onOpenHomepage: () -> Unit,
+    /** Reveal the plugin itself (its panel or tab). */
+    onOpenPlugin: () -> Unit,
     onShowVersions: () -> Unit,
     isLoading: Boolean,
     /** Number of MCP tools this plugin contributes; 0 hides the MCP button. */
@@ -1275,20 +1571,15 @@ private fun InstalledPluginCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open homepage
+            // Left side - clickable to open the plugin itself. The homepage moved onto its own
+            // icon below: opening a GitHub page was never what "click the plugin" should mean,
+            // and it was the only thing this row did.
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .then(
-                        if (hasHomepage) {
-                            Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable { onOpenHomepage() }
-                                .padding(end = 8.dp)
-                        } else {
-                            Modifier
-                        }
-                    )
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable { onOpenPlugin() }
+                    .padding(end = 8.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -1302,7 +1593,13 @@ private fun InstalledPluginCard(
                         Icon(
                             Icons.Default.OpenInNew,
                             contentDescription = "Open homepage",
-                            modifier = Modifier.size(12.dp),
+                            // Generous padding on purpose: this sits INSIDE a now-clickable
+                            // full-width row, so a near miss opens the plugin instead.
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable { onOpenHomepage() }
+                                .padding(6.dp)
+                                .size(12.dp),
                             tint = BossThemeColors.AccentColor
                         )
                     }
@@ -1460,6 +1757,8 @@ private fun AvailablePluginsTab(
     onUpdate: (String) -> Unit,
     onDeleteFromStore: (String) -> Unit,
     onOpenHomepage: (String) -> Unit,
+    /** Open the version-history sheet — install/update/downgrade to any published version. */
+    onShowVersions: (PluginStoreItem) -> Unit = {},
     canInstall: (PluginStoreItem) -> Boolean = { true },
     isStoreAdmin: Boolean,
     isLoading: Boolean,
@@ -1545,6 +1844,7 @@ private fun AvailablePluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onDeleteFromStore = { pluginToDelete = plugin },
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
+                    onShowVersions = { onShowVersions(plugin) },
                     canInstall = canInstall(plugin),
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins,
@@ -1564,6 +1864,7 @@ private fun AvailablePluginCard(
     onUpdate: () -> Unit,
     onDeleteFromStore: () -> Unit,
     onOpenHomepage: () -> Unit,
+    onShowVersions: () -> Unit = {},
     canInstall: Boolean = true,
     isStoreAdmin: Boolean,
     isLoading: Boolean,
@@ -1671,6 +1972,27 @@ private fun AvailablePluginCard(
                 // of an Install/Update button so the entry stays
                 // discoverable but the broken click path is gone.
                 val isSystemComponent = plugin.type.equals("service", ignoreCase = true)
+                // Version picker — the same sheet the Installed tab opens, so a specific
+                // version can be installed from the store rather than only the latest.
+                // Hidden for system components, and for users who can neither install this
+                // plugin nor already have it — deliberately broader than the Install button,
+                // since an installed plugin stays re-versionable however it got here.
+                if (!isSystemComponent && (canInstall || isInstalled)) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(enabled = !isLoading) { onShowVersions() }
+                            .padding(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.List,
+                            contentDescription = "Versions & compatibility",
+                            modifier = Modifier.size(16.dp),
+                            tint = BossThemeColors.TextSecondary
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
                 when {
                     isSystemComponent -> {
                         Text(
@@ -2165,6 +2487,14 @@ private enum class JarSource {
 
 @Composable
 private fun PublishTab(
+    /**
+     * False for a user who reached this tab only for the organisation call to action - the
+     * tab is revealed for them (see [organisationCtaNeedsCreateTab]), the publishing surfaces
+     * are not.
+     */
+    canPublish: Boolean,
+    organisationCta: OrganisationCta?,
+    onOrganisationAction: () -> Unit,
     toolCreatorInstalled: Boolean,
     onOpenToolCreator: () -> Unit,
     onFetchFromGitHub: (
@@ -2196,6 +2526,20 @@ private fun PublishTab(
     ) -> Unit,
     isLoading: Boolean
 ) {
+    // Nothing to publish with, so the tab is nothing but the organisation card. Returning
+    // early keeps the publishing state below out of composition entirely.
+    if (!canPublish) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            OrganisationCtaCard(cta = organisationCta, onAction = onOrganisationAction)
+        }
+        return
+    }
+
     var jarSource by remember { mutableStateOf(JarSource.GITHUB) }
     var gitHubUrl by remember { mutableStateOf("") }
     var fetchProgress by remember { mutableStateOf(0f) }
@@ -2226,6 +2570,8 @@ private fun PublishTab(
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
+        OrganisationCtaCard(cta = organisationCta, onAction = onOrganisationAction)
+
         BossSection(
             title = "Create a new plugin",
             description = "Scaffold a new BOSS plugin and build it with an AI coding agent"
