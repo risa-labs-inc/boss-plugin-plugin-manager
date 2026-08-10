@@ -223,18 +223,25 @@ class PluginManagerViewModel(
         }
 
         // Collect realtime store changes and auto-refresh (debounced to avoid thundering herd)
+        // Debounced per event type, not over the mixed stream. debounce emits only the last event
+        // of a burst, and publishing a version produces a plugin_versions INSERT and a plugins
+        // UPDATE milliseconds apart - so a single collector drops whichever arrives first, and if
+        // PluginChanged lands last the update check never runs for that version. Two collectors
+        // stop the triggers cannibalising each other; PluginManagerCore.start() already does this.
+        //
+        // Silent: someone else publishing a plugin is the most background-y trigger in this file,
+        // and it must not clear an error banner raised by something the user actually did.
         scope.launch {
             apiImpl.storeChanges
+                .filterIsInstance<StoreChangeEvent.PluginChanged>()
                 .debounce(500)
-                .collect { event ->
-                    when (event) {
-                        // Silent: someone else publishing a plugin is the most background-y
-                        // trigger in this file, and it must not clear an error banner raised by
-                        // something the user actually did, such as a failed install.
-                        is StoreChangeEvent.PluginChanged -> refreshStoreInternal(silent = true)
-                        is StoreChangeEvent.VersionAdded -> checkForUpdatesInternal()
-                    }
-                }
+                .collect { refreshStoreInternal(silent = true) }
+        }
+        scope.launch {
+            apiImpl.storeChanges
+                .filterIsInstance<StoreChangeEvent.VersionAdded>()
+                .debounce(500)
+                .collect { checkForUpdatesInternal() }
         }
 
         // Track realtime connection status (connection itself is owned by PluginManagerCore) and

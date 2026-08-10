@@ -64,10 +64,10 @@ sealed class StoreChangeEvent {
  * The retry loop here covers only construction failure (the client or the channels), which is the
  * one thing on this path that genuinely throws. Everything after that is the library's business.
  *
- * Uses [withHostClassLoader] to temporarily swap the thread's context classloader to the parent
- * (host) classloader before creating the SupabaseClient, so Ktor's ServiceLoader can discover the
- * CIO engine and WebSocket plugin from the host's classpath. Only client creation needs this: the
- * library's own reconnect reuses the already-built `HttpClient` and does no ServiceLoader lookup.
+ * Creates the SupabaseClient under [hostClassLoader] via [withClassLoader], so Ktor's ServiceLoader
+ * can discover the CIO engine and WebSocket plugin from the host's classpath. Only client creation
+ * needs this: the library's own reconnect reuses the already-built `HttpClient` and does no
+ * ServiceLoader lookup.
  */
 class PluginStoreRealtimeClient(
     private val supabaseUrl: String,
@@ -316,15 +316,25 @@ class PluginStoreRealtimeClient(
          * Short on purpose. The host's `unloadPlugin` adds no dispatcher of its own, and
          * plugin-management work is dispatched to `Dispatchers.Main` in places, so this can land
          * on the UI thread - and unload is not only shutdown, an API swap reloads every plugin
-         * with the UI up. A healthy local close takes milliseconds, so this still covers the
-         * normal case synchronously. Nothing is leaked when it does expire: the close runs in a
-         * `NonCancellable` block on a global dispatcher, so it completes regardless of this wait.
-         * The bound trades synchronicity only.
+         * with the UI up. A healthy local close takes milliseconds, so the normal case still
+         * completes inside the bound, synchronously, before the classloader goes.
+         *
+         * **The risk this accepts, on the timeout path only:** the close is `NonCancellable`, so
+         * when the bound expires it keeps running and can outlive the plugin classloader. That is
+         * the shape that has crashed this app before, so it is a deliberate choice and not an
+         * oversight - a wedged close means a dead network, where waiting longer on a possibly-UI
+         * thread trades a certain freeze for an unlikely crash. The exposure is small because the
+         * close executes host-loaded Ktor code, and it is the reason the wait exists at all rather
+         * than the teardown simply being left to run unobserved.
          */
         const val CLOSE_TIMEOUT_MS = 250L
 
-        /** A cycle lasting at least this long counts as having been healthy. */
-        val HEALTHY_CYCLE_NANOS = MAX_BACKOFF_MS * 1_000_000
+        /**
+         * A cycle lasting at least this long counts as having been healthy, so its end resets the
+         * backoff. Independent of the backoff cap that it currently coincides with: this answers
+         * "was that a working subscription", not "how long do we wait".
+         */
+        const val HEALTHY_CYCLE_NANOS = 30_000L * 1_000_000
     }
 }
 
