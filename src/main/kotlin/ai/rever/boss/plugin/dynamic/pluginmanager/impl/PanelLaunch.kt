@@ -30,6 +30,61 @@ const val DEFAULT_SURFACE_OWNER: String = "ai.rever.boss"
 private fun squash(value: String): String = value.lowercase().filter { it.isLetterOrDigit() }
 
 /**
+ * How the Toolbox will open a panel plugin, once its panel is resolved.
+ *
+ * Ordered best to worst, and the order is the point: the tiers differ in what survives the
+ * trip, not only in whether they work.
+ */
+enum class PanelLaunchRoute {
+    /**
+     * `SplitViewOperations.openPanelAsTab` - the host's own move. The panel's cached component
+     * is reused, so its state comes along, the sidebar copy is collapsed without being
+     * destroyed, and the sidebar icon afterwards focuses the tab instead of opening a second
+     * copy. Needs boss-plugin-api 1.0.77 pinned by the host (BossConsole#177).
+     */
+    OPEN_PANEL_AS_TAB,
+
+    /**
+     * The reflective panel-host tab: close the sidebar copy, then `openTab`. Reaches the main
+     * view on older hosts, but the plugin-facing close drops the cached component, so the
+     * panel starts fresh.
+     */
+    PANEL_HOST_TAB,
+
+    /** Reveal it in the sidebar. Not the main view, but still opening the tool. */
+    SIDEBAR_REVEAL,
+
+    /** No provider here can open it; the caller falls through to the plugin's homepage. */
+    NONE,
+}
+
+/**
+ * Pick the route, given what this host actually offers.
+ *
+ * A separate pure function for the same reason [resolveLaunchSurface] is one: every wrong
+ * answer here still renders an ordinary button and still opens *something*, so the failure is
+ * silent. Getting the ORDER wrong is the specific silent failure - falling to
+ * [PanelLaunchRoute.PANEL_HOST_TAB] on a host that supports the real call would quietly go on
+ * resetting each panel's state, which is the bug the api addition exists to end.
+ *
+ * @param hostSupportsOpenPanelAsTab probed with `supportsOpenPanelAsTab`, never assumed from a
+ *   version number - see that function for why the host's pinned api is what decides.
+ * @param canBuildPanelHostTab `panelHostTabInfo` returned a usable config.
+ * @param canRevealInSidebar there is a panel event provider and a window to target.
+ */
+fun panelLaunchRoute(
+    hostSupportsOpenPanelAsTab: Boolean,
+    canBuildPanelHostTab: Boolean,
+    canRevealInSidebar: Boolean,
+): PanelLaunchRoute =
+    when {
+        hostSupportsOpenPanelAsTab -> PanelLaunchRoute.OPEN_PANEL_AS_TAB
+        canBuildPanelHostTab -> PanelLaunchRoute.PANEL_HOST_TAB
+        canRevealInSidebar -> PanelLaunchRoute.SIDEBAR_REVEAL
+        else -> PanelLaunchRoute.NONE
+    }
+
+/**
  * Find the panel or tab type to open for an installed plugin.
  *
  * There is no host API that answers "which surfaces did plugin X register" —

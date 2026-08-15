@@ -8,8 +8,11 @@ import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PanelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelHostTabInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.supportsOpenPanelAsTab
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
@@ -516,9 +519,11 @@ class PluginManagerViewModel(
      * silently found nothing for the great majority and every click fell through to the
      * homepage. See that function for the tiers and why they refuse to guess.
      *
-     * A panel plugin goes to the main view through the host's own panel-host tab (see
-     * [panelHostTabInfo]); revealing it in the sidebar is the FALLBACK for hosts that cannot,
-     * not the goal. Falls back to [fallbackUrl] when the plugin contributes no surface at all.
+     * A panel plugin goes to the main view three ways, best first: `openPanelAsTab` where the
+     * host has it (see [supportsOpenPanelAsTab]), the reflective panel-host tab where it does
+     * not (see [panelHostTabInfo]), and a sidebar reveal where neither works. Only the first
+     * carries the panel's state across, since it is the host's own move rather than a
+     * close-then-reopen. Falls back to [fallbackUrl] when the plugin contributes no surface at all.
      * A disabled plugin has unregistered everything, so this is also what a click on a disabled
      * row does - and when there is no homepage either, the click reports why rather than doing
      * nothing: the whole row is clickable, so silence would be an affordance promising a result
@@ -537,25 +542,51 @@ class PluginManagerViewModel(
         }.onFailure { failure = it.message }.getOrNull()
         if (panel != null) {
             val ops = splitViewOperations
-            val hostTab = if (ops != null) panelHostTabInfo(tabRegistry, panel) else null
-            if (ops != null && hostTab != null) {
-                scope.launch {
-                    // Collapse the sidebar copy FIRST. The host renders one cached component
-                    // per panel and holds it to a single composition; closing also drops that
-                    // component, so the tab then builds a fresh one. Opening first would let
-                    // the close tear the component out from under the tab we just created.
-                    if (panelEventProvider != null && wid != null) {
-                        runCatching { panelEventProvider.closePanel(panel.id, wid) }
+            val canPromote = ops != null && supportsOpenPanelAsTab(ops)
+            // Only built when it is the route we will take: it is a reflective constructor
+            // call, and on a host with the real API it is dead weight.
+            val hostTab = if (ops != null && !canPromote) panelHostTabInfo(tabRegistry, panel) else null
+            val revealer = if (wid != null) panelEventProvider else null
+            val revealInSidebar = { scope.launch { revealer?.openPanel(panel.id, wid ?: return@launch) } }
+
+            when (panelLaunchRoute(canPromote, hostTab != null, revealer != null)) {
+                // The host's own move (boss-plugin-api 1.0.77 / BossConsole#177): the cached
+                // component is reused, so the panel keeps its state, it is marked hosted-as-tab
+                // so its sidebar icon then focuses this tab, and the sidebar copy is collapsed
+                // without being destroyed. None of that is reachable from the tiers below.
+                PanelLaunchRoute.OPEN_PANEL_AS_TAB -> {
+                    if (runCatching { ops?.openPanelAsTab(panel.id) }.isSuccess) return
+                    // Has the member but threw. Still the sidebar rather than the homepage:
+                    // "cannot host it in the main view" is what that fallback is for.
+                    if (revealer != null) {
+                        revealInSidebar()
+                        return
                     }
-                    ops.openTab(hostTab)
                 }
-                return
-            }
-            // This host cannot host a panel in the main view — reveal it in the sidebar, which
-            // is still opening the plugin, rather than reporting a failure the user cannot act on.
-            if (panelEventProvider != null && wid != null) {
-                scope.launch { panelEventProvider.openPanel(panel.id, wid) }
-                return
+
+                PanelLaunchRoute.PANEL_HOST_TAB -> {
+                    scope.launch {
+                        // Collapse the sidebar copy FIRST. The host renders one cached component
+                        // per panel and holds it to a single composition; closing also drops that
+                        // component, so the tab then builds a fresh one. Opening first would let
+                        // the close tear the component out from under the tab we just created.
+                        if (revealer != null && wid != null) {
+                            runCatching { revealer.closePanel(panel.id, wid) }
+                        }
+                        hostTab?.let { ops?.openTab(it) }
+                    }
+                    return
+                }
+
+                // This host cannot host a panel in the main view — reveal it in the sidebar,
+                // which is still opening the plugin, rather than reporting a failure the user
+                // cannot act on.
+                PanelLaunchRoute.SIDEBAR_REVEAL -> {
+                    revealInSidebar()
+                    return
+                }
+
+                PanelLaunchRoute.NONE -> Unit
             }
         }
 

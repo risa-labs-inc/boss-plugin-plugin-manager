@@ -81,9 +81,13 @@ dependencies {
         // Closure as its lazy inputs. Relying on unpacking that is not in the contract is how this
         // silently becomes eager again.
         compileOnly(files(Callable { latestBossPluginApiJar() }))
+        // compileOnly does NOT reach the test compile classpath, and a test that stands in for
+        // the host - a fake SplitViewOperations, say - needs the contract to implement it.
+        testImplementation(files(Callable { latestBossPluginApiJar() }))
     } else {
         // CI: use downloaded JAR
         compileOnly(files("build/downloaded-deps/boss-plugin-api.jar"))
+        testImplementation(files("build/downloaded-deps/boss-plugin-api.jar"))
     }
 
     // Compose dependencies
