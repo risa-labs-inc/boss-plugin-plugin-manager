@@ -371,7 +371,7 @@ class PluginManagerAPIImpl(
                 is UninstallResult.CannotUnload ->
                     return InstallResult.LoadFailed("Cannot change version: ${u.reason}")
                 is UninstallResult.Failed ->
-                    return InstallResult.LoadFailed("Uninstall failed: ${u.error}")
+                    return InstallResult.LoadFailed("could not replace the installed version - ${u.error}")
                 else -> { /* unloaded */ }
             }
         }
