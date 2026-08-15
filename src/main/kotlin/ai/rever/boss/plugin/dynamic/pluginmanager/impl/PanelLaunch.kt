@@ -67,6 +67,10 @@ enum class PanelLaunchRoute {
  * [PanelLaunchRoute.PANEL_HOST_TAB] on a host that supports the real call would quietly go on
  * resetting each panel's state, which is the bug the api addition exists to end.
  *
+ * A route that fails at RUNTIME comes back here with its input struck off rather than picking
+ * its own successor inline, so the degradation order is this order - a promote that throws
+ * drops to the bridge, not past it to the sidebar.
+ *
  * @param hostSupportsOpenPanelAsTab probed with `supportsOpenPanelAsTab`, never assumed from a
  *   version number - see that function for why the host's pinned api is what decides.
  * @param canBuildPanelHostTab `panelHostTabInfo` returned a usable config.

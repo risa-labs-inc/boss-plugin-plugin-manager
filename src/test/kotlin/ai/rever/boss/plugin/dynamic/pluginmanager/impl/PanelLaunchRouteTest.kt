@@ -1,14 +1,8 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
-import ai.rever.boss.plugin.api.PanelId
-import ai.rever.boss.plugin.api.SplitViewOperations
-import ai.rever.boss.plugin.api.TabInfo
-import ai.rever.boss.plugin.api.TabsComponent
-import ai.rever.boss.plugin.workspace.LayoutWorkspace
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -19,6 +13,13 @@ import kotlin.test.assertTrue
  * opens *something*. Falling to the reflective tier on a host that supports the real call
  * would silently keep resetting each panel's state - which is the whole reason
  * `openPanelAsTab` was added (BossConsole#177).
+ *
+ * The probe cases use stand-in interfaces rather than a fake `SplitViewOperations`, for the
+ * same reason [RegisteredSurface] is a flattened copy: implementing the real thing would drag
+ * the api jar into this source set, and CI resolves the LATEST api release, so an abstract
+ * member added to an interface this repo does not own would turn an unrelated PR red. It also
+ * buys the case that matters most - a host whose interface has NO such member cannot be built
+ * out of the real one, because the real one always has it.
  */
 class PanelLaunchRouteTest {
     // ---- the ordering ----
@@ -88,83 +89,104 @@ class PanelLaunchRouteTest {
         )
     }
 
+    /**
+     * A promote that throws re-enters the same function with the capability struck off, rather
+     * than choosing its own successor inline. This is that second pass: the bridge, not the
+     * sidebar, which is what keeps the degradation order equal to the initial order.
+     */
+    @Test
+    fun `striking the capability off drops to the bridge, not past it`() {
+        assertEquals(
+            PanelLaunchRoute.PANEL_HOST_TAB,
+            panelLaunchRoute(
+                hostSupportsOpenPanelAsTab = false,
+                canBuildPanelHostTab = true,
+                canRevealInSidebar = true,
+            ),
+        )
+    }
+
     // ---- the capability probe ----
+
+    /** A host on boss-plugin-api 1.0.77+ whose provider implements the call. */
+    private interface NewOps {
+        val supportsOpenPanelAsTab: Boolean
+
+        fun openPanelAsTab(panelId: String)
+    }
+
+    /** A host pinned below it: the interface has neither member at all. */
+    private interface OldOps {
+        fun openTab(tabInfo: String)
+    }
+
+    /** The drift the probe guards against: the flag is there, the call's signature moved. */
+    private interface DriftedOps {
+        val supportsOpenPanelAsTab: Boolean
+
+        fun openPanelAsTab(panelId: String, windowId: String)
+    }
+
+    private fun newOps(supports: Boolean) =
+        object : NewOps {
+            override val supportsOpenPanelAsTab: Boolean = supports
+
+            override fun openPanelAsTab(panelId: String) = Unit
+        }
 
     @Test
     fun `a host that implements it is detected`() {
-        assertTrue(supportsOpenPanelAsTab(FakeSplitViewOperations(supports = true)))
+        assertTrue(supportsOpenPanelAsTab(newOps(supports = true), NewOps::class.java))
     }
 
     @Test
     fun `a host that only inherits the default no-op is not`() {
-        // Exactly the shape of a host pinned to an api that HAS the member but whose
-        // SplitViewOperations implementation never overrode it: the defaulted false.
-        assertFalse(supportsOpenPanelAsTab(FakeSplitViewOperations(supports = false)))
+        // A host pinned to an api that HAS the member but whose provider never overrode it.
+        assertFalse(supportsOpenPanelAsTab(newOps(supports = false), NewOps::class.java))
     }
 
     /**
-     * The case the probe exists for - a host whose pinned api has neither member, where
-     * reading the flag directly is a NoSuchMethodError - cannot be built in this JVM: the
-     * `SplitViewOperations` on the test classpath is the 1.0.77 one, so `getMethod` always
-     * finds it here. What is pinned instead is that the probe never propagates a failure,
-     * which is what makes the missing-method case degrade rather than crash.
+     * The case the probe exists for, and the reason reading `ops.supportsOpenPanelAsTab`
+     * directly would be the very crash it prevents: on this host the member does not exist.
      */
     @Test
-    fun `a throwing implementation is treated as unsupported, never propagated`() {
-        assertFalse(supportsOpenPanelAsTab(ThrowingSplitViewOperations))
-    }
-
-    private open class FakeSplitViewOperations(
-        private val supports: Boolean,
-    ) : SplitViewOperations {
-        var promoted: PanelId? = null
-            private set
-        var openedTab: TabInfo? = null
-            private set
-
-        override val supportsOpenPanelAsTab: Boolean get() = supports
-
-        override fun openPanelAsTab(panelId: PanelId) {
-            promoted = panelId
+    fun `a host whose interface has no such member is unsupported, not a crash`() {
+        val old = object : OldOps {
+            override fun openTab(tabInfo: String) = Unit
         }
 
-        override fun openTab(tabInfo: TabInfo) {
-            openedTab = tabInfo
-        }
-
-        override fun openUrlInActivePanel(url: String, title: String, forceNewTab: Boolean) = Unit
-
-        override fun openFileInActivePanel(filePath: String, fileName: String) = Unit
-
-        override fun openFileInEditor(filePath: String, fileName: String) = Unit
-
-        override fun openFileAtPosition(filePath: String, fileName: String, line: Int, column: Int) = Unit
-
-        override fun setActivePanel(panelId: String) = Unit
-
-        override fun preserveCurrentState(workspaceId: String, workspaceName: String) = Unit
-
-        override fun getActiveTabsComponent(): TabsComponent? = null
-
-        override fun applyWorkspace(workspace: LayoutWorkspace) = Unit
-
-        override fun selectTabInPanel(tabId: String, panelId: String) = Unit
+        assertFalse(supportsOpenPanelAsTab(old, OldOps::class.java))
     }
 
-    private object ThrowingSplitViewOperations : FakeSplitViewOperations(supports = false) {
-        override val supportsOpenPanelAsTab: Boolean get() = error("this host's provider is broken")
+    /**
+     * The flag and the call are two questions and only the second is what the call site binds
+     * to. A flag-only check would answer yes here and then throw NoSuchMethodError.
+     */
+    @Test
+    fun `a flag whose call has drifted is unsupported`() {
+        val drifted = object : DriftedOps {
+            override val supportsOpenPanelAsTab: Boolean = true
+
+            override fun openPanelAsTab(panelId: String, windowId: String) = Unit
+        }
+
+        assertFalse(supportsOpenPanelAsTab(drifted, DriftedOps::class.java))
     }
 
     @Test
-    fun `the chosen route is the one actually invoked`() {
-        val ops = FakeSplitViewOperations(supports = true)
-        val panel = PanelId("codebase", 1)
+    fun `a throwing implementation is treated as unsupported, never propagated`() {
+        val broken = object : NewOps {
+            override val supportsOpenPanelAsTab: Boolean get() = error("this host's provider is broken")
 
-        // What the ViewModel does for PanelLaunchRoute.OPEN_PANEL_AS_TAB.
-        assertEquals(PanelLaunchRoute.OPEN_PANEL_AS_TAB, panelLaunchRoute(supportsOpenPanelAsTab(ops), true, true))
-        ops.openPanelAsTab(panel)
+            override fun openPanelAsTab(panelId: String) = Unit
+        }
 
-        assertEquals(panel, ops.promoted)
-        assertNull(ops.openedTab, "the reflective tier's openTab must not also run")
+        assertFalse(supportsOpenPanelAsTab(broken, NewOps::class.java))
+    }
+
+    /** An object that is not an instance of the interface at all cannot be coaxed into `true`. */
+    @Test
+    fun `a mismatched provider is unsupported`() {
+        assertFalse(supportsOpenPanelAsTab("not a provider", NewOps::class.java))
     }
 }

@@ -7,8 +7,8 @@ import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PanelLaunchRoute
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelHostTabInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
@@ -542,51 +542,72 @@ class PluginManagerViewModel(
         }.onFailure { failure = it.message }.getOrNull()
         if (panel != null) {
             val ops = splitViewOperations
-            val canPromote = ops != null && supportsOpenPanelAsTab(ops)
-            // Only built when it is the route we will take: it is a reflective constructor
-            // call, and on a host with the real API it is dead weight.
-            val hostTab = if (ops != null && !canPromote) panelHostTabInfo(tabRegistry, panel) else null
-            val revealer = if (wid != null) panelEventProvider else null
-            val revealInSidebar = { scope.launch { revealer?.openPanel(panel.id, wid ?: return@launch) } }
+            // One value for "can reveal", so the guard and the action cannot drift apart.
+            val revealInSidebar: (() -> Unit)? =
+                if (wid != null && panelEventProvider != null) {
+                    { scope.launch { panelEventProvider.openPanel(panel.id, wid) } }
+                } else {
+                    null
+                }
 
-            when (panelLaunchRoute(canPromote, hostTab != null, revealer != null)) {
-                // The host's own move (boss-plugin-api 1.0.77 / BossConsole#177): the cached
-                // component is reused, so the panel keeps its state, it is marked hosted-as-tab
-                // so its sidebar icon then focuses this tab, and the sidebar copy is collapsed
-                // without being destroyed. None of that is reachable from the tiers below.
-                PanelLaunchRoute.OPEN_PANEL_AS_TAB -> {
-                    if (runCatching { ops?.openPanelAsTab(panel.id) }.isSuccess) return
-                    // Has the member but threw. Still the sidebar rather than the homepage:
-                    // "cannot host it in the main view" is what that fallback is for.
-                    if (revealer != null) {
-                        revealInSidebar()
+            // At most two passes. A promote that throws strikes the capability and chooses
+            // again, so the degradation follows the SAME tier order as the first choice
+            // instead of a second copy of it written inline - it drops to the bridge, not
+            // past it to the sidebar. Terminates because canPromote only ever goes true to
+            // false, and every other branch returns or breaks.
+            var canPromote = ops != null && supportsOpenPanelAsTab(ops)
+            while (true) {
+                // Built only when it is the route we will take: a reflective constructor call
+                // that on a host with the real API is dead weight.
+                val hostTab = if (ops != null && !canPromote) panelHostTabInfo(tabRegistry, panel) else null
+
+                when (panelLaunchRoute(canPromote, hostTab != null, revealInSidebar != null)) {
+                    // The host's own move (boss-plugin-api 1.0.77 / BossConsole#177): the cached
+                    // component is reused, so the panel keeps its state, it is marked hosted-as-tab
+                    // so its sidebar icon then focuses this tab, and the sidebar copy is collapsed
+                    // without being destroyed. None of that is reachable from the tiers below.
+                    PanelLaunchRoute.OPEN_PANEL_AS_TAB -> {
+                        val outcome = runCatching { ops?.openPanelAsTab(panel.id) }
+                        if (outcome.isSuccess) return
+                        // Keep the reason. Falling through with it discarded would end at the
+                        // banner's "has no panel or tab to open" for a panel we just resolved -
+                        // the one message here whose whole job is to say why nothing happened.
+                        failure = outcome.exceptionOrNull()?.message
+                        canPromote = false
+                    }
+
+                    PanelLaunchRoute.PANEL_HOST_TAB -> {
+                        scope.launch {
+                            // Collapse the sidebar copy FIRST. The host renders one cached component
+                            // per panel and holds it to a single composition; closing also drops that
+                            // component, so the tab then builds a fresh one. Opening first would let
+                            // the close tear the component out from under the tab we just created.
+                            if (panelEventProvider != null && wid != null) {
+                                try {
+                                    panelEventProvider.closePanel(panel.id, wid)
+                                } catch (e: CancellationException) {
+                                    // Must propagate, or the openTab below runs on a cancelled scope.
+                                    throw e
+                                } catch (_: Throwable) {
+                                    // Best effort: the tab is the point, and a failed collapse
+                                    // leaves a duplicate rather than nothing.
+                                }
+                            }
+                            hostTab?.let { ops?.openTab(it) }
+                        }
                         return
                     }
-                }
 
-                PanelLaunchRoute.PANEL_HOST_TAB -> {
-                    scope.launch {
-                        // Collapse the sidebar copy FIRST. The host renders one cached component
-                        // per panel and holds it to a single composition; closing also drops that
-                        // component, so the tab then builds a fresh one. Opening first would let
-                        // the close tear the component out from under the tab we just created.
-                        if (revealer != null && wid != null) {
-                            runCatching { revealer.closePanel(panel.id, wid) }
-                        }
-                        hostTab?.let { ops?.openTab(it) }
+                    // This host cannot host a panel in the main view — reveal it in the sidebar,
+                    // which is still opening the plugin, rather than reporting a failure the user
+                    // cannot act on.
+                    PanelLaunchRoute.SIDEBAR_REVEAL -> {
+                        revealInSidebar?.invoke()
+                        return
                     }
-                    return
-                }
 
-                // This host cannot host a panel in the main view — reveal it in the sidebar,
-                // which is still opening the plugin, rather than reporting a failure the user
-                // cannot act on.
-                PanelLaunchRoute.SIDEBAR_REVEAL -> {
-                    revealInSidebar()
-                    return
+                    PanelLaunchRoute.NONE -> break
                 }
-
-                PanelLaunchRoute.NONE -> Unit
             }
         }
 
