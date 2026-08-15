@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelHostTabInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
@@ -506,18 +507,22 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Open an installed plugin: reveal its panel, or open one of its tabs.
+     * Open an installed plugin IN THE MAIN VIEW: its panel as a main-area tab, or its own tab.
      *
-     * Resolved against the live registries by [resolveLaunchSurface], not guessed. Matching on
-     * the id's `pluginId` field alone is not enough: it DEFAULTS to "ai.rever.boss", and all but
-     * a handful of plugins (docker, kubernetes, organisation, dna-origami) leave it there — so
-     * an owner-id-only lookup silently found nothing for the great majority and every click fell
-     * through to the homepage. See that function for the tiers and why they refuse to guess.
+     * Which surface belongs to the plugin is resolved against the live registries by
+     * [resolveLaunchSurface], not guessed. Matching on the id's `pluginId` field alone is not
+     * enough: it DEFAULTS to "ai.rever.boss", and all but a handful of plugins (docker,
+     * kubernetes, organisation, dna-origami) leave it there — so an owner-id-only lookup
+     * silently found nothing for the great majority and every click fell through to the
+     * homepage. See that function for the tiers and why they refuse to guess.
      *
-     * Falls back to [fallbackUrl] when the plugin contributes neither. A disabled plugin has
-     * unregistered everything, so this is also what a click on a disabled row does - and when
-     * there is no homepage either, the click reports why rather than doing nothing: the whole
-     * row is clickable, so silence would be an affordance promising a result it cannot deliver.
+     * A panel plugin goes to the main view through the host's own panel-host tab (see
+     * [panelHostTabInfo]); revealing it in the sidebar is the FALLBACK for hosts that cannot,
+     * not the goal. Falls back to [fallbackUrl] when the plugin contributes no surface at all.
+     * A disabled plugin has unregistered everything, so this is also what a click on a disabled
+     * row does - and when there is no homepage either, the click reports why rather than doing
+     * nothing: the whole row is clickable, so silence would be an affordance promising a result
+     * it cannot deliver.
      */
     fun openPlugin(pluginId: String, fallbackUrl: String? = null) {
         val wid = windowId
@@ -530,9 +535,28 @@ class PluginManagerViewModel(
         val panel = runCatching {
             resolvePanelFor(pluginId, name)
         }.onFailure { failure = it.message }.getOrNull()
-        if (panel != null && panelEventProvider != null && wid != null) {
-            scope.launch { panelEventProvider.openPanel(panel.id, wid) }
-            return
+        if (panel != null) {
+            val ops = splitViewOperations
+            val hostTab = if (ops != null) panelHostTabInfo(tabRegistry, panel) else null
+            if (ops != null && hostTab != null) {
+                scope.launch {
+                    // Collapse the sidebar copy FIRST. The host renders one cached component
+                    // per panel and holds it to a single composition; closing also drops that
+                    // component, so the tab then builds a fresh one. Opening first would let
+                    // the close tear the component out from under the tab we just created.
+                    if (panelEventProvider != null && wid != null) {
+                        runCatching { panelEventProvider.closePanel(panel.id, wid) }
+                    }
+                    ops.openTab(hostTab)
+                }
+                return
+            }
+            // This host cannot host a panel in the main view — reveal it in the sidebar, which
+            // is still opening the plugin, rather than reporting a failure the user cannot act on.
+            if (panelEventProvider != null && wid != null) {
+                scope.launch { panelEventProvider.openPanel(panel.id, wid) }
+                return
+            }
         }
 
         // Tab-type plugins. createTabInfo returns null unless the plugin opted into the host's
@@ -592,7 +616,10 @@ class PluginManagerViewModel(
     private fun recomputeOpenablePlugins(
         installed: List<InstalledPluginState> = _state.value.installedPlugins
     ) {
-        val canOpenPanels = panelEventProvider != null && windowId != null
+        // A panel reaches the main view through splitViewOperations, and the sidebar through
+        // the panel event provider — either route counts as openable, since openPlugin tries
+        // the first and falls back to the second.
+        val canOpenPanels = splitViewOperations != null || (panelEventProvider != null && windowId != null)
         val canOpenTabs = splitViewOperations != null && windowId != null
         val openable = runCatching {
             installed.mapNotNullTo(mutableSetOf()) { plugin ->
