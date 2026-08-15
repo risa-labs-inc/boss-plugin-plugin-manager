@@ -900,28 +900,14 @@ class PluginManagerViewModel(
                     refreshStoreInternal()
                     _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
-                is InstallResult.AlreadyInstalled -> {
+                // The four failure-ish variants share one decision with every other button.
+                // They used to be spelled out here with their own wording, which is how the
+                // busiest Install button in the app came to disagree with the canonical
+                // answer about what AlreadyInstalled means.
+                else -> {
                     _state.value = _state.value.copy(
                         busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Plugin already installed (v${result.currentVersion})"
-                    )
-                }
-                is InstallResult.DownloadFailed -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Download failed: ${result.error}"
-                    )
-                }
-                is InstallResult.LoadFailed -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Load failed: ${result.error}"
-                    )
-                }
-                is InstallResult.VersionConflict -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Version conflict: requires ${result.required}, available ${result.available}"
+                        error = outcomeErrorFor(result, PluginAction.INSTALL)
                     )
                 }
             }
@@ -954,20 +940,16 @@ class PluginManagerViewModel(
                     apiImpl.refreshInstalledPlugins()
                     _state.value = _state.value.copy(isLoading = false)
                 }
-                is InstallResult.DownloadFailed -> {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        error = "Download failed: ${result.error}"
-                    )
-                }
-                is InstallResult.LoadFailed -> {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        error = "Load failed: ${result.error}"
-                    )
-                }
+                // One decision point for every non-Success outcome. The bespoke "Download
+                // failed" / "Load failed" prefixes that used to sit here lost nothing worth
+                // keeping - the cause is in the error text either way - and having them meant
+                // this `when` had its own idea of which variants matter, which is how
+                // VersionConflict came to say nothing at all.
                 else -> {
-                    _state.value = _state.value.copy(isLoading = false)
+                    _state.value = _state.value.copy(
+                        isLoading = false,
+                        error = outcomeErrorFor(result, PluginAction.INSTALL)
+                    )
                 }
             }
         }
@@ -1024,14 +1006,11 @@ class PluginManagerViewModel(
                         postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
                     )
                 }
-                is InstallResult.DownloadFailed -> {
+                else -> {
                     _state.value = _state.value.copy(
                         busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Update failed: ${result.error}"
+                        error = outcomeErrorFor(result, PluginAction.UPDATE)
                     )
-                }
-                else -> {
-                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
             }
         }
@@ -1082,9 +1061,9 @@ class PluginManagerViewModel(
                     // hot-reload (or prompt) so the chosen version actually runs.
                     postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
                 )
-                is InstallResult.DownloadFailed -> base.copy(error = "Install failed: ${result.error}")
-                is InstallResult.LoadFailed -> base.copy(error = "Install failed: ${result.error}")
-                else -> base
+                // Covers VersionConflict too, which used to fall into an `else` and say nothing:
+                // the version sheet is the one surface where a conflict is most likely.
+                else -> base.copy(error = outcomeErrorFor(result, PluginAction.INSTALL))
             }
         }
     }
@@ -1097,13 +1076,19 @@ class PluginManagerViewModel(
             _state.value = _state.value.copy(isLoading = true, error = null)
 
             val updates = _state.value.updates.toList()
-            val failures = mutableListOf<String>()
+            // Display name to reason, so the banner can say why and not only which. One list
+            // rather than parallel accumulators of names and ids, matching UpdatePromptService.
+            val failed = mutableListOf<Pair<String, String>>()
             val succeeded = mutableListOf<String>()
 
             for (update in updates) {
                 val result = api.updatePlugin(update.pluginId)
-                if (result is InstallResult.DownloadFailed || result is InstallResult.LoadFailed) {
-                    failures.add(update.displayName)
+                // One definition of "failed", shared with the single-row button. This used to
+                // list the variants itself and counted a VersionConflict as neither a success
+                // nor a failure, so it vanished from both the banner and the tally.
+                val reason = failureReasonFor(result, PluginAction.UPDATE)
+                if (reason != null) {
+                    failed.add(update.displayName to reason)
                 } else if (result is InstallResult.Success) {
                     succeeded.add(update.pluginId)
                 }
@@ -1111,8 +1096,10 @@ class PluginManagerViewModel(
 
             _state.value = _state.value.copy(
                 isLoading = false,
-                error = if (failures.isNotEmpty()) "Failed to update: ${failures.joinToString(", ")}" else null,
-                updates = emptyList(),
+                error = updateAllError(failed),
+                // Clearing this outright named a plugin in the banner and took its Update button
+                // away in the same breath, leaving no action for the one thing it had reported.
+                updates = remainingUpdates(_state.value.updates, succeeded.toSet()),
                 postUpdatePrompt = buildPostUpdatePrompt(succeeded)
             )
         }
@@ -1368,3 +1355,100 @@ class PluginManagerViewModel(
         private const val HEALTHY_POLL_TICKS = 6
     }
 }
+
+/**
+ * Which button an [InstallResult] came back to, for [outcomeErrorFor].
+ *
+ * The label differs, but so does the meaning of one variant - see `AlreadyInstalled` there - so
+ * this is not just a message prefix.
+ */
+internal enum class PluginAction(val label: String) {
+    INSTALL("Install"),
+    UPDATE("Update"),
+}
+
+/**
+ * Why an outcome failed, with **no verb attached**, or null when it is not a failure.
+ *
+ * Split from [outcomeErrorFor] so a caller reporting on several plugins at once can compose the
+ * cause into its own sentence instead of nesting a whole "Update failed: ..." inside one.
+ * `updateAllPlugins` used to name the plugin and never the reason, which is the same silence
+ * this change is about, one level up.
+ *
+ * **Exhaustive over [InstallResult] with no `else`**, because the bug being fixed was a missing
+ * branch rather than a wrong one: `LoadFailed` fell into an `else` that cleared the spinner and
+ * set no error, so a refused update was indistinguishable from a button that was never wired up.
+ * An `else` would let the next variant added to the sealed class go silent the same way.
+ */
+internal fun failureReasonFor(
+    result: InstallResult,
+    action: PluginAction,
+): String? =
+    when (result) {
+        is InstallResult.Success -> null
+        is InstallResult.AlreadyInstalled ->
+            when (action) {
+                // Checked before any work happens, so nothing failed. It is still worth a word -
+                // see [outcomeErrorFor] - but it is not a failure and must not be counted as one.
+                PluginAction.INSTALL -> null
+                // Not benign here. `updatePluginInternal` reaches `installPluginInternal` only
+                // AFTER `uninstallPlugin` returned Success, and that function's first act is to
+                // return AlreadyInstalled if the plugin is still registered. So this means the
+                // unload reported success while the old version stayed - the update silently did
+                // not happen, which is the exact symptom this change exists to stop hiding.
+                PluginAction.UPDATE -> "version ${result.currentVersion} is still installed"
+            }
+        is InstallResult.DownloadFailed -> result.error
+        is InstallResult.LoadFailed -> result.error
+        // Not currently produced anywhere - nothing in PluginManagerAPIImpl constructs it, and
+        // the IPC gate reports DownloadFailed instead. Handled because the sealed class allows
+        // it and a future producer must not land back in a silent branch.
+        is InstallResult.VersionConflict ->
+            "needs version ${result.required}, but ${result.available} is available"
+    }
+
+/**
+ * The message a single-plugin Install or Update button shows, or null for nothing to say.
+ *
+ * Every one of the five call sites routes through this, including the store tab's Install
+ * button - which used to hand-roll all five branches with its own wording, so the canonical
+ * decision and the highest-traffic button could disagree about the same outcome.
+ */
+internal fun outcomeErrorFor(
+    result: InstallResult,
+    action: PluginAction,
+): String? {
+    // Not a failure, so it has no reason - but the user pressed a button and nothing happened,
+    // which is the shape of bug this whole change exists to stop. Wording kept from
+    // installFromRemote, which has always said exactly this.
+    if (result is InstallResult.AlreadyInstalled && action == PluginAction.INSTALL) {
+        return "Plugin already installed (v${result.currentVersion})"
+    }
+    return failureReasonFor(result, action)?.let { reason -> "${action.label} failed: $reason" }
+}
+
+/**
+ * The banner for a whole Update All run, or null when everything worked.
+ *
+ * Takes display-name-to-reason pairs. Naming the plugins without their causes was the old
+ * behaviour and is what this exists to correct.
+ */
+internal fun updateAllError(failures: List<Pair<String, String>>): String? =
+    when (failures.size) {
+        0 -> null
+        1 -> "Failed to update ${failures[0].first}: ${failures[0].second}"
+        else -> "Failed to update: " + failures.joinToString(", ") { "${it.first} (${it.second})" }
+    }
+
+/**
+ * The update rows that survive a run: drop what actually succeeded, keep everything else.
+ *
+ * Deliberately the inverse of "keep the ones we saw fail". The failure list is built from a
+ * snapshot taken before the loop, while `updates` is re-read after it and the background poller
+ * can write that field while the loop is suspended on network I/O - so filtering by the failed
+ * set silently discards any row that arrived mid-run.
+ */
+internal fun remainingUpdates(
+    current: List<UpdateInfo>,
+    succeeded: Set<String>,
+): List<UpdateInfo> = current.filterNot { it.pluginId in succeeded }

@@ -371,7 +371,7 @@ class PluginManagerAPIImpl(
                 is UninstallResult.CannotUnload ->
                     return InstallResult.LoadFailed("Cannot change version: ${u.reason}")
                 is UninstallResult.Failed ->
-                    return InstallResult.LoadFailed("Uninstall failed: ${u.error}")
+                    return InstallResult.LoadFailed("could not replace the installed version - ${u.error}")
                 else -> { /* unloaded */ }
             }
         }
@@ -976,7 +976,12 @@ class PluginManagerAPIImpl(
             // Unload from runtime via delegate
             val unloaded = loaderDelegate?.unloadPlugin(pluginId) ?: false
             if (!unloaded && loaderDelegate != null) {
-                return@withContext UninstallResult.Failed("Failed to unload plugin from runtime")
+                // The delegate hands back a bare Boolean, so the host's reasons cannot reach
+                // here - say where they are instead of restating the failure. The host logs
+                // them as "Plugin unload refused".
+                return@withContext UninstallResult.Failed(
+                    "the host refused to unload it (it may still be in use by another plugin)"
+                )
             }
 
             // Delete JAR file (and its signature sidecar)
@@ -1031,7 +1036,7 @@ class PluginManagerAPIImpl(
             return InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
         }
         if (uninstallResult is UninstallResult.Failed) {
-            return InstallResult.LoadFailed("Uninstall failed: ${uninstallResult.error}")
+            return InstallResult.LoadFailed("could not replace the installed version - ${uninstallResult.error}")
         }
 
         // Install latest version
@@ -1147,7 +1152,10 @@ class PluginManagerAPIImpl(
 
             return InstallResult.Success(pluginInfo)
         } catch (e: Exception) {
-            return InstallResult.DownloadFailed("Update failed: ${e.message}")
+            // The caller supplies the verb, so naming it here produced "Update failed: Update
+            // failed: <msg>". The other DownloadFailed sites in this file still self-prefix;
+            // this one was the only outright duplication.
+            return InstallResult.DownloadFailed(e.message ?: "Unknown error")
         }
     }
 
