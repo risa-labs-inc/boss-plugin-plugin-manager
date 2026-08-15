@@ -972,14 +972,11 @@ class PluginManagerViewModel(
                         postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
                     )
                 }
-                is InstallResult.DownloadFailed -> {
+                else -> {
                     _state.value = _state.value.copy(
                         busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Update failed: ${result.error}"
+                        error = updateErrorFor(result)
                     )
-                }
-                else -> {
-                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
                 }
             }
         }
@@ -1316,3 +1313,26 @@ class PluginManagerViewModel(
         private const val HEALTHY_POLL_TICKS = 6
     }
 }
+
+/**
+ * The message to show for an update outcome, or null when there is nothing worth saying.
+ *
+ * A pure function, and **exhaustive over [InstallResult] with no `else`**, because the bug it
+ * replaces was a missing branch rather than a wrong one. `LoadFailed` used to fall into an
+ * `else` that cleared the spinner and set no error, so a refused update was indistinguishable
+ * from a button that did nothing at all - which is exactly how it was reported. That happened to
+ * the single-row Update button only; every other caller already handled the case. An `else` here
+ * would let the next variant added to the sealed class go silent the same way, so there is not
+ * one, and the compiler asks instead.
+ */
+internal fun updateErrorFor(result: InstallResult): String? =
+    when (result) {
+        is InstallResult.Success -> null
+        // Not a failure: the version being asked for is the one already installed, and the row
+        // has nothing left to offer.
+        is InstallResult.AlreadyInstalled -> null
+        is InstallResult.DownloadFailed -> "Update failed: ${result.error}"
+        is InstallResult.LoadFailed -> "Update failed: ${result.error}"
+        is InstallResult.VersionConflict ->
+            "Update failed: needs version ${result.required}, but ${result.available} is available"
+    }
