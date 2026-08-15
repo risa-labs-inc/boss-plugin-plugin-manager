@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -22,13 +23,14 @@ import kotlin.test.assertTrue
  * dropped.
  */
 class UpdateOutcomeTest {
-    private fun pluginInfo() =
-        PluginInfo(
-            pluginId = "ai.rever.boss.plugin.dynamic.aigateway",
-            displayName = "AI Gateway",
-            version = "1.1.1",
-            description = "",
-            author = "Risa Labs",
+    private fun pluginInfo() = PluginInfo("ai.rever.boss.plugin.dynamic.aigateway", "AI Gateway", "1.1.1")
+
+    private fun update(pluginId: String, displayName: String = pluginId) =
+        UpdateInfo(
+            pluginId = pluginId,
+            displayName = displayName,
+            currentVersion = "1.0.0",
+            newVersion = "1.1.0",
         )
 
     @Test
@@ -70,15 +72,23 @@ class UpdateOutcomeTest {
     }
 
     @Test
-    fun `already installed is benign for install and a failure for update`() {
-        // Install checks before doing any work, so there was simply nothing to do. The update
-        // path only reaches that check AFTER its uninstall reported success, so the same value
-        // means the old version survived and the update silently did not happen.
-        assertNull(outcomeErrorFor(InstallResult.AlreadyInstalled("1.1.1"), PluginAction.INSTALL))
+    fun `already installed is not a failure for install, but is still reported`() {
+        // Install checks before doing any work, so nothing failed and it must not be counted as
+        // a failure by Update All's tally. It is still worth saying: the user pressed a button
+        // and nothing happened, which is the shape of bug this change exists to stop.
+        assertNull(failureReasonFor(InstallResult.AlreadyInstalled("1.1.1"), PluginAction.INSTALL))
 
-        val update = outcomeErrorFor(InstallResult.AlreadyInstalled("1.1.0"), PluginAction.UPDATE)
-        assertNotNull(update, "an update that left the old version installed must not read as success")
-        assertTrue(update.contains("1.1.0"), "the stranded version should be named: was <$update>")
+        val install = outcomeErrorFor(InstallResult.AlreadyInstalled("1.1.1"), PluginAction.INSTALL)
+        assertEquals("Plugin already installed (v1.1.1)", install)
+    }
+
+    @Test
+    fun `already installed is a failure for update`() {
+        // The update path only reaches that check AFTER its uninstall reported success, so the
+        // same value means the old version survived and the update silently did not happen.
+        val reason = failureReasonFor(InstallResult.AlreadyInstalled("1.1.0"), PluginAction.UPDATE)
+        assertNotNull(reason, "an update that left the old version installed must not read as success")
+        assertTrue(reason.contains("1.1.0"), "the stranded version should be named: was <$reason>")
     }
 
     @Test
@@ -105,9 +115,53 @@ class UpdateOutcomeTest {
 
     @Test
     fun `the action names itself in the message`() {
-        // updateAllPlugins uses `outcomeErrorFor(...) != null` as its failure predicate, so the
-        // label is the only thing separating an install message from an update one.
         assertTrue(outcomeErrorFor(InstallResult.LoadFailed("x"), PluginAction.UPDATE)!!.startsWith("Update failed"))
         assertTrue(outcomeErrorFor(InstallResult.LoadFailed("x"), PluginAction.INSTALL)!!.startsWith("Install failed"))
+    }
+
+    @Test
+    fun `a reason carries no verb, so composing it does not stack failures`() {
+        // The whole point of the split: Update All puts the cause inside its own sentence, and
+        // "Failed to update X: Update failed: ..." would be the string this change is retiring.
+        val reason = failureReasonFor(InstallResult.LoadFailed("the host refused to unload it"), PluginAction.UPDATE)
+
+        assertEquals("the host refused to unload it", reason)
+    }
+
+    @Test
+    fun `update all names the plugin and the reason, not just the plugin`() {
+        assertNull(updateAllError(emptyList()))
+
+        val one = updateAllError(listOf("AI Gateway" to "the host refused to unload it"))
+        assertNotNull(one)
+        assertTrue(one.contains("AI Gateway"), "was <$one>")
+        // The regression this fixes: the old banner named the plugin and never the cause.
+        assertTrue(one.contains("the host refused to unload it"), "was <$one>")
+
+        val many = updateAllError(listOf("AI Gateway" to "refused", "Flow" to "HTTP 500"))
+        assertNotNull(many)
+        listOf("AI Gateway", "Flow", "refused", "HTTP 500").forEach {
+            assertTrue(many.contains(it), "<$it> missing from <$many>")
+        }
+    }
+
+    @Test
+    fun `update all keeps rows that did not succeed, including ones that arrived mid-run`() {
+        val current = listOf(update("a"), update("b"), update("arrived.during.the.run"))
+
+        // "a" updated; "b" failed. The third row was written by the background poller while the
+        // loop was suspended, so it is in neither tally - dropping it, as filtering by the
+        // failed set would, silently loses an update the user never got to act on.
+        assertEquals(
+            listOf("b", "arrived.during.the.run"),
+            remainingUpdates(current, succeeded = setOf("a")).map { it.pluginId },
+        )
+    }
+
+    @Test
+    fun `update all clears the list when everything succeeds`() {
+        val current = listOf(update("a"), update("b"))
+
+        assertEquals(emptyList(), remainingUpdates(current, succeeded = setOf("a", "b")))
     }
 }

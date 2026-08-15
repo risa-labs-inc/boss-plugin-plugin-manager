@@ -1152,7 +1152,10 @@ class PluginManagerAPIImpl(
 
             return InstallResult.Success(pluginInfo)
         } catch (e: Exception) {
-            return InstallResult.DownloadFailed("Update failed: ${e.message}")
+            // The caller supplies the verb, so naming it here produced "Update failed: Update
+            // failed: <msg>". The other DownloadFailed sites in this file still self-prefix;
+            // this one was the only outright duplication.
+            return InstallResult.DownloadFailed(e.message ?: "Unknown error")
         }
     }
 
