@@ -7,6 +7,9 @@ import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelHostTabInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
@@ -94,7 +97,15 @@ data class PluginManagerState(
     /** True while a request is in flight, so the dialog can disable its submit. */
     val organisationRequestBusy: Boolean = false,
     /** Server-side refusal to show inside the dialog, or null. */
-    val organisationRequestError: String? = null
+    val organisationRequestError: String? = null,
+    /**
+     * Installed plugins that have a panel or tab [openPlugin] can actually open.
+     *
+     * A set rather than a per-plugin flag so both the Installed and Store lists can ask the
+     * same question with one membership check, and so a plugin registering or unregistering
+     * its panel moves the button in both places at once.
+     */
+    val openablePlugins: Set<String> = emptySet()
 )
 
 /**
@@ -199,6 +210,9 @@ class PluginManagerViewModel(
     private val _state = MutableStateFlow(PluginManagerState())
     val state: StateFlow<PluginManagerState> = _state.asStateFlow()
 
+    /** Held in a field so [dispose] can detach it — the registries outlive this panel. */
+    private val registryListener: () -> Unit = { recomputeOpenablePlugins() }
+
     init {
         // Observe installed plugins from API and convert to InstalledPluginState
         scope.launch {
@@ -219,8 +233,16 @@ class PluginManagerViewModel(
                     )
                 }
                 _state.value = _state.value.copy(installedPlugins = installedStates)
+                recomputeOpenablePlugins(installedStates)
             }
         }
+
+        // A plugin's panel/tab appears in the registries only once it has registered — well
+        // after a freshly installed plugin shows up in the installed list — and disappears
+        // again when it is disabled. Follow both registries so the Open button tracks what is
+        // actually openable rather than what was openable when the panel was first drawn.
+        panelRegistry?.addChangeListener(registryListener)
+        tabRegistry?.addChangeListener(registryListener)
 
         // Collect realtime store changes and auto-refresh (debounced to avoid thundering herd)
         // Debounced per event type, not over the mixed stream. debounce emits only the last event
@@ -485,40 +507,63 @@ class PluginManagerViewModel(
     }
 
     /**
-     * Open an installed plugin: reveal its panel, or open one of its tabs.
+     * Open an installed plugin IN THE MAIN VIEW: its panel as a main-area tab, or its own tab.
      *
-     * Resolved through the registries rather than guessed. A panel id is the plugin's own
-     * choice ("plugin-manager", "organisation", …) and is not derivable from the plugin id, so
-     * openToolCreator's hard-coded constants are the only shape that can work without a lookup -
-     * and they only work because those two ids are known here.
+     * Which surface belongs to the plugin is resolved against the live registries by
+     * [resolveLaunchSurface], not guessed. Matching on the id's `pluginId` field alone is not
+     * enough: it DEFAULTS to "ai.rever.boss", and all but a handful of plugins (docker,
+     * kubernetes, organisation, dna-origami) leave it there — so an owner-id-only lookup
+     * silently found nothing for the great majority and every click fell through to the
+     * homepage. See that function for the tiers and why they refuse to guess.
      *
-     * Falls back to [fallbackUrl] when the plugin contributes neither. A disabled plugin has
-     * unregistered everything, so this is also what a click on a disabled row does - and when
-     * there is no homepage either, the click reports why rather than doing nothing: the whole
-     * row is clickable, so silence would be an affordance promising a result it cannot deliver.
+     * A panel plugin goes to the main view through the host's own panel-host tab (see
+     * [panelHostTabInfo]); revealing it in the sidebar is the FALLBACK for hosts that cannot,
+     * not the goal. Falls back to [fallbackUrl] when the plugin contributes no surface at all.
+     * A disabled plugin has unregistered everything, so this is also what a click on a disabled
+     * row does - and when there is no homepage either, the click reports why rather than doing
+     * nothing: the whole row is clickable, so silence would be an affordance promising a result
+     * it cannot deliver.
      */
     fun openPlugin(pluginId: String, fallbackUrl: String? = null) {
         val wid = windowId
+        val name = displayNameOf(pluginId)
 
         // Surfaced in the error banner rather than logged: this plugin has no logger, and a
         // swallowed throwable here reads to the user as "clicking does nothing".
         var failure: String? = null
 
         val panel = runCatching {
-            panelRegistry?.getAllPanels()?.firstOrNull { it.id.pluginId == pluginId }
+            resolvePanelFor(pluginId, name)
         }.onFailure { failure = it.message }.getOrNull()
-        if (panel != null && panelEventProvider != null && wid != null) {
-            scope.launch { panelEventProvider.openPanel(panel.id, wid) }
-            return
+        if (panel != null) {
+            val ops = splitViewOperations
+            val hostTab = if (ops != null) panelHostTabInfo(tabRegistry, panel) else null
+            if (ops != null && hostTab != null) {
+                scope.launch {
+                    // Collapse the sidebar copy FIRST. The host renders one cached component
+                    // per panel and holds it to a single composition; closing also drops that
+                    // component, so the tab then builds a fresh one. Opening first would let
+                    // the close tear the component out from under the tab we just created.
+                    if (panelEventProvider != null && wid != null) {
+                        runCatching { panelEventProvider.closePanel(panel.id, wid) }
+                    }
+                    ops.openTab(hostTab)
+                }
+                return
+            }
+            // This host cannot host a panel in the main view — reveal it in the sidebar, which
+            // is still opening the plugin, rather than reporting a failure the user cannot act on.
+            if (panelEventProvider != null && wid != null) {
+                scope.launch { panelEventProvider.openPanel(panel.id, wid) }
+                return
+            }
         }
 
         // Tab-type plugins. createTabInfo returns null unless the plugin opted into the host's
         // New Tab dialog, which is the same "can this be opened cold?" question we are asking -
         // so a null there means there is nothing sensible to open, not that we should force one.
         val opened = runCatching {
-            val tabType = tabRegistry?.getAllTabTypes()
-                ?.firstOrNull { it.typeId.pluginId == pluginId }
-                ?: return@runCatching false
+            val tabType = resolveTabTypeFor(pluginId, name) ?: return@runCatching false
             val ops = splitViewOperations ?: return@runCatching false
             // No invented window id: the panel branch above declines to act without one, and a
             // tab opened against "" targets a window that does not exist.
@@ -536,9 +581,64 @@ class PluginManagerViewModel(
         }
 
         _state.value = _state.value.copy(
-            error = failure?.let { "Could not open ${displayNameOf(pluginId)}: $it" }
-                ?: "${displayNameOf(pluginId)} has no panel or tab to open."
+            error = failure?.let { "Could not open $name: $it" }
+                ?: "$name has no panel or tab to open."
         )
+    }
+
+    /** The registered panel this plugin's Open action targets, or null. */
+    private fun resolvePanelFor(pluginId: String, displayName: String) =
+        panelRegistry?.getAllPanels()?.let { panels ->
+            resolveLaunchSurface(pluginId, displayName, panels) {
+                RegisteredSurface(it.id.panelId, it.id.pluginId, it.displayName)
+            }
+        }
+
+    /** The registered tab type this plugin's Open action targets, or null. */
+    private fun resolveTabTypeFor(pluginId: String, displayName: String) =
+        tabRegistry?.getAllTabTypes()?.let { types ->
+            resolveLaunchSurface(pluginId, displayName, types) {
+                RegisteredSurface(it.typeId.typeId, it.typeId.pluginId, it.displayName)
+            }
+        }
+
+    /**
+     * Recompute which installed plugins have something for "Open" to open.
+     *
+     * Drives whether the Open button is rendered at all, so it deliberately asks the same
+     * question [openPlugin] answers — minus the homepage fallback. A tool's Open button must
+     * open the tool; a plugin whose only trick is a GitHub page already has an icon for that,
+     * and a button that silently browses somewhere would be a different promise.
+     *
+     * Cheap and synchronous — both registries are in-memory maps — so it can run on every
+     * installed-list emission and every registry change.
+     */
+    private fun recomputeOpenablePlugins(
+        installed: List<InstalledPluginState> = _state.value.installedPlugins
+    ) {
+        // A panel reaches the main view through splitViewOperations, and the sidebar through
+        // the panel event provider — either route counts as openable, since openPlugin tries
+        // the first and falls back to the second.
+        val canOpenPanels = splitViewOperations != null || (panelEventProvider != null && windowId != null)
+        val canOpenTabs = splitViewOperations != null && windowId != null
+        val openable = runCatching {
+            installed.mapNotNullTo(mutableSetOf()) { plugin ->
+                // The Toolbox's own entry is skipped: you are looking at that panel right now,
+                // so its Open button could only ever no-op.
+                if (plugin.pluginId == PluginManagerCore.PLUGIN_ID) return@mapNotNullTo null
+                val hasPanel = canOpenPanels && resolvePanelFor(plugin.pluginId, plugin.displayName) != null
+                // createTabInfo is NOT called here — it can build state, and probing every
+                // installed plugin on every registry change to decide a button's visibility
+                // would be a side effect nobody asked for. openPlugin still handles a null
+                // from it by falling through, so at worst the button falls back to the
+                // homepage for a tab type that declines to open cold.
+                val hasTab = canOpenTabs && resolveTabTypeFor(plugin.pluginId, plugin.displayName) != null
+                plugin.pluginId.takeIf { hasPanel || hasTab }
+            }
+        }.getOrDefault(emptySet())
+        if (openable != _state.value.openablePlugins) {
+            _state.value = _state.value.copy(openablePlugins = openable)
+        }
     }
 
     /** Friendly name for an installed plugin id, falling back to the id itself. */
@@ -1190,6 +1290,8 @@ class PluginManagerViewModel(
      * running so background update detection survives panel close.
      */
     fun dispose() {
+        panelRegistry?.removeChangeListener(registryListener)
+        tabRegistry?.removeChangeListener(registryListener)
         scope.cancel()
     }
 
