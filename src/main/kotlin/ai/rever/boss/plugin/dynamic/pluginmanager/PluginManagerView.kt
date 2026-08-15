@@ -66,6 +66,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Launch
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
@@ -982,6 +983,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
                         onOpenPlugin = { p -> viewModel.openPlugin(p.pluginId, p.url) },
+                        openablePlugins = state.openablePlugins,
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins,
                         // Non-null: reaching this row means the plugin IS installed, whatever
@@ -1010,6 +1012,10 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                             )
                         },
                         canInstall = { item -> viewModel.canInstall(item) },
+                        // No homepage fallback here: the store card's own title already opens
+                        // the homepage, so an Open button that browsed there would duplicate it.
+                        onOpenPlugin = { item -> viewModel.openPlugin(item.pluginId) },
+                        openablePlugins = state.openablePlugins,
                         isStoreAdmin = state.isStoreAdmin,
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins,
@@ -1325,6 +1331,8 @@ private fun InstalledPluginsTab(
     onOpenHomepage: (String) -> Unit,
     /** Reveal the plugin's own panel/tab; falls back to its homepage when it has neither. */
     onOpenPlugin: (InstalledPluginState) -> Unit = {},
+    /** Plugin ids with a panel or tab to open; the rest get no Open button. */
+    openablePlugins: Set<String> = emptySet(),
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
     onShowVersions: (InstalledPluginState) -> Unit = {},
@@ -1535,6 +1543,7 @@ private fun InstalledPluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
                     onOpenPlugin = { onOpenPlugin(plugin) },
+                    canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
                     isLoading = plugin.pluginId in busyPlugins,
                     mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
@@ -1556,6 +1565,8 @@ private fun InstalledPluginCard(
     onOpenHomepage: () -> Unit,
     /** Reveal the plugin itself (its panel or tab). */
     onOpenPlugin: () -> Unit,
+    /** True when the plugin has a panel or tab to open, which is what renders the Open button. */
+    canOpen: Boolean = false,
     onShowVersions: () -> Unit,
     isLoading: Boolean,
     /** Number of MCP tools this plugin contributes; 0 hides the MCP button. */
@@ -1657,6 +1668,20 @@ private fun InstalledPluginCard(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Clicking the row already opens the plugin, but that is an invisible
+                // affordance — nothing about a card says it is a launcher. The button is the
+                // one part of this card that names what the Toolbox is for.
+                if (canOpen) {
+                    BossSecondaryButton(
+                        text = "Open",
+                        onClick = onOpenPlugin,
+                        // Disabled, not hidden, mid-install/update: the panel is about to be
+                        // unregistered and re-registered, so opening now races the reload.
+                        enabled = !isLoading && plugin.enabled && !plugin.isIncompatible,
+                        icon = Icons.Default.Launch
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
                 if (hasUpdate) {
                     BossPrimaryButton(
                         text = "Update",
@@ -1760,6 +1785,10 @@ private fun AvailablePluginsTab(
     /** Open the version-history sheet — install/update/downgrade to any published version. */
     onShowVersions: (PluginStoreItem) -> Unit = {},
     canInstall: (PluginStoreItem) -> Boolean = { true },
+    /** Reveal an already-installed plugin's own panel/tab. */
+    onOpenPlugin: (PluginStoreItem) -> Unit = {},
+    /** Plugin ids with a panel or tab to open; the rest get no Open button. */
+    openablePlugins: Set<String> = emptySet(),
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
@@ -1846,6 +1875,8 @@ private fun AvailablePluginsTab(
                     onOpenHomepage = { if (plugin.url.isNotBlank()) onOpenHomepage(plugin.url) },
                     onShowVersions = { onShowVersions(plugin) },
                     canInstall = canInstall(plugin),
+                    canOpen = plugin.pluginId in openablePlugins,
+                    onOpenPlugin = { onOpenPlugin(plugin) },
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins,
                     onShowPermissions = { permDialogItem = plugin }
@@ -1866,6 +1897,9 @@ private fun AvailablePluginCard(
     onOpenHomepage: () -> Unit,
     onShowVersions: () -> Unit = {},
     canInstall: Boolean = true,
+    /** True when the plugin is installed AND has a panel or tab to open. */
+    canOpen: Boolean = false,
+    onOpenPlugin: () -> Unit = {},
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     onShowPermissions: () -> Unit = {}
@@ -1992,6 +2026,19 @@ private fun AvailablePluginCard(
                         )
                     }
                     Spacer(Modifier.width(4.dp))
+                }
+                // Installed and openable: launching the tool is the natural next step after
+                // installing it, and otherwise means leaving the store to hunt for its sidebar
+                // icon. Sits BEFORE the status below rather than replacing it — the button says
+                // what you can do, the label still says what state the plugin is in.
+                if (canOpen) {
+                    BossSecondaryButton(
+                        text = "Open",
+                        onClick = onOpenPlugin,
+                        enabled = !isLoading,
+                        icon = Icons.Default.Launch
+                    )
+                    Spacer(Modifier.width(8.dp))
                 }
                 when {
                     isSystemComponent -> {
