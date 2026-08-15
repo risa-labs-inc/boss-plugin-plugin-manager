@@ -7,9 +7,12 @@ import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PanelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelHostTabInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.supportsOpenPanelAsTab
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
@@ -516,9 +519,11 @@ class PluginManagerViewModel(
      * silently found nothing for the great majority and every click fell through to the
      * homepage. See that function for the tiers and why they refuse to guess.
      *
-     * A panel plugin goes to the main view through the host's own panel-host tab (see
-     * [panelHostTabInfo]); revealing it in the sidebar is the FALLBACK for hosts that cannot,
-     * not the goal. Falls back to [fallbackUrl] when the plugin contributes no surface at all.
+     * A panel plugin goes to the main view three ways, best first: `openPanelAsTab` where the
+     * host has it (see [supportsOpenPanelAsTab]), the reflective panel-host tab where it does
+     * not (see [panelHostTabInfo]), and a sidebar reveal where neither works. Only the first
+     * carries the panel's state across, since it is the host's own move rather than a
+     * close-then-reopen. Falls back to [fallbackUrl] when the plugin contributes no surface at all.
      * A disabled plugin has unregistered everything, so this is also what a click on a disabled
      * row does - and when there is no homepage either, the click reports why rather than doing
      * nothing: the whole row is clickable, so silence would be an affordance promising a result
@@ -537,25 +542,72 @@ class PluginManagerViewModel(
         }.onFailure { failure = it.message }.getOrNull()
         if (panel != null) {
             val ops = splitViewOperations
-            val hostTab = if (ops != null) panelHostTabInfo(tabRegistry, panel) else null
-            if (ops != null && hostTab != null) {
-                scope.launch {
-                    // Collapse the sidebar copy FIRST. The host renders one cached component
-                    // per panel and holds it to a single composition; closing also drops that
-                    // component, so the tab then builds a fresh one. Opening first would let
-                    // the close tear the component out from under the tab we just created.
-                    if (panelEventProvider != null && wid != null) {
-                        runCatching { panelEventProvider.closePanel(panel.id, wid) }
-                    }
-                    ops.openTab(hostTab)
+            // One value for "can reveal", so the guard and the action cannot drift apart.
+            val revealInSidebar: (() -> Unit)? =
+                if (wid != null && panelEventProvider != null) {
+                    { scope.launch { panelEventProvider.openPanel(panel.id, wid) } }
+                } else {
+                    null
                 }
-                return
-            }
-            // This host cannot host a panel in the main view — reveal it in the sidebar, which
-            // is still opening the plugin, rather than reporting a failure the user cannot act on.
-            if (panelEventProvider != null && wid != null) {
-                scope.launch { panelEventProvider.openPanel(panel.id, wid) }
-                return
+
+            // At most two passes. A promote that throws strikes the capability and chooses
+            // again, so the degradation follows the SAME tier order as the first choice
+            // instead of a second copy of it written inline - it drops to the bridge, not
+            // past it to the sidebar. Terminates because canPromote only ever goes true to
+            // false, and every other branch returns or breaks.
+            var canPromote = ops != null && supportsOpenPanelAsTab(ops)
+            while (true) {
+                // Built only when it is the route we will take: a reflective constructor call
+                // that on a host with the real API is dead weight.
+                val hostTab = if (ops != null && !canPromote) panelHostTabInfo(tabRegistry, panel) else null
+
+                when (panelLaunchRoute(canPromote, hostTab != null, revealInSidebar != null)) {
+                    // The host's own move (boss-plugin-api 1.0.77 / BossConsole#177): the cached
+                    // component is reused, so the panel keeps its state, it is marked hosted-as-tab
+                    // so its sidebar icon then focuses this tab, and the sidebar copy is collapsed
+                    // without being destroyed. None of that is reachable from the tiers below.
+                    PanelLaunchRoute.OPEN_PANEL_AS_TAB -> {
+                        val outcome = runCatching { ops?.openPanelAsTab(panel.id) }
+                        if (outcome.isSuccess) return
+                        // Keep the reason. Falling through with it discarded would end at the
+                        // banner's "has no panel or tab to open" for a panel we just resolved -
+                        // the one message here whose whole job is to say why nothing happened.
+                        failure = outcome.exceptionOrNull()?.message
+                        canPromote = false
+                    }
+
+                    PanelLaunchRoute.PANEL_HOST_TAB -> {
+                        scope.launch {
+                            // Collapse the sidebar copy FIRST. The host renders one cached component
+                            // per panel and holds it to a single composition; closing also drops that
+                            // component, so the tab then builds a fresh one. Opening first would let
+                            // the close tear the component out from under the tab we just created.
+                            if (panelEventProvider != null && wid != null) {
+                                try {
+                                    panelEventProvider.closePanel(panel.id, wid)
+                                } catch (e: CancellationException) {
+                                    // Must propagate, or the openTab below runs on a cancelled scope.
+                                    throw e
+                                } catch (_: Throwable) {
+                                    // Best effort: the tab is the point, and a failed collapse
+                                    // leaves a duplicate rather than nothing.
+                                }
+                            }
+                            hostTab?.let { ops?.openTab(it) }
+                        }
+                        return
+                    }
+
+                    // This host cannot host a panel in the main view — reveal it in the sidebar,
+                    // which is still opening the plugin, rather than reporting a failure the user
+                    // cannot act on.
+                    PanelLaunchRoute.SIDEBAR_REVEAL -> {
+                        revealInSidebar?.invoke()
+                        return
+                    }
+
+                    PanelLaunchRoute.NONE -> break
+                }
             }
         }
 

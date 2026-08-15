@@ -23,6 +23,18 @@ private const val PANEL_HOST_TAB_INFO_CLASS =
  * in the MAIN view instead of revealed in the sidebar. Null when this host cannot
  * do it, which the caller must treat as "fall back to the sidebar".
  *
+ * ## This is now the FALLBACK tier, not the goal
+ *
+ * boss-plugin-api 1.0.77 added `SplitViewOperations.openPanelAsTab` (BossConsole#177)
+ * and the caller prefers it wherever [supportsOpenPanelAsTab] says the host has it -
+ * that route is the host's own move, so the panel keeps its state, which this one
+ * cannot manage (see the ordering note in the caller). What is left here serves hosts
+ * pinned below that api, which this plugin still has to run on: it is a system plugin
+ * and its manifest floor deliberately did not move.
+ *
+ * Delete it when `minBossVersion` reaches the BossConsole release that carries
+ * `openPanelAsTab`, not before - at that point no supported host needs it.
+ *
  * ## Why this is reflective
  *
  * The capability exists and is exactly right — the host renders the panel's own
@@ -31,8 +43,11 @@ private const val PANEL_HOST_TAB_INFO_CLASS =
  * reachable only from inside the host: `PanelHostTabComponent` casts its config
  * to the concrete `PanelHostTabInfo`, so handing [SplitViewOperations.openTab] a
  * plugin-side [TabInfo] carrying the same `typeId` would land in that cast and
- * throw. Nothing in boss-plugin-api (through 1.0.76) exposes a promote-to-tab
- * call, so there is no supported construction path for it.
+ * throw. On the hosts this tier still serves - anything pinned to boss-plugin-api
+ * 1.0.76 or below - nothing in the api exposes a promote-to-tab call, so there is
+ * no supported construction path for it. (BossConsole#177 also made that cast a
+ * checked one, so the same attempt on a newer host is a dead tab rather than a
+ * throw; it is still not a way to open anything.)
  *
  * The classloader comes from the registered tab-type OBJECT rather than from
  * this plugin: host classes live in the app classloader, which is not the one
@@ -43,9 +58,8 @@ private const val PANEL_HOST_TAB_INFO_CLASS =
  * This binds to a host-internal name and constructor shape, so it is checked at
  * every call and degrades rather than throws: a host that predates the feature,
  * or one that renames the class, simply returns null here and the caller reveals
- * the panel in the sidebar as before. The durable fix is a real API on
- * `SplitViewOperations` (e.g. `openPanelAsTab(panelId)`); this should be deleted
- * the day that ships.
+ * the panel in the sidebar as before. That degradation is the whole reason it can
+ * stay while the supported route rolls out.
  */
 fun panelHostTabInfo(tabRegistry: TabRegistry?, panel: PanelInfo): TabInfo? {
     val hostTabType = tabRegistry?.getTabTypeInfo(PANEL_HOST_TAB_TYPE) ?: return null
