@@ -2065,25 +2065,22 @@ private fun InstalledPluginCard(
     onShowPermissions: () -> Unit = {}
 ) {
     val hasHomepage = !plugin.url.isNullOrBlank()
+    // The WHOLE card opens the plugin's page, padding included, because BossCard puts the click on
+    // its own Surface. The buttons and the homepage icon inside consume their own clicks, so they
+    // keep working; only the parts of the card that did nothing before are new.
+    val openCard: () -> Unit = onOpenPage ?: onOpenPlugin
 
-    BossCard {
+    BossCard(onClick = openCard) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open this plugin's PAGE, matching the Store and Updates
-            // tabs so one gesture means one thing everywhere. Launching the plugin has not been
-            // lost: that is the Open button, which renders whenever there is something to launch.
-            // A plugin with no page (a sideloaded jar) keeps the old behaviour rather than
-            // becoming inert.
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(4.dp))
-                    .clickable { (onOpenPage ?: onOpenPlugin)() }
-                    .padding(end = 8.dp)
-            ) {
+            // No click of its own any more: the card owns it, so the ripple covers the whole row
+            // rather than stopping at this column's edge. Launching the plugin has not been lost -
+            // that is the Open button, which renders whenever there is something to launch - and a
+            // plugin with no page (a sideloaded jar) still launches from the card.
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = plugin.displayName,
@@ -2402,30 +2399,17 @@ private fun AvailablePluginCard(
     onShowPermissions: () -> Unit = {}
 ) {
     val hasHomepage = plugin.url.isNotBlank()
+    // The whole card opens the plugin's page, falling back to the homepage for a catalogue row
+    // that names no organisation and so has no page.
+    val openCard: (() -> Unit)? = onOpenPage ?: onOpenHomepage.takeIf { hasHomepage }
 
-    BossCard {
+    BossCard(onClick = openCard) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open this plugin's page, falling back to the homepage for
-            // a row that names no organisation and so has no page.
-            val openLeft: (() -> Unit)? = onOpenPage ?: onOpenHomepage.takeIf { hasHomepage }
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .then(
-                        if (openLeft != null) {
-                            Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable { openLeft() }
-                                .padding(end = 8.dp)
-                        } else {
-                            Modifier
-                        }
-                    )
-            ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = plugin.displayName,
@@ -2714,26 +2698,16 @@ private fun UpdateCard(
     /** Open the plugin's page on the web. Null when the store row names no organisation. */
     onOpenPage: (() -> Unit)? = null
 ) {
-    BossCard {
+    // The whole card, like the other two tabs. Null when the store row names no organisation, and
+    // BossCard then renders exactly as it did before rather than a card that looks pressable and
+    // does nothing.
+    BossCard(onClick = onOpenPage) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .then(
-                        if (onOpenPage != null) {
-                            Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable { onOpenPage() }
-                                .padding(end = 8.dp)
-                        } else {
-                            Modifier
-                        }
-                    )
-            ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = update.displayName,
