@@ -347,6 +347,15 @@ fun organisationDomainError(domain: String): String? {
 }
 
 /**
+ * The system organisation's slug.
+ *
+ * The platform's own store, and the organisation every user is a member of. Named once here rather
+ * than typed at each call site: the publish-target default and the server-side derivation both key
+ * on it, and a literal in two places is a literal that eventually disagrees.
+ */
+const val SYSTEM_ORG_SLUG = "boss"
+
+/**
  * An organisation the signed-in user may publish a plugin for.
  *
  * [orgId] is what the publish request carries; [slug] and [name] are what the picker shows. All

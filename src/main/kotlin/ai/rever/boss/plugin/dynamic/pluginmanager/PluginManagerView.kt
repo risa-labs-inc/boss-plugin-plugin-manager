@@ -27,6 +27,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.SYSTEM_ORG_SLUG
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
@@ -3101,11 +3102,16 @@ private fun PublishTab(
         return
     }
 
-    // Defaults to the sole target when there is exactly one, because with one option a picker
-    // that starts empty is a required field disguised as a choice. With several it starts unset
-    // and the server derives, which is what happened before this control existed.
+    // Defaults to BOSS when it is on offer, because that is where a plugin belongs unless
+    // somebody decides otherwise - it is the platform's own store, and it is what every plugin
+    // published before this control existed was attributed to. Falling back to the sole target
+    // covers a user who cannot publish for boss but can for exactly one other organisation; with
+    // several and no boss it starts unset and the server derives, as it did before.
     var selectedOrgId by remember(publishTargets) {
-        mutableStateOf(publishTargets.singleOrNull()?.orgId)
+        mutableStateOf(
+            publishTargets.firstOrNull { it.slug == SYSTEM_ORG_SLUG }?.orgId
+                ?: publishTargets.singleOrNull()?.orgId
+        )
     }
     var pickingOrg by remember { mutableStateOf(false) }
 
@@ -3164,40 +3170,45 @@ private fun PublishTab(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        BossSection(
-            title = "Publish Plugin",
-            description = "Upload your plugin to the BOSS Plugin Store"
-        ) {
-            // WHO the plugin will belong to, first, because it is the one field on this form that
-            // is not about the artifact. It decides which organisation's admins can update the
-            // plugin afterwards, and it cannot be changed by republishing - ownership is resolved
-            // once, at creation.
-            //
-            // Only shown when the server has named at least one target. With none, no orgId is
-            // sent and the server derives it exactly as before, so a user it cannot answer for is
-            // no worse off than they were.
-            if (publishTargets.isNotEmpty()) {
+        // WHO the plugin will belong to. Its own card rather than a field inside "Publish
+        // Plugin", matching every other block on this tab - and because it is not a property of
+        // the artifact like the id or the version are. It decides which organisation's admins can
+        // update the plugin afterwards, and republishing does not change it.
+        //
+        // Only shown when the server has named at least one target. With none, no orgId is sent
+        // and the server derives it exactly as before, so a user it cannot answer for is no worse
+        // off than they were.
+        if (publishTargets.isNotEmpty()) {
+            BossSection(
+                title = "Organisation",
+                description = "Who this plugin will belong to in the store"
+            ) {
                 PublishOrgField(
                     targets = publishTargets,
                     selectedOrgId = selectedOrgId,
                     enabled = !isPublishing && !isFetching,
                     onClick = { pickingOrg = true }
                 )
-                Spacer(modifier = Modifier.height(12.dp))
             }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
 
-            if (pickingOrg) {
-                PublishOrgDialog(
-                    targets = publishTargets,
-                    selectedOrgId = selectedOrgId,
-                    onSelect = {
-                        selectedOrgId = it
-                        pickingOrg = false
-                    },
-                    onDismiss = { pickingOrg = false }
-                )
-            }
+        if (pickingOrg) {
+            PublishOrgDialog(
+                targets = publishTargets,
+                selectedOrgId = selectedOrgId,
+                onSelect = {
+                    selectedOrgId = it
+                    pickingOrg = false
+                },
+                onDismiss = { pickingOrg = false }
+            )
+        }
 
+        BossSection(
+            title = "Publish Plugin",
+            description = "Upload your plugin to the BOSS Plugin Store"
+        ) {
             // Source selection tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),

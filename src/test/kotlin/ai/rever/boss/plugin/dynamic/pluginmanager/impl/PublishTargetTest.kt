@@ -110,4 +110,44 @@ class PublishTargetTest {
                 .isEmpty(),
         )
     }
+
+    // -----------------------------------------------------------------------
+    // Which one starts selected
+    // -----------------------------------------------------------------------
+    //
+    // The rule lives in the composable, so these assert the inputs it keys on rather than the
+    // composable itself: that boss is identifiable by a shared constant, and that the parser
+    // preserves the ordering the picker's fallback depends on.
+
+    @Test
+    fun `boss is identified by a shared constant, not a literal at each call site`() {
+        // The publish-target default and the server-side derivation both key on this slug. A
+        // literal in two places is a literal that eventually disagrees.
+        assertEquals("boss", SYSTEM_ORG_SLUG)
+    }
+
+    @Test
+    fun `boss is offered and findable among several targets`() {
+        val targets = parsePublishTargets(
+            envelope(
+                row("id-risa", "risa", canPublish = true, name = "Risa Labs Inc"),
+                row("id-boss", SYSTEM_ORG_SLUG, canPublish = true, name = "BOSS"),
+            ),
+        )
+        // What the default selection looks up. If boss were filtered out as a system organisation
+        // - which the SERVER's derivation does - the Create tab would have no default at all.
+        assertEquals("id-boss", targets.firstOrNull { it.slug == SYSTEM_ORG_SLUG }?.orgId)
+    }
+
+    @Test
+    fun `a user who cannot publish for boss still gets their sole organisation`() {
+        val targets = parsePublishTargets(
+            envelope(
+                row("id-boss", SYSTEM_ORG_SLUG, canPublish = false, name = "BOSS"),
+                row("id-risa", "risa", canPublish = true, name = "Risa Labs Inc"),
+            ),
+        )
+        assertEquals(null, targets.firstOrNull { it.slug == SYSTEM_ORG_SLUG })
+        assertEquals("id-risa", targets.singleOrNull()?.orgId)
+    }
 }
