@@ -533,6 +533,21 @@ private fun PublishOrgField(
             enabled = false,
             modifier = Modifier.fillMaxWidth()
         )
+        // The affordance. A disabled field reads as "unavailable" on its own; the chevron is what
+        // says "there is a list behind this". BossTextField has no trailing-icon slot - its extra
+        // parameters are enabled, required and singleLine - so it is drawn over the field rather
+        // than passed to it.
+        Icon(
+            Icons.Default.KeyboardArrowDown,
+            contentDescription = "Choose an organisation",
+            tint = BossThemeColors.TextSecondary,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp)
+                .size(18.dp)
+        )
+        // LAST, so it is on top of both. A disabled text field's handling of pointer events is its
+        // own business, and a Box drawn over it receives the click whatever the field does.
         Box(
             modifier = Modifier
                 .matchParentSize()
