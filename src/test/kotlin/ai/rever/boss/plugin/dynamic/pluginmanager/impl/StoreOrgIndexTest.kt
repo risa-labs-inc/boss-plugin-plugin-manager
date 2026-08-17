@@ -13,23 +13,39 @@ import kotlin.test.assertTrue
  * failure is a badge that is silently absent or quietly wrong.
  */
 class StoreOrgIndexTest {
-    private fun item(pluginId: String, orgSlug: String = "boss") =
-        PluginStoreItem(pluginId = pluginId, displayName = pluginId, orgSlug = orgSlug)
+    private fun item(pluginId: String, orgSlug: String = "boss", author: String = "Risa Labs") =
+        PluginStoreItem(
+            pluginId = pluginId,
+            displayName = pluginId,
+            author = author,
+            orgSlug = orgSlug,
+        )
 
     @Test
-    fun `a plugin with an organisation is indexed by its plugin id`() {
-        val index = storeOrgSlugsByPluginId(
-            listOf(item("ai.rever.a", "boss"), item("ai.rever.b", "risa")),
+    fun `a plugin is indexed by its plugin id, with author and organisation together`() {
+        val index = storeProvenanceByPluginId(
+            listOf(item("ai.rever.a", "boss", "Risa Labs"), item("ai.rever.b", "risa", "Someone")),
         )
-        assertEquals("boss", index["ai.rever.a"])
-        assertEquals("risa", index["ai.rever.b"])
+        // Both facts from ONE lookup. Two parallel maps invited a call site that had the author
+        // and not the organisation, which is how the three tabs drifted apart.
+        assertEquals("boss", index["ai.rever.a"]?.orgSlug)
+        assertEquals("Risa Labs", index["ai.rever.a"]?.author)
+        assertEquals("risa", index["ai.rever.b"]?.orgSlug)
+        assertEquals("Someone", index["ai.rever.b"]?.author)
     }
 
     @Test
-    fun `a plugin with no organisation is omitted, not mapped to empty`() {
-        // The call sites use `index[id].orEmpty()`, so both an absent key and a mapped "" render
-        // nothing - but only omission keeps the map's size meaningful as "how many are attributed".
-        val index = storeOrgSlugsByPluginId(listOf(item("ai.rever.a", orgSlug = "")))
+    fun `a plugin with an author but no organisation is still indexed`() {
+        // One of the two is enough to be worth an entry. Dropping it because the organisation is
+        // missing would lose the author line as well, on a card that could have shown it.
+        val index = storeProvenanceByPluginId(listOf(item("ai.rever.a", orgSlug = "")))
+        assertEquals("Risa Labs", index["ai.rever.a"]?.author)
+        assertEquals("", index["ai.rever.a"]?.orgSlug)
+    }
+
+    @Test
+    fun `a plugin with neither is omitted entirely`() {
+        val index = storeProvenanceByPluginId(listOf(item("ai.rever.a", orgSlug = "", author = "")))
         assertTrue(index.isEmpty())
         assertFalse(index.containsKey("ai.rever.a"))
     }
@@ -38,7 +54,7 @@ class StoreOrgIndexTest {
     fun `an empty plugin id is dropped, so it cannot become a wildcard entry`() {
         // StoreOrgRow.pluginId is nullable on the wire and coalesces to "" here. An "" key would
         // match nothing at the call site, but it would also make the map look non-empty.
-        val index = storeOrgSlugsByPluginId(listOf(item("", "boss")))
+        val index = storeProvenanceByPluginId(listOf(item("", "boss")))
         assertTrue(index.isEmpty())
     }
 
@@ -47,10 +63,10 @@ class StoreOrgIndexTest {
         // plugins.plugin_id is unique, so this should be unreachable. associate would keep the
         // LAST occurrence, which would make the badge depend on the order the store happened to
         // return - a difference nothing else in the panel would explain.
-        val index = storeOrgSlugsByPluginId(
+        val index = storeProvenanceByPluginId(
             listOf(item("ai.rever.a", "boss"), item("ai.rever.a", "risa")),
         )
-        assertEquals("boss", index["ai.rever.a"])
+        assertEquals("boss", index["ai.rever.a"]?.orgSlug)
         assertEquals(1, index.size)
     }
 
@@ -58,7 +74,7 @@ class StoreOrgIndexTest {
     fun `an empty catalogue yields an empty map rather than throwing`() {
         // The state before the store fetch returns, and after it fails. Both must render no badge
         // on any tab, including Installed, which is the tab the panel opens on.
-        assertTrue(storeOrgSlugsByPluginId(emptyList()).isEmpty())
+        assertTrue(storeProvenanceByPluginId(emptyList()).isEmpty())
     }
 
     @Test
@@ -66,8 +82,8 @@ class StoreOrgIndexTest {
         // A sideloaded jar. The map is built only from the catalogue, so the lookup misses and the
         // card shows nothing - which is the informative outcome, since no organisation vouches
         // for it.
-        val index = storeOrgSlugsByPluginId(listOf(item("ai.rever.instore", "boss")))
-        assertEquals("", index["ai.rever.sideloaded"].orEmpty())
+        val index = storeProvenanceByPluginId(listOf(item("ai.rever.instore", "boss")))
+        assertEquals(null, index["ai.rever.sideloaded"])
     }
 
     // -----------------------------------------------------------------------
@@ -78,11 +94,11 @@ class StoreOrgIndexTest {
     fun `the offered organisations come from the catalogue, sorted and deduplicated`() {
         // Sorted so the chips do not reorder themselves between refreshes when the underlying
         // list order changes, which is the kind of movement nobody can explain from the UI.
-        val slugs = storeOrgSlugsByPluginIdFixtureOrgs()
+        val slugs = catalogueOrgs()
         assertEquals(listOf("boss", "risa"), slugs)
     }
 
-    private fun storeOrgSlugsByPluginIdFixtureOrgs(): List<String> =
+    private fun catalogueOrgs(): List<String> =
         storeOrgSlugs(
             listOf(
                 item("a", "risa"),

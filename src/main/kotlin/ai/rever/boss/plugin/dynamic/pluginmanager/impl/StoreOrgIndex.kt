@@ -3,19 +3,6 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem
 
 /**
- * Owning organisation slug, by plugin id, for the store catalogue.
- *
- * Pulled out of the composable that used to build it inline so the rule can be asserted. It is the
- * one place three tabs agree on what organisation a plugin belongs to, and each of the cases below
- * renders a badge that is either absent or wrong - neither of which a compile catches.
- *
- * A plugin with no known organisation is OMITTED rather than mapped to an empty string. The
- * difference matters at the call site: `map[id].orEmpty()` then yields "" for both "not in the
- * store" and "in the store with no organisation", and both must render nothing. Keeping the entry
- * out means the map's size is the number of plugins that actually have an organisation, which is
- * what makes it worth logging or counting later.
- */
-/**
  * The organisations present in the catalogue, for the filter control to offer.
  *
  * Derived rather than hardcoded: the set of organisations publishing to this store is not
@@ -68,13 +55,37 @@ fun matchesOrgFilter(
     filter: String?,
 ): Boolean = filter == null || orgSlug == filter
 
-fun storeOrgSlugsByPluginId(items: List<PluginStoreItem>): Map<String, String> =
+/**
+ * Where a plugin came from: who wrote it, and which organisation owns it.
+ *
+ * One value rather than two parallel maps, because the two are always rendered together and
+ * always come from the same catalogue row. Two maps invite a call site that has the author and not
+ * the organisation, which is how the three tabs drifted apart in the first place.
+ */
+data class StoreProvenance(
+    val author: String,
+    val orgSlug: String,
+)
+
+/**
+ * Provenance by plugin id, for the store catalogue.
+ *
+ * Pulled out of the composable that used to build it inline so the rule can be asserted. It is the
+ * one place three tabs agree on where a plugin came from, and each case below renders a line that
+ * is either absent or wrong - neither of which a compile catches.
+ *
+ * A plugin with NEITHER an author nor an organisation is OMITTED. One of the two is enough to be
+ * worth an entry: the store knows plenty of plugins whose `author_name` is blank, and dropping
+ * those would lose their organisation badge too.
+ */
+fun storeProvenanceByPluginId(items: List<PluginStoreItem>): Map<String, StoreProvenance> =
     items
         .asSequence()
-        .filter { it.pluginId.isNotEmpty() && it.orgSlug.isNotEmpty() }
+        .filter { it.pluginId.isNotEmpty() }
+        .filter { it.author.isNotEmpty() || it.orgSlug.isNotEmpty() }
         // A duplicate plugin id should not happen - `plugins.plugin_id` is unique - but associate
         // would silently keep the LAST occurrence, and a catalogue that somehow served two rows for
-        // one id would then depend on server ordering for which organisation is shown. First wins,
-        // matching the order the store returned.
+        // one id would then depend on server ordering for what is shown. First wins, matching the
+        // order the store returned.
         .distinctBy { it.pluginId }
-        .associate { it.pluginId to it.orgSlug }
+        .associate { it.pluginId to StoreProvenance(author = it.author, orgSlug = it.orgSlug) }

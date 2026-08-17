@@ -25,7 +25,8 @@ import ai.rever.boss.plugin.ui.BossThemeColors
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.filterOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugsByPluginId
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
@@ -491,6 +492,49 @@ private fun OrgFilterRow(
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 6.dp)
     )
+}
+
+/**
+ * Where a plugin came from, rendered identically on every card that shows one.
+ *
+ * ONE COMPOSABLE BECAUSE THE THREE TABS HAD DRIFTED. Available put the author under the
+ * description and the organisation beside it; Installed put the organisation up on the title row
+ * next to the version and showed no author at all; Updates put it on the title row after the name.
+ * Same two facts, three positions, and one of them silently missing half of it - which is what
+ * happens when each card is edited where it stands rather than through a shared piece.
+ *
+ * Placed under the description on every card, because that is the "about this plugin" region
+ * rather than the "what state is it in" region: the title row carries version, update and health,
+ * which change, while provenance does not.
+ *
+ * The two facts are not the same kind of thing and are deliberately styled differently. `author`
+ * is free text whoever published typed; the organisation is a row the store resolved, and it is
+ * what visibility and publish policy are actually keyed on. Hence prose against a mono badge.
+ *
+ * Renders NOTHING when both are absent - a sideloaded jar the store has never heard of - rather
+ * than an empty row that shifts every card below it.
+ */
+@Composable
+private fun ProvenanceLine(author: String, orgSlug: String) {
+    if (author.isEmpty() && orgSlug.isEmpty()) return
+
+    Spacer(Modifier.height(2.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (author.isNotEmpty()) {
+            Text(
+                text = "by $author",
+                color = BossThemeColors.TextMuted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+        }
+        if (orgSlug.isNotEmpty()) {
+            if (author.isNotEmpty()) Spacer(Modifier.width(6.dp))
+            OrgBadge(slug = orgSlug)
+        }
+    }
 }
 
 @Composable
@@ -1154,8 +1198,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
             //
             // Keyed on the list so it is not rebuilt per recomposition, and empty until the store
             // fetch returns - which renders no badge rather than a wrong one.
-            val orgByPluginId = remember(state.availablePlugins) {
-                storeOrgSlugsByPluginId(state.availablePlugins)
+            val provenanceByPluginId = remember(state.availablePlugins) {
+                storeProvenanceByPluginId(state.availablePlugins)
             }
             val orgSlugsInStore = remember(state.availablePlugins) {
                 storeOrgSlugs(state.availablePlugins)
@@ -1193,7 +1237,12 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 when (state.currentTab) {
                     PluginManagerTab.INSTALLED -> InstalledPluginsTab(
                         plugins = filterPlugins(state.installedPlugins, state.searchQuery)
-                            .filter { matchesOrgFilter(orgByPluginId[it.pluginId], state.orgFilter) },
+                            .filter {
+                                matchesOrgFilter(
+                                    provenanceByPluginId[it.pluginId]?.orgSlug,
+                                    state.orgFilter
+                                )
+                            },
                         inaccessiblePlugins = state.inaccessiblePlugins,
                         updateIds = state.updates.map { it.pluginId }.toSet(),
                         onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
@@ -1211,7 +1260,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version) },
                         mcpToolRegistry = viewModel.mcpToolRegistry,
                         permissionDescriptions = state.permissionDescriptions,
-                        orgByPluginId = orgByPluginId,
+                        provenanceByPluginId = provenanceByPluginId,
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
@@ -1248,12 +1297,17 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     )
                     PluginManagerTab.UPDATES -> UpdatesTab(
                         updates = state.updates
-                            .filter { matchesOrgFilter(orgByPluginId[it.pluginId], state.orgFilter) },
+                            .filter {
+                                matchesOrgFilter(
+                                    provenanceByPluginId[it.pluginId]?.orgSlug,
+                                    state.orgFilter
+                                )
+                            },
                         onUpdate = { id -> viewModel.updatePlugin(id) },
                         onUpdateAll = { viewModel.updateAllPlugins() },
                         isLoading = state.isLoading,
                         busyPlugins = state.busyPlugins,
-                        orgByPluginId = orgByPluginId
+                        provenanceByPluginId = provenanceByPluginId
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
@@ -1590,7 +1644,7 @@ private fun InstalledPluginsTab(
      * `availablePlugins`. A missing entry renders no badge, which is the honest answer for a
      * sideloaded jar and for the window before the store fetch returns.
      */
-    orgByPluginId: Map<String, String> = emptyMap(),
+    provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
     mcpToolRegistry: McpToolRegistry? = null,
     permissionDescriptions: Map<String, String> = emptyMap(),
     onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) }
@@ -1801,7 +1855,8 @@ private fun InstalledPluginsTab(
                     canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
                     isLoading = plugin.pluginId in busyPlugins,
-                    orgSlug = orgByPluginId[plugin.pluginId].orEmpty(),
+                    author = provenanceByPluginId[plugin.pluginId]?.author.orEmpty(),
+                    orgSlug = provenanceByPluginId[plugin.pluginId]?.orgSlug.orEmpty(),
                     mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
                     onShowMcp = { mcpDialogPlugin = plugin },
                     onShowPermissions = { permDialogPlugin = plugin }
@@ -1826,12 +1881,14 @@ private fun InstalledPluginCard(
     onShowVersions: () -> Unit,
     isLoading: Boolean,
     /**
-     * Slug of the organisation that owns this plugin in the store, or empty when unknown.
+     * Who published it, and the organisation that owns it. Empty when unknown.
      *
-     * Resolved by the caller from the store catalogue rather than read off [plugin]: an installed
-     * plugin is known from `installed.json` and the jar on disk, neither of which records an
-     * organisation. Empty is the normal answer for a sideloaded jar.
+     * BOTH resolved by the caller from the store catalogue rather than read off [plugin]: an
+     * installed plugin is known from `installed.json` and the jar on disk, and neither records an
+     * author or an organisation. Empty is the normal answer for a sideloaded jar, and renders no
+     * provenance line at all.
      */
+    author: String = "",
     orgSlug: String = "",
     /** Number of MCP tools this plugin contributes; 0 hides the MCP button. */
     mcpToolCount: Int = 0,
@@ -1884,15 +1941,6 @@ private fun InstalledPluginCard(
                         color = BossThemeColors.TextMuted,
                         fontSize = 11.sp
                     )
-                    // Blank for anything the store does not list - a sideloaded jar, or a plugin
-                    // whose visibility hides it from this reader. That absence is informative:
-                    // "no organisation vouches for this one" is exactly the case worth noticing on
-                    // the Installed tab, which is the only tab that can show a plugin the store
-                    // knows nothing about.
-                    if (orgSlug.isNotEmpty()) {
-                        Spacer(Modifier.width(6.dp))
-                        OrgBadge(slug = orgSlug)
-                    }
                     if (hasUpdate) {
                         Spacer(Modifier.width(6.dp))
                         Icon(
@@ -1938,6 +1986,7 @@ private fun InstalledPluginCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                ProvenanceLine(author = author, orgSlug = orgSlug)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2242,27 +2291,7 @@ private fun AvailablePluginCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                if (plugin.author.isNotEmpty() || plugin.orgSlug.isNotEmpty()) {
-                    Spacer(Modifier.height(2.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (plugin.author.isNotEmpty()) {
-                            Text(
-                                text = "by ${plugin.author}",
-                                color = BossThemeColors.TextMuted,
-                                fontSize = 11.sp
-                            )
-                        }
-                        // The owning organisation, beside the author because both answer "where
-                        // did this come from" - and they are not the same question. `author` is a
-                        // free-text string whoever published typed; the organisation is a real
-                        // row the store resolved, and it is what plugin visibility and publish
-                        // policy are actually keyed on.
-                        if (plugin.orgSlug.isNotEmpty()) {
-                            if (plugin.author.isNotEmpty()) Spacer(Modifier.width(6.dp))
-                            OrgBadge(slug = plugin.orgSlug)
-                        }
-                    }
-                }
+                ProvenanceLine(author = plugin.author, orgSlug = plugin.orgSlug)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2429,7 +2458,7 @@ private fun UpdatesTab(
      * `availablePlugins`. A missing entry renders no badge, which is the honest answer for a
      * sideloaded jar and for the window before the store fetch returns.
      */
-    orgByPluginId: Map<String, String> = emptyMap(),
+    provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
 ) {
     Column(
         modifier = Modifier
@@ -2476,7 +2505,8 @@ private fun UpdatesTab(
                         update = update,
                         onUpdate = { onUpdate(update.pluginId) },
                         isLoading = update.pluginId in busyPlugins,
-                        orgSlug = orgByPluginId[update.pluginId].orEmpty()
+                        author = provenanceByPluginId[update.pluginId]?.author.orEmpty(),
+                        orgSlug = provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty()
                     )
                 }
             }
@@ -2490,12 +2520,13 @@ private fun UpdateCard(
     onUpdate: () -> Unit,
     isLoading: Boolean,
     /**
-     * Slug of the organisation the NEW version comes from, or empty when unknown.
+     * Who the NEW version comes from. Empty when unknown.
      *
      * Worth showing here more than anywhere else: this card is a button that replaces running code,
-     * and the organisation is who the replacement is coming from. Resolved from the store
-     * catalogue, which is where the update itself was found.
+     * and this says who the replacement is coming from. Resolved from the store catalogue, which is
+     * where the update itself was found.
      */
+    author: String = "",
     orgSlug: String = ""
 ) {
     BossCard {
@@ -2528,10 +2559,6 @@ private fun UpdateCard(
                             )
                         }
                     }
-                    if (orgSlug.isNotEmpty()) {
-                        Spacer(Modifier.width(8.dp))
-                        OrgBadge(slug = orgSlug)
-                    }
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -2549,6 +2576,7 @@ private fun UpdateCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                ProvenanceLine(author = author, orgSlug = orgSlug)
             }
 
             BossPrimaryButton(
