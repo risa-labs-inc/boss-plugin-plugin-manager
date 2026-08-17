@@ -116,6 +116,21 @@ dependencies {
     compileOnly("io.ktor:ktor-client-cio:3.4.0")
 
     testImplementation(kotlin("test"))
+
+    // The serialization RUNTIME for tests, deliberately newer than the `implementation` above.
+    //
+    // The serialization compiler plugin here is 2.3.0 and emits serializers against a
+    // `GeneratedSerializer` ABI that 1.7.3 does not have, so touching any generated serializer in
+    // a test dies with `AbstractMethodError: GeneratedSerializer.typeParametersSerializers()`.
+    // Nothing had noticed because no test had ever decoded JSON - this plugin's first such test
+    // hit it immediately.
+    //
+    // Production is unaffected and the `implementation` pin is deliberately left alone:
+    // buildPluginJar bundles only `sourceSets.main.output` and `src/main/resources`, no
+    // dependencies at all, so the serialization runtime a loaded plugin uses is the HOST's. This
+    // line exists purely so the test JVM has a runtime matching the compiler that built it;
+    // Gradle resolves the higher version on the test classpath only.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
 }
 
 tasks.test {

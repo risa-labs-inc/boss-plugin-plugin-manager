@@ -22,6 +22,7 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugsByPluginId
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
@@ -92,6 +93,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -308,6 +310,40 @@ private fun FieldError(message: String) {
         color = BossThemeColors.ErrorColor,
         fontSize = 11.sp,
         modifier = Modifier.padding(top = 2.dp)
+    )
+}
+
+/**
+ * The organisation that owns a store plugin.
+ *
+ * Mono and slug-shaped (`@boss`), because that is what it IS - `organisations.slug` is validated
+ * `^[a-z][a-z0-9_]{1,30}$` and the organisation's roles are named after it. Setting it in the same
+ * face as the author's free-text name would suggest the two are the same kind of thing.
+ *
+ * A WASH BEHIND `TextSecondary`, never `AccentColor` as the text fill. Under the Blueprint theme
+ * `AccentColor` is `#0F5BFF`, which clears the 3:1 floor for a UI component but not the 4.5:1 for
+ * text - it is a fill colour, and the host corrected exactly this across ~90 call sites. A badge
+ * is emphasis, so it gets a background, not a coloured glyph.
+ *
+ * Every plugin in the store today resolves to `@boss`, the system organisation every user is a
+ * member of, so this currently reads the same on every card. That is not a bug to hide: it is the
+ * honest state, and it is what makes it visible that organisation ownership is not yet doing any
+ * work.
+ */
+@Composable
+private fun OrgBadge(slug: String) {
+    Text(
+        text = "@$slug",
+        color = BossThemeColors.TextSecondary,
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
+        maxLines = 1,
+        modifier = Modifier
+            .background(
+                BossThemeColors.TextMuted.copy(alpha = 0.14f),
+                RoundedCornerShape(4.dp)
+            )
+            .padding(horizontal = 5.dp, vertical = 1.dp)
     )
 }
 
@@ -967,6 +1003,20 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 )
             }
 
+            // Owning organisation per plugin id, built ONCE for every tab.
+            //
+            // The store catalogue is the only thing that knows this: an installed plugin is known
+            // from installed.json and the jar on disk, and an update from a version comparison -
+            // neither records an organisation. `availablePlugins` is only ever assigned the FULL
+            // fetch, never a filtered subset, so it is safe to key off even while a search is
+            // narrowing what the Available tab shows.
+            //
+            // Keyed on the list so it is not rebuilt per recomposition, and empty until the store
+            // fetch returns - which renders no badge rather than a wrong one.
+            val orgByPluginId = remember(state.availablePlugins) {
+                storeOrgSlugsByPluginId(state.availablePlugins)
+            }
+
             // Content based on selected tab
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth()
@@ -991,6 +1041,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version) },
                         mcpToolRegistry = viewModel.mcpToolRegistry,
                         permissionDescriptions = state.permissionDescriptions,
+                        orgByPluginId = orgByPluginId,
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
@@ -1026,7 +1077,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdate = { id -> viewModel.updatePlugin(id) },
                         onUpdateAll = { viewModel.updateAllPlugins() },
                         isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins
+                        busyPlugins = state.busyPlugins,
+                        orgByPluginId = orgByPluginId
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
@@ -1336,6 +1388,14 @@ private fun InstalledPluginsTab(
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
     onShowVersions: (InstalledPluginState) -> Unit = {},
+    /**
+     * Owning organisation slug per plugin id, from the store catalogue.
+     *
+     * Passed in rather than derived here so all three tabs read ONE map built once from
+     * `availablePlugins`. A missing entry renders no badge, which is the honest answer for a
+     * sideloaded jar and for the window before the store fetch returns.
+     */
+    orgByPluginId: Map<String, String> = emptyMap(),
     mcpToolRegistry: McpToolRegistry? = null,
     permissionDescriptions: Map<String, String> = emptyMap(),
     onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) }
@@ -1546,6 +1606,7 @@ private fun InstalledPluginsTab(
                     canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
                     isLoading = plugin.pluginId in busyPlugins,
+                    orgSlug = orgByPluginId[plugin.pluginId].orEmpty(),
                     mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
                     onShowMcp = { mcpDialogPlugin = plugin },
                     onShowPermissions = { permDialogPlugin = plugin }
@@ -1569,6 +1630,14 @@ private fun InstalledPluginCard(
     canOpen: Boolean = false,
     onShowVersions: () -> Unit,
     isLoading: Boolean,
+    /**
+     * Slug of the organisation that owns this plugin in the store, or empty when unknown.
+     *
+     * Resolved by the caller from the store catalogue rather than read off [plugin]: an installed
+     * plugin is known from `installed.json` and the jar on disk, neither of which records an
+     * organisation. Empty is the normal answer for a sideloaded jar.
+     */
+    orgSlug: String = "",
     /** Number of MCP tools this plugin contributes; 0 hides the MCP button. */
     mcpToolCount: Int = 0,
     onShowMcp: () -> Unit = {},
@@ -1620,6 +1689,15 @@ private fun InstalledPluginCard(
                         color = BossThemeColors.TextMuted,
                         fontSize = 11.sp
                     )
+                    // Blank for anything the store does not list - a sideloaded jar, or a plugin
+                    // whose visibility hides it from this reader. That absence is informative:
+                    // "no organisation vouches for this one" is exactly the case worth noticing on
+                    // the Installed tab, which is the only tab that can show a plugin the store
+                    // knows nothing about.
+                    if (orgSlug.isNotEmpty()) {
+                        Spacer(Modifier.width(6.dp))
+                        OrgBadge(slug = orgSlug)
+                    }
                     if (hasUpdate) {
                         Spacer(Modifier.width(6.dp))
                         Icon(
@@ -1969,13 +2047,26 @@ private fun AvailablePluginCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                if (plugin.author.isNotEmpty()) {
+                if (plugin.author.isNotEmpty() || plugin.orgSlug.isNotEmpty()) {
                     Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "by ${plugin.author}",
-                        color = BossThemeColors.TextMuted,
-                        fontSize = 11.sp
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (plugin.author.isNotEmpty()) {
+                            Text(
+                                text = "by ${plugin.author}",
+                                color = BossThemeColors.TextMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                        // The owning organisation, beside the author because both answer "where
+                        // did this come from" - and they are not the same question. `author` is a
+                        // free-text string whoever published typed; the organisation is a real
+                        // row the store resolved, and it is what plugin visibility and publish
+                        // policy are actually keyed on.
+                        if (plugin.orgSlug.isNotEmpty()) {
+                            if (plugin.author.isNotEmpty()) Spacer(Modifier.width(6.dp))
+                            OrgBadge(slug = plugin.orgSlug)
+                        }
+                    }
                 }
             }
 
@@ -2135,7 +2226,15 @@ private fun UpdatesTab(
     onUpdate: (String) -> Unit,
     onUpdateAll: () -> Unit,
     isLoading: Boolean,
-    busyPlugins: Set<String> = emptySet()
+    busyPlugins: Set<String> = emptySet(),
+    /**
+     * Owning organisation slug per plugin id, from the store catalogue.
+     *
+     * Passed in rather than derived here so all three tabs read ONE map built once from
+     * `availablePlugins`. A missing entry renders no badge, which is the honest answer for a
+     * sideloaded jar and for the window before the store fetch returns.
+     */
+    orgByPluginId: Map<String, String> = emptyMap(),
 ) {
     Column(
         modifier = Modifier
@@ -2181,7 +2280,8 @@ private fun UpdatesTab(
                     UpdateCard(
                         update = update,
                         onUpdate = { onUpdate(update.pluginId) },
-                        isLoading = update.pluginId in busyPlugins
+                        isLoading = update.pluginId in busyPlugins,
+                        orgSlug = orgByPluginId[update.pluginId].orEmpty()
                     )
                 }
             }
@@ -2193,7 +2293,15 @@ private fun UpdatesTab(
 private fun UpdateCard(
     update: UpdateInfo,
     onUpdate: () -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    /**
+     * Slug of the organisation the NEW version comes from, or empty when unknown.
+     *
+     * Worth showing here more than anywhere else: this card is a button that replaces running code,
+     * and the organisation is who the replacement is coming from. Resolved from the store
+     * catalogue, which is where the update itself was found.
+     */
+    orgSlug: String = ""
 ) {
     BossCard {
         Row(
@@ -2224,6 +2332,10 @@ private fun UpdateCard(
                                 fontWeight = FontWeight.Medium
                             )
                         }
+                    }
+                    if (orgSlug.isNotEmpty()) {
+                        Spacer(Modifier.width(8.dp))
+                        OrgBadge(slug = orgSlug)
                     }
                 }
                 Spacer(Modifier.height(4.dp))

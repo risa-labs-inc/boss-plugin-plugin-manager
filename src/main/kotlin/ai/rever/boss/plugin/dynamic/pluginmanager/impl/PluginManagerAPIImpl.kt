@@ -66,6 +66,21 @@ class PluginManagerAPIImpl(
         private const val SUPABASE_URL = "https://api.risaboss.com"
         private const val STORE_API_URL = "https://api.risaboss.com/functions/v1/plugin-store"
         private const val GITHUB_API_URL = "https://api.github.com"
+
+        /**
+         * Page size asked of `/list` when resolving owning organisations.
+         *
+         * The server caps this and returns its own maximum rather than erroring, so this is a
+         * request, not a guarantee - which is why the caller pages on `totalCount` instead of
+         * trusting one response to be complete.
+         */
+        private const val STORE_ORG_PAGE_SIZE = 100
+
+        /**
+         * Hard stop on that paging. The store list is read as `anon` and the view above caps at
+         * 50 rows anyway, so this is a runaway guard, not a real limit.
+         */
+        private const val MAX_STORE_ORG_PAGES = 10
         // Anon key injected at build time from gradle.properties / CI env var
         private val SUPABASE_ANON_KEY = ai.rever.boss.plugin.dynamic.pluginmanager.BuildConfig.SUPABASE_ANON_KEY
     }
@@ -222,7 +237,17 @@ class PluginManagerAPIImpl(
                 }
                 .decodeList<PluginWithVersionRow>()
 
+            // Which organisation owns each plugin. A SECOND source for one list, which is worth
+            // justifying rather than tidying away: the view above is the only thing that carries
+            // `latest_min_boss_version`, and that field gates whether an update is offered at all
+            // - so the list cannot simply be re-sourced from /list, which does not return it. The
+            // view in turn cannot carry the organisation, because it is `security_invoker` and
+            // this client reads as `anon`, which has no SELECT grant on `organisations`: a join
+            // would make the entire plugin list ERROR, not degrade.
+            val orgByPluginId = fetchStoreOrgs()
+
             val storeItems = rows.map { row ->
+                val org = orgByPluginId[row.pluginId]
                 PluginStoreItem(
                     id = row.id,
                     pluginId = row.pluginId,
@@ -240,7 +265,9 @@ class PluginManagerAPIImpl(
                     verified = row.verified,
                     iconUrl = row.iconUrl ?: "",
                     createdAt = row.createdAt ?: "",
-                    updatedAt = row.updatedAt ?: ""
+                    updatedAt = row.updatedAt ?: "",
+                    orgId = org?.orgId.orEmpty(),
+                    orgSlug = org?.orgSlug.orEmpty()
                 )
             }
 
@@ -253,6 +280,58 @@ class PluginManagerAPIImpl(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * Owning organisation per plugin id, from the store's own `/list`.
+     *
+     * FAILS SILENTLY, ON PURPOSE. This is a badge on a card. If the store is unreachable, the
+     * plugin list still came back from the view and must still render - degrading to no badge is
+     * the correct outcome, and turning a decoration into "the store is unreachable" would be a
+     * lie about the thing the user is looking at. Nothing here is load-bearing for install,
+     * update or permission checks.
+     *
+     * Paged, because `/list` caps `pageSize` server-side and silently returns its own maximum: a
+     * single request asking for everything would quietly cover only the first page, and the
+     * plugins missing a badge would be whichever ones sort last. `totalCount` is what says when
+     * to stop. The loop is bounded so a server that never advances cannot spin.
+     */
+    private fun fetchStoreOrgs(): Map<String, StoreOrgRow> {
+        val collected = mutableMapOf<String, StoreOrgRow>()
+        var page = 1
+        try {
+            while (page <= MAX_STORE_ORG_PAGES) {
+                val url = "$STORE_API_URL/list?page=$page&pageSize=$STORE_ORG_PAGE_SIZE"
+                val connection = URL(url).openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/json")
+                connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+                // No Authorization header. /list resolves under service role and answers the same
+                // public-and-published set to everyone, so a token would change nothing; sending
+                // one would only widen what this call could be blamed for.
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+
+                if (connection.responseCode != 200) return collected
+                val body = connection.inputStream.bufferedReader().readText()
+                val decoded = json.decodeFromString(StoreOrgListResponse.serializer(), body)
+
+                // An empty page ends the loop even if totalCount disagrees, so a wrong count on
+                // the server cannot turn this into MAX_STORE_ORG_PAGES pointless requests.
+                if (decoded.plugins.isEmpty()) return collected
+                decoded.plugins.forEach { row ->
+                    val id = row.pluginId
+                    if (!id.isNullOrBlank()) collected[id] = row
+                }
+                if (collected.size >= decoded.totalCount) return collected
+                page++
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Deliberately swallowed: see the note above about this being a badge.
+        }
+        return collected
     }
 
     override suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem> = withContext(Dispatchers.IO) {
