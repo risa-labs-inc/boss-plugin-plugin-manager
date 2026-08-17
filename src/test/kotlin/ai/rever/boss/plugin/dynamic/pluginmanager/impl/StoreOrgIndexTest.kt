@@ -69,4 +69,60 @@ class StoreOrgIndexTest {
         val index = storeOrgSlugsByPluginId(listOf(item("ai.rever.instore", "boss")))
         assertEquals("", index["ai.rever.sideloaded"].orEmpty())
     }
+
+    // -----------------------------------------------------------------------
+    // The organisation filter
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `the offered organisations come from the catalogue, sorted and deduplicated`() {
+        // Sorted so the chips do not reorder themselves between refreshes when the underlying
+        // list order changes, which is the kind of movement nobody can explain from the UI.
+        val slugs = storeOrgSlugsByPluginIdFixtureOrgs()
+        assertEquals(listOf("boss", "risa"), slugs)
+    }
+
+    private fun storeOrgSlugsByPluginIdFixtureOrgs(): List<String> =
+        storeOrgSlugs(
+            listOf(
+                item("a", "risa"),
+                item("b", "boss"),
+                item("c", "risa"),
+                item("d", ""),
+            ),
+        )
+
+    @Test
+    fun `no filter passes everything, including plugins with no organisation`() {
+        assertTrue(matchesOrgFilter("risa", null))
+        assertTrue(matchesOrgFilter(null, null))
+        assertTrue(matchesOrgFilter("", null))
+    }
+
+    @Test
+    fun `a set filter excludes plugins whose organisation is unknown`() {
+        // With @risa selected, a sideloaded plugin the store has never heard of is not a risa
+        // plugin. Passing it because its organisation is unknown would make the filter mean
+        // "risa, plus anything I could not classify".
+        assertFalse(matchesOrgFilter(null, "risa"))
+        assertFalse(matchesOrgFilter("", "risa"))
+    }
+
+    @Test
+    fun `a set filter matches only its own organisation`() {
+        assertTrue(matchesOrgFilter("risa", "risa"))
+        assertFalse(matchesOrgFilter("boss", "risa"))
+    }
+
+    @Test
+    fun `a catalogue with one organisation offers one chip, which the header hides`() {
+        // The header renders nothing below two, so this is the input that produces no control -
+        // worth pinning, because the alternative is a row of chips that all select everything.
+        assertEquals(listOf("boss"), storeOrgSlugs(listOf(item("a"), item("b"))))
+    }
+
+    @Test
+    fun `an empty catalogue offers nothing rather than throwing`() {
+        assertTrue(storeOrgSlugs(emptyList()).isEmpty())
+    }
 }

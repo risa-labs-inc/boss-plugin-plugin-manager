@@ -15,6 +15,38 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem
  * out means the map's size is the number of plugins that actually have an organisation, which is
  * what makes it worth logging or counting later.
  */
+/**
+ * The organisations present in the catalogue, for the filter control to offer.
+ *
+ * Derived rather than hardcoded: the set of organisations publishing to this store is not
+ * something the client knows, and a fixed list would go stale the first time somebody new
+ * publishes. Sorted so the control does not reorder itself between refreshes, which is what
+ * happens when the underlying list order changes and the chips follow it.
+ */
+fun storeOrgSlugs(items: List<PluginStoreItem>): List<String> =
+    items.asSequence()
+        .map { it.orgSlug }
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .sorted()
+        .toList()
+
+/**
+ * Does a plugin pass the current organisation filter?
+ *
+ * A null [filter] is "no filter" and passes everything, including plugins with no known
+ * organisation. A SET filter excludes them: with `@risa` selected, a sideloaded plugin the store
+ * has never heard of is not a risa plugin, and showing it because its organisation is unknown
+ * would make the filter mean "risa, plus anything I could not classify".
+ *
+ * [orgSlug] is nullable rather than defaulted because the three call sites source it differently:
+ * the store list has it on the item, while Installed and Updates look it up in a map that may miss.
+ */
+fun matchesOrgFilter(
+    orgSlug: String?,
+    filter: String?,
+): Boolean = filter == null || orgSlug == filter
+
 fun storeOrgSlugsByPluginId(items: List<PluginStoreItem>): Map<String, String> =
     items
         .asSequence()

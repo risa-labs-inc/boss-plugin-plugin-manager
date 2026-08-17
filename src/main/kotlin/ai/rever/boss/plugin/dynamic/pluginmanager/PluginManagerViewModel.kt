@@ -61,6 +61,14 @@ data class PluginManagerState(
     /** Per-plugin loading state — tracks which plugins are currently being installed/updated/uninstalled. */
     val busyPlugins: Set<String> = emptySet(),
     val searchQuery: String = "",
+    /**
+     * Organisation slug to narrow every tab to, or null for all of them.
+     *
+     * A slug rather than an id: it is what the badge shows and what the chip is labelled with, so
+     * comparing against the same string the user is reading leaves nothing to translate. The
+     * catalogue is the only source of both.
+     */
+    val orgFilter: String? = null,
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
     /** Whether the user may use the Create tab (store admin OR has plugins.create). */
@@ -341,6 +349,18 @@ class PluginManagerViewModel(
      */
     fun setSearchQuery(query: String) {
         _state.value = _state.value.copy(searchQuery = query)
+    }
+
+    /**
+     * Narrow every tab to one organisation, or clear it with null.
+     *
+     * Deliberately NOT reset when the tab changes. The filter is a statement about what the user
+     * is looking for, not about a screen, and clearing it on a tab switch would silently widen the
+     * list at the moment they moved from browsing the store to checking what they have installed -
+     * which is exactly when comparing the two matters.
+     */
+    fun setOrgFilter(slug: String?) {
+        _state.update { it.copy(orgFilter = slug) }
     }
 
     /**

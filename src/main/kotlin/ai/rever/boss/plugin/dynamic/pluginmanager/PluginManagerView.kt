@@ -22,6 +22,8 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugsByPluginId
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
@@ -330,6 +332,66 @@ private fun FieldError(message: String) {
  * honest state, and it is what makes it visible that organisation ownership is not yet doing any
  * work.
  */
+/**
+ * The organisation filter: "All", then one chip per organisation in the catalogue.
+ *
+ * Chips rather than a dropdown. There are two organisations today and realistically a handful
+ * ever, and a dropdown would hide the answer to "who publishes to this store" behind a click -
+ * which is the question that started this whole feature.
+ *
+ * Selecting the chip that is already selected clears the filter. Without that the only way back to
+ * "All" is to find that chip, and a toggle is what a single-select row of chips is expected to do.
+ *
+ * The selected chip is a WASH plus `TextPrimary`, never `AccentColor` as the text fill. Under
+ * Blueprint `AccentColor` is `#0F5BFF`, which clears 3:1 for a UI component but not 4.5:1 for
+ * text - it is a fill colour, and the host corrected exactly this across ~90 call sites.
+ */
+@Composable
+private fun OrgFilterChips(
+    slugs: List<String>,
+    selected: String?,
+    onSelect: (String?) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OrgFilterChip(label = "All", isSelected = selected == null, onClick = { onSelect(null) })
+        slugs.forEach { slug ->
+            Spacer(Modifier.width(3.dp))
+            OrgFilterChip(
+                label = "@$slug",
+                isSelected = selected == slug,
+                // Toggle: pressing the active chip returns to All.
+                onClick = { onSelect(if (selected == slug) null else slug) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun OrgFilterChip(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Text(
+        text = label,
+        color = if (isSelected) BossThemeColors.TextPrimary else BossThemeColors.TextMuted,
+        fontSize = 10.sp,
+        fontFamily = if (label == "All") FontFamily.Default else FontFamily.Monospace,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(
+                if (isSelected) {
+                    BossThemeColors.AccentColor.copy(alpha = 0.16f)
+                } else {
+                    BossThemeColors.TextMuted.copy(alpha = 0.10f)
+                }
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+    )
+}
+
 @Composable
 private fun OrgBadge(slug: String) {
     Text(
@@ -981,11 +1043,31 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 .background(BossThemeColors.BackgroundColor)
         ) {
             // Header with tabs and search
+            // Owning organisation per plugin id, built ONCE for every tab.
+            //
+            // The store catalogue is the only thing that knows this: an installed plugin is known
+            // from installed.json and the jar on disk, and an update from a version comparison -
+            // neither records an organisation. `availablePlugins` is only ever assigned the FULL
+            // fetch, never a filtered subset, so it is safe to key off even while a search is
+            // narrowing what the Available tab shows.
+            //
+            // Keyed on the list so it is not rebuilt per recomposition, and empty until the store
+            // fetch returns - which renders no badge rather than a wrong one.
+            val orgByPluginId = remember(state.availablePlugins) {
+                storeOrgSlugsByPluginId(state.availablePlugins)
+            }
+            val orgSlugsInStore = remember(state.availablePlugins) {
+                storeOrgSlugs(state.availablePlugins)
+            }
+
             PluginManagerHeader(
                 currentTab = state.currentTab,
                 updateCount = state.updates.size,
                 searchQuery = state.searchQuery,
                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
+                orgSlugs = orgSlugsInStore,
+                orgFilter = state.orgFilter,
+                onOrgFilterChange = { viewModel.setOrgFilter(it) },
                 onTabSelected = { viewModel.selectTab(it) },
                 onRefresh = { viewModel.refresh() },
                 isLoading = state.isLoading,
@@ -1003,27 +1085,14 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 )
             }
 
-            // Owning organisation per plugin id, built ONCE for every tab.
-            //
-            // The store catalogue is the only thing that knows this: an installed plugin is known
-            // from installed.json and the jar on disk, and an update from a version comparison -
-            // neither records an organisation. `availablePlugins` is only ever assigned the FULL
-            // fetch, never a filtered subset, so it is safe to key off even while a search is
-            // narrowing what the Available tab shows.
-            //
-            // Keyed on the list so it is not rebuilt per recomposition, and empty until the store
-            // fetch returns - which renders no badge rather than a wrong one.
-            val orgByPluginId = remember(state.availablePlugins) {
-                storeOrgSlugsByPluginId(state.availablePlugins)
-            }
-
             // Content based on selected tab
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth()
             ) {
                 when (state.currentTab) {
                     PluginManagerTab.INSTALLED -> InstalledPluginsTab(
-                        plugins = filterPlugins(state.installedPlugins, state.searchQuery),
+                        plugins = filterPlugins(state.installedPlugins, state.searchQuery)
+                            .filter { matchesOrgFilter(orgByPluginId[it.pluginId], state.orgFilter) },
                         inaccessiblePlugins = state.inaccessiblePlugins,
                         updateIds = state.updates.map { it.pluginId }.toSet(),
                         onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
@@ -1045,7 +1114,11 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
-                        plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
+                        // orgSlug off the item, not the map: on this tab the catalogue row IS
+                        // the source, so going through the map would add a lookup that can only
+                        // ever agree with it.
+                        plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery)
+                            .filter { matchesOrgFilter(it.orgSlug.ifEmpty { null }, state.orgFilter) },
                         installedIds = state.installedPlugins.map { it.pluginId }.toSet(),
                         updateIds = state.updates.map { it.pluginId }.toSet(),
                         onInstall = { pluginId -> viewModel.installFromRemote(pluginId) },
@@ -1073,7 +1146,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         permissionDescriptions = state.permissionDescriptions
                     )
                     PluginManagerTab.UPDATES -> UpdatesTab(
-                        updates = state.updates,
+                        updates = state.updates
+                            .filter { matchesOrgFilter(orgByPluginId[it.pluginId], state.orgFilter) },
                         onUpdate = { id -> viewModel.updatePlugin(id) },
                         onUpdateAll = { viewModel.updateAllPlugins() },
                         isLoading = state.isLoading,
@@ -1194,7 +1268,12 @@ private fun PluginManagerHeader(
     onRefresh: () -> Unit,
     isLoading: Boolean,
     canPublish: Boolean,
-    realtimeConnected: Boolean = false
+    realtimeConnected: Boolean = false,
+    /** Organisations present in the catalogue. Fewer than two renders no control. */
+    orgSlugs: List<String> = emptyList(),
+    /** The one currently selected, or null for all. */
+    orgFilter: String? = null,
+    onOrgFilterChange: (String?) -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -1249,6 +1328,21 @@ private fun PluginManagerHeader(
             placeholder = "Search...",
             modifier = Modifier.weight(1f)
         )
+
+        // Organisation filter. Beside search because it is the same act - narrowing the list -
+        // and it applies to whichever tab is showing, so it does not belong inside one of them.
+        //
+        // Hidden below two organisations: with everything published by one, every chip would
+        // select the whole list and the control would be decoration that costs header width on a
+        // panel that is often narrow.
+        if (orgSlugs.size > 1) {
+            Spacer(Modifier.width(6.dp))
+            OrgFilterChips(
+                slugs = orgSlugs,
+                selected = orgFilter,
+                onSelect = onOrgFilterChange
+            )
+        }
 
         Spacer(Modifier.width(4.dp))
 
