@@ -28,6 +28,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.SYSTEM_ORG_SLUG
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
@@ -1461,6 +1462,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdate = { id -> viewModel.updatePlugin(id) },
                         onUpdateAll = { viewModel.updateAllPlugins() },
                         isLoading = state.isLoading,
+                        onOpenUrl = { url -> viewModel.openUrl(url) },
                         busyPlugins = state.busyPlugins,
                         provenanceByPluginId = provenanceByPluginId
                     )
@@ -2009,6 +2011,10 @@ private fun InstalledPluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
                     onOpenPlugin = { onOpenPlugin(plugin) },
+                    onOpenPage = PluginPageUrl.forPlugin(
+                        provenanceByPluginId[plugin.pluginId]?.orgSlug.orEmpty(),
+                        plugin.pluginId,
+                    )?.let { url -> { onOpenHomepage(url) } },
                     canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
                     isLoading = plugin.pluginId in busyPlugins,
@@ -2033,6 +2039,12 @@ private fun InstalledPluginCard(
     onOpenHomepage: () -> Unit,
     /** Reveal the plugin itself (its panel or tab). */
     onOpenPlugin: () -> Unit,
+    /**
+     * Open this plugin's page on the web. Null when it has none, which is the normal answer for a
+     * sideloaded jar: the page lives under the organisation that owns the plugin, and nothing on
+     * disk records one.
+     */
+    onOpenPage: (() -> Unit)? = null,
     /** True when the plugin has a panel or tab to open, which is what renders the Open button. */
     canOpen: Boolean = false,
     onShowVersions: () -> Unit,
@@ -2060,14 +2072,16 @@ private fun InstalledPluginCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open the plugin itself. The homepage moved onto its own
-            // icon below: opening a GitHub page was never what "click the plugin" should mean,
-            // and it was the only thing this row did.
+            // Left side - clickable to open this plugin's PAGE, matching the Store and Updates
+            // tabs so one gesture means one thing everywhere. Launching the plugin has not been
+            // lost: that is the Open button, which renders whenever there is something to launch.
+            // A plugin with no page (a sideloaded jar) keeps the old behaviour rather than
+            // becoming inert.
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(4.dp))
-                    .clickable { onOpenPlugin() }
+                    .clickable { (onOpenPage ?: onOpenPlugin)() }
                     .padding(end = 8.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2356,6 +2370,8 @@ private fun AvailablePluginsTab(
                     canInstall = canInstall(plugin),
                     canOpen = plugin.pluginId in openablePlugins,
                     onOpenPlugin = { onOpenPlugin(plugin) },
+                    onOpenPage = PluginPageUrl.forPlugin(plugin.orgSlug, plugin.pluginId)
+                        ?.let { url -> { onOpenHomepage(url) } },
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins,
                     onShowPermissions = { permDialogItem = plugin }
@@ -2379,6 +2395,8 @@ private fun AvailablePluginCard(
     /** True when the plugin is installed AND has a panel or tab to open. */
     canOpen: Boolean = false,
     onOpenPlugin: () -> Unit = {},
+    /** Open this plugin's page on the web. Null when the catalogue row names no organisation. */
+    onOpenPage: (() -> Unit)? = null,
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     onShowPermissions: () -> Unit = {}
@@ -2391,15 +2409,17 @@ private fun AvailablePluginCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open homepage
+            // Left side - clickable to open this plugin's page, falling back to the homepage for
+            // a row that names no organisation and so has no page.
+            val openLeft: (() -> Unit)? = onOpenPage ?: onOpenHomepage.takeIf { hasHomepage }
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .then(
-                        if (hasHomepage) {
+                        if (openLeft != null) {
                             Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .clickable { onOpenHomepage() }
+                                .clickable { openLeft() }
                                 .padding(end = 8.dp)
                         } else {
                             Modifier
@@ -2616,6 +2636,8 @@ private fun UpdatesTab(
      * sideloaded jar and for the window before the store fetch returns.
      */
     provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
+    /** Open a web address. Used for the plugin page each row links to. */
+    onOpenUrl: (String) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -2663,7 +2685,11 @@ private fun UpdatesTab(
                         onUpdate = { onUpdate(update.pluginId) },
                         isLoading = update.pluginId in busyPlugins,
                         author = provenanceByPluginId[update.pluginId]?.author.orEmpty(),
-                        orgSlug = provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty()
+                        orgSlug = provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty(),
+                        onOpenPage = PluginPageUrl.forPlugin(
+                            provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty(),
+                            update.pluginId,
+                        )?.let { url -> { onOpenUrl(url) } }
                     )
                 }
             }
@@ -2684,7 +2710,9 @@ private fun UpdateCard(
      * where the update itself was found.
      */
     author: String = "",
-    orgSlug: String = ""
+    orgSlug: String = "",
+    /** Open the plugin's page on the web. Null when the store row names no organisation. */
+    onOpenPage: (() -> Unit)? = null
 ) {
     BossCard {
         Row(
@@ -2692,7 +2720,20 @@ private fun UpdateCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .then(
+                        if (onOpenPage != null) {
+                            Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable { onOpenPage() }
+                                .padding(end = 8.dp)
+                        } else {
+                            Modifier
+                        }
+                    )
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = update.displayName,
