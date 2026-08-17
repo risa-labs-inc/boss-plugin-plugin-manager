@@ -125,4 +125,45 @@ class StoreOrgIndexTest {
     fun `an empty catalogue offers nothing rather than throwing`() {
         assertTrue(storeOrgSlugs(emptyList()).isEmpty())
     }
+
+    // -----------------------------------------------------------------------
+    // Searching the organisation list, which is what makes the picker scale
+    // -----------------------------------------------------------------------
+
+    private val many = listOf("acme", "boss", "risa", "risa_labs", "zenith")
+
+    @Test
+    fun `a blank query shows every organisation`() {
+        // Opening the picker must show the full list, not an empty one waiting to be typed into.
+        assertEquals(many, filterOrgSlugs(many, ""))
+        assertEquals(many, filterOrgSlugs(many, "   "))
+    }
+
+    @Test
+    fun `matching is a substring, not a prefix`() {
+        // Slugs are compounds like risa_labs, and somebody types the part they remember rather
+        // than the part it starts with.
+        assertEquals(listOf("risa_labs"), filterOrgSlugs(many, "labs"))
+        assertEquals(listOf("risa", "risa_labs"), filterOrgSlugs(many, "risa"))
+    }
+
+    @Test
+    fun `a leading at sign is stripped, because that is what the control displays`() {
+        // The chip and the rows read "@risa". Typing what you see has to work.
+        assertEquals(listOf("risa", "risa_labs"), filterOrgSlugs(many, "@risa"))
+    }
+
+    @Test
+    fun `case is folded`() {
+        // Slugs are lowercase by their CHECK constraint, but nothing tells the person typing.
+        assertEquals(listOf("risa", "risa_labs"), filterOrgSlugs(many, "RISA"))
+        assertEquals(listOf("acme"), filterOrgSlugs(many, "AcMe"))
+    }
+
+    @Test
+    fun `no match yields an empty list rather than the whole list`() {
+        // Falling back to everything would make a typo look like "no filter applied", which is
+        // the opposite of what was asked for.
+        assertTrue(filterOrgSlugs(many, "nosuchorg").isEmpty())
+    }
 }

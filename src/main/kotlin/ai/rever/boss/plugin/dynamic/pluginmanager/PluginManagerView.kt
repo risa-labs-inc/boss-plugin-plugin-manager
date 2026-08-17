@@ -22,6 +22,7 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.filterOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugsByPluginId
@@ -95,6 +96,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -333,62 +335,161 @@ private fun FieldError(message: String) {
  * work.
  */
 /**
- * The organisation filter: "All", then one chip per organisation in the catalogue.
+ * The organisation filter: a compact control that opens a searchable picker.
  *
- * Chips rather than a dropdown. There are two organisations today and realistically a handful
- * ever, and a dropdown would hide the answer to "who publishes to this store" behind a click -
- * which is the question that started this whole feature.
+ * WAS A ROW OF CHIPS, and that does not survive growth. One chip per organisation is fine at two
+ * and unreadable at twenty: the row either wraps and eats the header or scrolls sideways, and
+ * either way the organisation somebody wants is the one off-screen. A select degrades gracefully -
+ * the control stays one width whatever the catalogue holds, and the list inside it is searchable.
  *
- * Selecting the chip that is already selected clears the filter. Without that the only way back to
- * "All" is to find that chip, and a toggle is what a single-select row of chips is expected to do.
- *
- * The selected chip is a WASH plus `TextPrimary`, never `AccentColor` as the text fill. Under
- * Blueprint `AccentColor` is `#0F5BFF`, which clears 3:1 for a UI component but not 4.5:1 for
- * text - it is a fill colour, and the host corrected exactly this across ~90 call sites.
+ * A DIALOG RATHER THAN A DROPDOWN MENU, and not by preference. Compose's `DropdownMenu` is a
+ * Popup, and under JxBrowser HARDWARE_ACCELERATED - the host default on every platform since
+ * BossConsole 9.4.1 - Chromium composites its own native window over the Compose scene, so a
+ * Popup in a plugin panel draws BEHIND the page. That is the same bug that had the version sheet
+ * cropped, and it is why every overlay in this file goes through `BossDialog`, which routes to the
+ * host's always-on-top overlay window. There is no `BossPopup` at the declared api floor of
+ * 1.0.73, so a dialog is the only overlay available that actually appears.
  */
 @Composable
-private fun OrgFilterChips(
+private fun OrgFilterControl(
     slugs: List<String>,
     selected: String?,
     onSelect: (String?) -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        OrgFilterChip(label = "All", isSelected = selected == null, onClick = { onSelect(null) })
-        slugs.forEach { slug ->
-            Spacer(Modifier.width(3.dp))
-            OrgFilterChip(
-                label = "@$slug",
-                isSelected = selected == slug,
-                // Toggle: pressing the active chip returns to All.
-                onClick = { onSelect(if (selected == slug) null else slug) }
-            )
-        }
-    }
-}
+    var picking by remember { mutableStateOf(false) }
 
-@Composable
-private fun OrgFilterChip(
-    label: String,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
     Text(
-        text = label,
-        color = if (isSelected) BossThemeColors.TextPrimary else BossThemeColors.TextMuted,
+        text = selected?.let { "@$it" } ?: "All orgs",
+        color = if (selected != null) BossThemeColors.TextPrimary else BossThemeColors.TextMuted,
         fontSize = 10.sp,
-        fontFamily = if (label == "All") FontFamily.Default else FontFamily.Monospace,
+        // Mono only when it is showing a slug, which is an identifier. "All orgs" is prose.
+        fontFamily = if (selected != null) FontFamily.Monospace else FontFamily.Default,
         maxLines = 1,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
+            // A wash when filtering, so an active filter is visible without reading the label -
+            // otherwise a list narrowed to one organisation looks like a list with few plugins.
             .background(
-                if (isSelected) {
+                if (selected != null) {
                     BossThemeColors.AccentColor.copy(alpha = 0.16f)
                 } else {
                     BossThemeColors.TextMuted.copy(alpha = 0.10f)
                 }
             )
-            .clickable { onClick() }
+            .clickable { picking = true }
             .padding(horizontal = 6.dp, vertical = 3.dp)
+    )
+
+    if (picking) {
+        OrgFilterDialog(
+            slugs = slugs,
+            selected = selected,
+            onSelect = {
+                onSelect(it)
+                picking = false
+            },
+            onDismiss = { picking = false }
+        )
+    }
+}
+
+/**
+ * The picker itself: a search field over the organisation list.
+ *
+ * The field is what makes this scale, so it is always present rather than appearing past some
+ * threshold - a control that changes shape as data grows is one more thing to explain, and the
+ * field costs one row.
+ *
+ * "All organisations" is a row in the list rather than a separate Clear button, so choosing and
+ * un-choosing are the same gesture in the same place.
+ */
+@Composable
+private fun OrgFilterDialog(
+    slugs: List<String>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val shown = remember(slugs, query) { filterOrgSlugs(slugs, query) }
+
+    BossDialog(onDismissRequest = onDismiss) {
+        BossCard(modifier = Modifier.width(320.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Filter by organisation",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+
+                BossTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = "",
+                    placeholder = "Search organisations..."
+                )
+                Spacer(Modifier.height(8.dp))
+
+                OrgFilterRow(
+                    label = "All organisations",
+                    mono = false,
+                    isSelected = selected == null,
+                    onClick = { onSelect(null) }
+                )
+
+                // Bounded, so a long list scrolls inside the dialog instead of growing it past
+                // the window. LazyColumn rather than a Column in a scroll, because the whole
+                // point of this change is that the list may be long.
+                LazyColumn(modifier = Modifier.heightIn(max = 260.dp)) {
+                    items(shown, key = { it }) { slug ->
+                        OrgFilterRow(
+                            label = "@$slug",
+                            mono = true,
+                            isSelected = selected == slug,
+                            onClick = { onSelect(slug) }
+                        )
+                    }
+                }
+
+                if (shown.isEmpty() && query.isNotBlank()) {
+                    Text(
+                        text = "No organisation matches \"$query\".",
+                        color = BossThemeColors.TextMuted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OrgFilterRow(
+    label: String,
+    mono: Boolean,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Text(
+        text = label,
+        color = if (isSelected) BossThemeColors.TextPrimary else BossThemeColors.TextSecondary,
+        fontSize = 12.sp,
+        fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+        maxLines = 1,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            // A wash behind TextPrimary marks the selection, never AccentColor as the text fill:
+            // under Blueprint that is #0F5BFF, which clears 3:1 for a UI component but not 4.5:1
+            // for text.
+            .background(
+                if (isSelected) BossThemeColors.AccentColor.copy(alpha = 0.16f) else Color.Transparent
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 6.dp)
     )
 }
 
@@ -1337,7 +1438,7 @@ private fun PluginManagerHeader(
         // panel that is often narrow.
         if (orgSlugs.size > 1) {
             Spacer(Modifier.width(6.dp))
-            OrgFilterChips(
+            OrgFilterControl(
                 slugs = orgSlugs,
                 selected = orgFilter,
                 onSelect = onOrgFilterChange

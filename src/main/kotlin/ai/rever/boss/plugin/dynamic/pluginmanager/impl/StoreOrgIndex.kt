@@ -32,6 +32,27 @@ fun storeOrgSlugs(items: List<PluginStoreItem>): List<String> =
         .toList()
 
 /**
+ * Narrow the organisation list by what was typed into the picker.
+ *
+ * Substring, not prefix: an organisation slug is often a compound like `risa_labs`, and somebody
+ * looking for it types the part they remember rather than the part it starts with.
+ *
+ * The leading `@` is stripped from the query, because the control displays slugs as `@risa` and
+ * typing what you see must work. Case is folded for the same reason - slugs are lowercase by
+ * their CHECK constraint, but nothing tells the person typing that.
+ *
+ * A blank query returns everything rather than nothing, so opening the picker shows the full list.
+ */
+fun filterOrgSlugs(
+    slugs: List<String>,
+    query: String,
+): List<String> {
+    val needle = query.trim().removePrefix("@").lowercase()
+    if (needle.isEmpty()) return slugs
+    return slugs.filter { it.lowercase().contains(needle) }
+}
+
+/**
  * Does a plugin pass the current organisation filter?
  *
  * A null [filter] is "no filter" and passes everything, including plugins with no known
