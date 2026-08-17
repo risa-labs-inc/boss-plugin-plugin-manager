@@ -27,6 +27,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
@@ -66,6 +67,7 @@ import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
 import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -492,6 +494,172 @@ private fun OrgFilterRow(
             .clickable { onClick() }
             .padding(horizontal = 8.dp, vertical = 6.dp)
     )
+}
+
+/**
+ * The organisation a plugin is about to be published under.
+ *
+ * A read-only field that opens a picker, rather than a text input: the value is an organisation id
+ * and the list is the server's own answer to "may I publish here", so there is nothing useful to
+ * type. Styled as a field because that is what it is - one of the things being submitted - and not
+ * as the header's filter chip, which changes what you are looking at rather than what you are
+ * about to do.
+ *
+ * Shows the NAME with the slug beside it. The name is what a person recognises; the slug is the
+ * identifier that appears on the badge afterwards, so showing both means the choice made here and
+ * the badge seen later are visibly the same thing.
+ */
+@Composable
+private fun PublishOrgField(
+    targets: List<PublishTarget>,
+    selectedOrgId: String?,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val selected = targets.firstOrNull { it.orgId == selectedOrgId }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Publish for",
+            color = BossThemeColors.TextSecondary,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(BossThemeColors.TextMuted.copy(alpha = 0.10f))
+                .clickable(enabled = enabled) { onClick() }
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            if (selected == null) {
+                // Not an error state. Nothing is sent, and the server derives the organisation the
+                // same way it does for a CI publish - so the wording says what will happen rather
+                // than demanding a choice.
+                Text(
+                    text = "Choose an organisation (otherwise decided for you)",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                Text(
+                    text = selected.name,
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(Modifier.width(6.dp))
+                OrgBadge(slug = selected.slug)
+                Spacer(Modifier.weight(1f))
+            }
+            Icon(
+                Icons.Default.KeyboardArrowDown,
+                contentDescription = "Choose an organisation",
+                modifier = Modifier.size(16.dp),
+                tint = BossThemeColors.TextMuted
+            )
+        }
+        Text(
+            // Said here because it is not recoverable from this screen: a version publish never
+            // re-derives ownership, so republishing does not move it.
+            text = "Decides which organisation's admins can update this plugin. Set once, when the plugin is created.",
+            color = BossThemeColors.TextMuted,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(top = 3.dp)
+        )
+    }
+}
+
+/**
+ * The picker for [PublishOrgField].
+ *
+ * A `BossDialog` for the same reason the filter picker is one: Compose's `DropdownMenu` is a Popup,
+ * and under the host's hardware-accelerated browser a Popup in a plugin panel draws behind the
+ * page. There is no `BossPopup` at the api floor of 1.0.73.
+ *
+ * No "let the server decide" row once a choice exists. Offering it would invite somebody to pick
+ * the vaguest option on the one field here that cannot be changed afterwards.
+ */
+@Composable
+private fun PublishOrgDialog(
+    targets: List<PublishTarget>,
+    selectedOrgId: String?,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val shown = remember(targets, query) {
+        val needle = query.trim().removePrefix("@").lowercase()
+        if (needle.isEmpty()) {
+            targets
+        } else {
+            targets.filter {
+                it.slug.lowercase().contains(needle) || it.name.lowercase().contains(needle)
+            }
+        }
+    }
+
+    BossDialog(onDismissRequest = onDismiss) {
+        BossCard(modifier = Modifier.width(320.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Publish for",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    // The list is the server's answer, not a guess this side made, so an
+                    // organisation somebody expects and cannot see is a permissions question
+                    // rather than a bug in the picker.
+                    text = "Only organisations you may publish for are listed.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(8.dp))
+
+                BossTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = "",
+                    placeholder = "Search organisations..."
+                )
+                Spacer(Modifier.height(8.dp))
+
+                LazyColumn(modifier = Modifier.heightIn(max = 260.dp)) {
+                    items(shown, key = { it.orgId }) { target ->
+                        OrgFilterRow(
+                            label = "${target.name}  @${target.slug}",
+                            mono = false,
+                            isSelected = target.orgId == selectedOrgId,
+                            onClick = { onSelect(target.orgId) }
+                        )
+                    }
+                }
+
+                if (shown.isEmpty()) {
+                    Text(
+                        text = if (query.isBlank()) {
+                            "You cannot publish for any organisation yet."
+                        } else {
+                            "No organisation matches \"$query\"."
+                        },
+                        color = BossThemeColors.TextMuted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -1312,6 +1480,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
                         canPublish = state.canPublish,
+                        publishTargets = state.publishTargets,
                         organisationCta = organisationCta,
                         onOrganisationAction = { viewModel.onOrganisationCta() },
                         toolCreatorInstalled = state.installedPlugins.any {
@@ -1323,7 +1492,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         },
                         onBrowseJar = { onResult -> viewModel.browseForPluginJar(onResult) },
                         onExtractManifest = { jarPath, onResult -> viewModel.extractManifest(jarPath, onResult) },
-                        onPublish = { jarPath, pluginId, displayName, version, homepageUrl, authorName, description, changelog, tags, iconUrl, pluginType, apiVersion, minBossVersion, onProgress, onSuccess, onError ->
+                        onPublish = { jarPath, pluginId, displayName, version, homepageUrl, authorName, description, changelog, tags, iconUrl, pluginType, apiVersion, minBossVersion, orgId, onProgress, onSuccess, onError ->
                             viewModel.publishPlugin(
                                 jarPath = jarPath,
                                 pluginId = pluginId,
@@ -1338,6 +1507,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                                 pluginType = pluginType,
                                 apiVersion = apiVersion,
                                 minBossVersion = minBossVersion,
+                                orgId = orgId,
                                 onProgress = onProgress,
                                 onSuccess = onSuccess,
                                 onError = onError
@@ -2875,6 +3045,14 @@ private fun PublishTab(
      * are not.
      */
     canPublish: Boolean,
+    /**
+     * Organisations this user may publish for, from the server's own `can_publish`.
+     *
+     * Empty renders no picker and sends no `orgId`, which leaves the server to derive it exactly
+     * as it did before this control existed - so a user the server cannot answer for is no worse
+     * off than they were.
+     */
+    publishTargets: List<PublishTarget>,
     organisationCta: OrganisationCta?,
     onOrganisationAction: () -> Unit,
     toolCreatorInstalled: Boolean,
@@ -2902,6 +3080,7 @@ private fun PublishTab(
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        orgId: String?,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -2921,6 +3100,14 @@ private fun PublishTab(
         }
         return
     }
+
+    // Defaults to the sole target when there is exactly one, because with one option a picker
+    // that starts empty is a required field disguised as a choice. With several it starts unset
+    // and the server derives, which is what happened before this control existed.
+    var selectedOrgId by remember(publishTargets) {
+        mutableStateOf(publishTargets.singleOrNull()?.orgId)
+    }
+    var pickingOrg by remember { mutableStateOf(false) }
 
     var jarSource by remember { mutableStateOf(JarSource.GITHUB) }
     var gitHubUrl by remember { mutableStateOf("") }
@@ -2981,6 +3168,36 @@ private fun PublishTab(
             title = "Publish Plugin",
             description = "Upload your plugin to the BOSS Plugin Store"
         ) {
+            // WHO the plugin will belong to, first, because it is the one field on this form that
+            // is not about the artifact. It decides which organisation's admins can update the
+            // plugin afterwards, and it cannot be changed by republishing - ownership is resolved
+            // once, at creation.
+            //
+            // Only shown when the server has named at least one target. With none, no orgId is
+            // sent and the server derives it exactly as before, so a user it cannot answer for is
+            // no worse off than they were.
+            if (publishTargets.isNotEmpty()) {
+                PublishOrgField(
+                    targets = publishTargets,
+                    selectedOrgId = selectedOrgId,
+                    enabled = !isPublishing && !isFetching,
+                    onClick = { pickingOrg = true }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (pickingOrg) {
+                PublishOrgDialog(
+                    targets = publishTargets,
+                    selectedOrgId = selectedOrgId,
+                    onSelect = {
+                        selectedOrgId = it
+                        pickingOrg = false
+                    },
+                    onDismiss = { pickingOrg = false }
+                )
+            }
+
             // Source selection tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -3455,6 +3672,7 @@ private fun PublishTab(
                                 pluginType.value,
                                 apiVersion.ifBlank { "1.0" },
                                 minBossVersion.ifBlank { "1.0.0" },
+                                selectedOrgId,
                                 { progress -> publishProgress = progress },
                                 { result ->
                                     isPublishing = false

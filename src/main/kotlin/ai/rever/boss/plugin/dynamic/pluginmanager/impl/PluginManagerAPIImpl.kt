@@ -1581,6 +1581,7 @@ class PluginManagerAPIImpl(
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        orgId: String?,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -1601,6 +1602,7 @@ class PluginManagerAPIImpl(
                     githubUrl = homepageUrl,
                     changelog = changelog,
                     tags = tags,
+                    orgId = orgId,
                     accessToken = accessToken,
                     onProgress = onProgress,
                     onSuccess = onSuccess,
@@ -1634,11 +1636,22 @@ class PluginManagerAPIImpl(
                 append("\"homepageUrl\": \"${homepageUrl.replace("\"", "\\\"")}\",")
                 append("\"type\": \"$pluginType\",")
                 append("\"apiVersion\": \"$apiVersion\"")
+                // Only when chosen. Omitting the key lets the server derive the organisation the
+                // way it does for a CI publish; sending an empty string would be a value it has to
+                // reject.
+                if (!orgId.isNullOrBlank()) {
+                    append(",\"orgId\": \"$orgId\"")
+                }
                 if (!iconUrl.isNullOrBlank()) {
                     append(",\"iconUrl\": \"${iconUrl.replace("\"", "\\\"")}\"")
                 }
                 if (tags.isNotEmpty()) {
                     append(",\"tags\": [${tags.joinToString(",") { "\"$it\"" }}]")
+                }
+                // Only when chosen, so omitting it keeps the server's own derivation - which is
+                // what a CI publish relies on, since the workflow sends no organisation at all.
+                if (!orgId.isNullOrBlank()) {
+                    append(",\"orgId\": \"$orgId\"")
                 }
                 if (requiredPerms.isNotEmpty()) {
                     append(",\"requiredPermissions\": [${requiredPerms.joinToString(",") { "\"${it.replace("\"", "\\\"")}\"" }}]")
@@ -1782,6 +1795,7 @@ class PluginManagerAPIImpl(
         githubUrl: String,
         changelog: String?,
         tags: List<String>,
+        orgId: String?,
         accessToken: String,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,

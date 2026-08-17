@@ -345,3 +345,66 @@ fun organisationDomainError(domain: String): String? {
         else -> null
     }
 }
+
+/**
+ * An organisation the signed-in user may publish a plugin for.
+ *
+ * [orgId] is what the publish request carries; [slug] and [name] are what the picker shows. All
+ * three come from one `get_my_organisations` row, so a target cannot exist with an id the server
+ * would not recognise.
+ */
+data class PublishTarget(
+    val orgId: String,
+    val slug: String,
+    val name: String,
+)
+
+/**
+ * The organisations this user may publish for, from a `get_my_organisations` response.
+ *
+ * FILTERED ON THE SERVER'S OWN ANSWER, never re-derived here. `can_publish` is computed by
+ * `user_can_publish_org_plugin` - the same function the publish endpoint gates on - so a target in
+ * this list is one the server will accept, and one it rejects never appears. Reimplementing the
+ * policy client-side (owner_only, admins, members, publish_role_id) would be a second copy that
+ * drifts, and every drift is either a 403 on a plugin somebody was told they could publish or an
+ * option missing for one they can.
+ *
+ * Returns empty for anything that is not a confident answer: a refusal, malformed JSON, or no
+ * provider. Empty means the picker is not offered and the server derives the organisation as
+ * before - which is the safe direction, since it cannot attribute a plugin somewhere the user
+ * did not choose.
+ *
+ * `is_system` organisations are NOT excluded here, unlike the publish path's own derivation. There
+ * the point was that `boss` holds everyone so it could not disambiguate; here the user is picking
+ * explicitly, and "publish this to the BOSS store itself" is a legitimate thing to choose when the
+ * server says they may.
+ */
+fun parsePublishTargets(raw: String?): List<PublishTarget> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching {
+        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return emptyList()
+        if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return emptyList()
+        val rows = root["data"] as? JsonArray ?: return emptyList()
+
+        rows.mapNotNull { element ->
+            val row = element as? JsonObject ?: return@mapNotNull null
+            if (row["can_publish"]?.jsonPrimitive?.booleanOrNull != true) return@mapNotNull null
+
+            // An active membership only. A pending or invited row can carry can_publish = true for
+            // a global admin, and offering an organisation somebody has not joined as a publish
+            // target reads as membership they do not have.
+            val status = row["status"]?.jsonPrimitive?.contentOrNull
+            if (status != null && status != "active") return@mapNotNull null
+
+            val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val slug = row["slug"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            PublishTarget(
+                orgId = id,
+                slug = slug,
+                // Falls back to the slug rather than dropping the row: a nameless organisation is
+                // still one you may publish for.
+                name = row["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: slug,
+            )
+        }
+    }.getOrDefault(emptyList())
+}

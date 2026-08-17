@@ -15,6 +15,8 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.supportsOpenPanelAsTab
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePublishTargets
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.retainPendingRequest
@@ -69,6 +71,13 @@ data class PluginManagerState(
      * catalogue is the only source of both.
      */
     val orgFilter: String? = null,
+    /**
+     * Organisations the signed-in user may publish a plugin for.
+     *
+     * From the server's own `can_publish`, so an entry here is one the publish endpoint will
+     * accept. Empty offers no picker and lets the server derive the organisation as before.
+     */
+    val publishTargets: List<PublishTarget> = emptyList(),
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
     /** Whether the user may use the Create tab (store admin OR has plugins.create). */
@@ -734,6 +743,10 @@ class PluginManagerViewModel(
             val raw =
                 runCatching { supabase.rpc("get_my_organisations", "{}").getOrNull() }.getOrNull()
             val membership = parseMembership(raw)
+            // Same response, second question. get_my_organisations already projects can_publish
+            // per row, so the publish picker costs no extra round trip - and cannot disagree with
+            // the membership shown beside it, since both are read from one answer.
+            val targets = parsePublishTargets(raw)
 
             // Only asked when it can change the answer. A member already gets
             // INSTALL_PLUGIN or OPEN, so the extra round trip would buy nothing.
@@ -756,6 +769,7 @@ class PluginManagerViewModel(
             _state.value =
                 _state.value.copy(
                     membership = membership,
+                    publishTargets = targets,
                     // Never downgraded by a refresh - see retainPendingRequest for why a
                     // server `false` is not evidence of absence.
                     hasPendingOrgRequest =
@@ -1310,6 +1324,7 @@ class PluginManagerViewModel(
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        orgId: String? = null,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -1329,6 +1344,7 @@ class PluginManagerViewModel(
                 pluginType = pluginType,
                 apiVersion = apiVersion,
                 minBossVersion = minBossVersion,
+                orgId = orgId,
                 onProgress = onProgress,
                 onSuccess = onSuccess,
                 onError = onError
