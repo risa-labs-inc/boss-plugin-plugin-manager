@@ -500,15 +500,17 @@ private fun OrgFilterRow(
 /**
  * The organisation a plugin is about to be published under.
  *
- * A read-only field that opens a picker, rather than a text input: the value is an organisation id
- * and the list is the server's own answer to "may I publish here", so there is nothing useful to
- * type. Styled as a field because that is what it is - one of the things being submitted - and not
- * as the header's filter chip, which changes what you are looking at rather than what you are
- * about to do.
+ * A REAL `BossTextField`, disabled, with a transparent overlay taking the click. Every other input
+ * in this section is one of these, and a hand-rolled box beside them reads as a different kind of
+ * control - which is exactly what the first version did wrong. Borrowing the component means the
+ * label, chrome, spacing and disabled colours cannot drift from the fields above and below it.
  *
- * Shows the NAME with the slug beside it. The name is what a person recognises; the slug is the
- * identifier that appears on the badge afterwards, so showing both means the choice made here and
- * the badge seen later are visibly the same thing.
+ * The overlay rather than a `clickable` on a parent: a disabled text field's handling of pointer
+ * events is its own business, and a Box drawn ON TOP receives the click whatever the field does
+ * with it. Nothing here depends on knowing that.
+ *
+ * Disabled is honest - there is nothing to type. The value is an organisation id and the list is
+ * the server's answer to "may I publish here", so the only sensible gesture is to pick.
  */
 @Composable
 private fun PublishOrgField(
@@ -519,63 +521,32 @@ private fun PublishOrgField(
 ) {
     val selected = targets.firstOrNull { it.orgId == selectedOrgId }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = "Publish for",
-            color = BossThemeColors.TextSecondary,
-            fontSize = 11.sp
+    Box(modifier = Modifier.fillMaxWidth()) {
+        BossTextField(
+            // Name and slug together: the name is what a person recognises, the slug is what the
+            // badge shows afterwards, so the choice made here and the badge seen later are
+            // visibly the same thing.
+            value = selected?.let { "${it.name}  @${it.slug}" } ?: "",
+            onValueChange = {},
+            label = "Organisation",
+            placeholder = "Choose an organisation",
+            enabled = false,
+            modifier = Modifier.fillMaxWidth()
         )
-        Spacer(Modifier.height(4.dp))
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(6.dp))
-                .background(BossThemeColors.TextMuted.copy(alpha = 0.10f))
+                .matchParentSize()
                 .clickable(enabled = enabled) { onClick() }
-                .padding(horizontal = 10.dp, vertical = 8.dp)
-        ) {
-            if (selected == null) {
-                // Not an error state. Nothing is sent, and the server derives the organisation the
-                // same way it does for a CI publish - so the wording says what will happen rather
-                // than demanding a choice.
-                Text(
-                    text = "Choose an organisation (otherwise decided for you)",
-                    color = BossThemeColors.TextMuted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-            } else {
-                Text(
-                    text = selected.name,
-                    color = BossThemeColors.TextPrimary,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                Spacer(Modifier.width(6.dp))
-                OrgBadge(slug = selected.slug)
-                Spacer(Modifier.weight(1f))
-            }
-            Icon(
-                Icons.Default.KeyboardArrowDown,
-                contentDescription = "Choose an organisation",
-                modifier = Modifier.size(16.dp),
-                tint = BossThemeColors.TextMuted
-            )
-        }
-        Text(
-            // Said here because it is not recoverable from this screen: a version publish never
-            // re-derives ownership, so republishing does not move it.
-            text = "Decides which organisation's admins can update this plugin. Set once, when the plugin is created.",
-            color = BossThemeColors.TextMuted,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(top = 3.dp)
         )
     }
+    Text(
+        // Said here because it is not recoverable from this screen: a version publish never
+        // re-derives ownership, so republishing does not move a plugin between organisations.
+        text = "Decides which organisation's admins can update this plugin. Set once, when the plugin is created.",
+        color = BossThemeColors.TextMuted,
+        fontSize = 10.sp,
+        modifier = Modifier.padding(top = 3.dp)
+    )
 }
 
 /**
@@ -3170,29 +3141,6 @@ private fun PublishTab(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // WHO the plugin will belong to. Its own card rather than a field inside "Publish
-        // Plugin", matching every other block on this tab - and because it is not a property of
-        // the artifact like the id or the version are. It decides which organisation's admins can
-        // update the plugin afterwards, and republishing does not change it.
-        //
-        // Only shown when the server has named at least one target. With none, no orgId is sent
-        // and the server derives it exactly as before, so a user it cannot answer for is no worse
-        // off than they were.
-        if (publishTargets.isNotEmpty()) {
-            BossSection(
-                title = "Organisation",
-                description = "Who this plugin will belong to in the store"
-            ) {
-                PublishOrgField(
-                    targets = publishTargets,
-                    selectedOrgId = selectedOrgId,
-                    enabled = !isPublishing && !isFetching,
-                    onClick = { pickingOrg = true }
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
         if (pickingOrg) {
             PublishOrgDialog(
                 targets = publishTargets,
@@ -3209,6 +3157,23 @@ private fun PublishTab(
             title = "Publish Plugin",
             description = "Upload your plugin to the BOSS Plugin Store"
         ) {
+            // WHO it will belong to, under this heading with the rest of the submission and
+            // FIRST, because it is decided once and never again: a version publish does not
+            // re-derive ownership, so unlike every field below it this one cannot be corrected by
+            // republishing.
+            //
+            // Hidden when the server names no target. No orgId is then sent and the server
+            // derives it exactly as before, so a user it cannot answer for is no worse off.
+            if (publishTargets.isNotEmpty()) {
+                PublishOrgField(
+                    targets = publishTargets,
+                    selectedOrgId = selectedOrgId,
+                    enabled = !isPublishing && !isFetching,
+                    onClick = { pickingOrg = true }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             // Source selection tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),
