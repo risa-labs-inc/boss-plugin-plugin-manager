@@ -92,6 +92,31 @@ class PluginManagerAPIImpl(
             supabaseKey = SUPABASE_ANON_KEY
         ) {
             install(Postgrest)
+            // READ AS THE SIGNED-IN USER, not as `anon`.
+            //
+            // `plugins_with_latest_version` is a security_invoker view, so it inherits the SELECT
+            // policy on `plugins`, whose predicate is can_view_plugin_row - and that returns public
+            // plugins only for an anonymous caller. Reading the catalogue with the anon key alone
+            // therefore hid every `org`-visibility plugin from the very members it is visible to.
+            // 20260803000000 says as much in its own follow-up list: "its anon grant now yields
+            // public plugins only ... that IS a behaviour change for any consumer that expected
+            // everything."
+            //
+            // The database still decides. This supplies an identity; which rows it unlocks is
+            // can_view_plugin_row's answer, so nothing here can widen access beyond the policy - a
+            // member sees their organisation's plugins, and `unlisted` stays admin-only.
+            //
+            // Suspend and read per request, never captured once: getAccessToken() returns the
+            // CURRENT session, and the host refreshes it. Holding a token at construction would
+            // work until the first refresh and then quietly fall back to anon-shaped results, which
+            // looks like plugins disappearing rather than like an auth failure.
+            // Falls back to the anon key rather than returning nothing. A signed-out user, or a
+            // host whose delegate is absent, must still get the public catalogue - handing the
+            // client an empty bearer would break browsing the store entirely, which is a far worse
+            // failure than not seeing organisation plugins.
+            accessToken = {
+                loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() } ?: SUPABASE_ANON_KEY
+            }
         }
     }
 
