@@ -2014,6 +2014,8 @@ private fun InstalledPluginsTab(
                     onOpenPage = PluginPageUrl.forPlugin(
                         provenanceByPluginId[plugin.pluginId]?.orgSlug.orEmpty(),
                         plugin.pluginId,
+                        // On this tab it is installed by definition.
+                        installed = true,
                     )?.let { url -> { onOpenHomepage(url) } },
                     canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
@@ -2367,8 +2369,11 @@ private fun AvailablePluginsTab(
                     canInstall = canInstall(plugin),
                     canOpen = plugin.pluginId in openablePlugins,
                     onOpenPlugin = { onOpenPlugin(plugin) },
-                    onOpenPage = PluginPageUrl.forPlugin(plugin.orgSlug, plugin.pluginId)
-                        ?.let { url -> { onOpenHomepage(url) } },
+                    onOpenPage = PluginPageUrl.forPlugin(
+                        plugin.orgSlug,
+                        plugin.pluginId,
+                        installed = plugin.pluginId in installedIds,
+                    )?.let { url -> { onOpenHomepage(url) } },
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins,
                     onShowPermissions = { permDialogItem = plugin }
@@ -2673,6 +2678,8 @@ private fun UpdatesTab(
                         onOpenPage = PluginPageUrl.forPlugin(
                             provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty(),
                             update.pluginId,
+                            // An update only exists for something already installed.
+                            installed = true,
                         )?.let { url -> { onOpenUrl(url) } }
                     )
                 }

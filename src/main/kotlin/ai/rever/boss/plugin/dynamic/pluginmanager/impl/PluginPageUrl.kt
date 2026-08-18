@@ -33,9 +33,23 @@ object PluginPageUrl {
         orgSlug: String,
         pluginId: String,
         base: String = ORGANISATION_FUNCTION_BASE,
+        /**
+         * Whether this machine has the plugin, or null when the caller does not know.
+         *
+         * The page is served by an edge function and cannot see this machine, so it renders Open
+         * or Install from what it is told. Passing it is a HINT, never a decision: the deep link
+         * behind either button carries the plugin id and the app decides what to do with it, so a
+         * stale or absent flag costs a wrong label and nothing else.
+         */
+        installed: Boolean? = null,
     ): String? {
         if (orgSlug.isBlank() || pluginId.isBlank()) return null
-        return "$base/o/${encodePathSegment(orgSlug)}/plugins/${encodePathSegment(pluginId)}"
+        val query = when (installed) {
+            true -> "?installed=1"
+            false -> "?installed=0"
+            null -> ""
+        }
+        return "$base/o/${encodePathSegment(orgSlug)}/plugins/${encodePathSegment(pluginId)}$query"
     }
 
     /**

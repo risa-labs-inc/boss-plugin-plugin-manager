@@ -3,6 +3,9 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 import ai.rever.boss.plugin.api.DynamicPlugin
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.supportsOpenPanelAsTab
 
 /**
  * Plugin Manager dynamic plugin - Core bundled plugin.
@@ -59,7 +62,53 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
         context.panelRegistry.registerPanel(PluginManagerPanelInfo) { ctx, panelInfo ->
             PluginManagerComponent(ctx, panelInfo, context, core)
         }
+
+        // boss://plugin?id=<this plugin>&action=install|open&plugin=<id>, which is what the Open
+        // and Install buttons on a plugin's web page press. Guarded like the status-bar item: a
+        // host older than the deep-link action registry throws here and everything else still
+        // works.
+        runCatching {
+            context.registerDeepLinkActionHandler(
+                PluginDeepLinkActions(
+                    handlerId = pluginId,
+                    api = core.api,
+                    notifications = context.notificationProvider,
+                    scope = context.pluginScope,
+                    revealPlugin = { id -> revealInstalledPlugin(context, core.api, id) },
+                ),
+            )
+        }
     }
+
+    /**
+     * Reveal an installed plugin's own panel, for `action=open`.
+     *
+     * A cut-down twin of the view model's openPlugin, and deliberately not a call into it: that
+     * one needs a window id and the split operations a PANEL was constructed with, and a deep link
+     * arrives with neither - typically with nothing of this plugin on screen at all.
+     * `openPanelAsTab` is the one route that needs no window, so this takes it or does nothing and
+     * lets the caller say so.
+     */
+    private fun revealInstalledPlugin(
+        context: PluginContext,
+        api: ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI,
+        pluginId: String,
+    ): Boolean =
+        runCatching {
+            val ops = context.splitViewOperations ?: return@runCatching false
+            if (!supportsOpenPanelAsTab(ops)) return@runCatching false
+            val name = api.getInstalledPlugin(pluginId)?.displayName ?: pluginId
+            val panels = context.panelRegistry.getAllPanels()
+            val panel =
+                resolveLaunchSurface(pluginId, name, panels) {
+                    RegisteredSurface(it.id.panelId, it.id.pluginId, it.displayName)
+                } ?: return@runCatching false
+            // resolveLaunchSurface hands back the registered panel itself, so its own PanelId goes
+            // straight through. Rebuilding one from the string would drop the order field the
+            // registry keys on - the trap PanelId.defaultOrder is already known for.
+            ops.openPanelAsTab(panel.id)
+            true
+        }.getOrDefault(false)
 
     override fun dispose() {
         core?.dispose()

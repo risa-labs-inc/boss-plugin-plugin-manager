@@ -67,4 +67,20 @@ class PluginPageUrlTest {
             PluginPageUrl.forPlugin("boss", "x.y", "http://localhost:54321/functions/v1/organisation"),
         )
     }
+
+    @Test
+    fun `the installed hint is passed only when the caller knows it`() {
+        // The page renders Open or Install from this. Absent means "I do not know", which is a
+        // third state and not the same as "not installed" - a visitor arriving from a shared link
+        // must not be told to install something they already have.
+        assertTrue(PluginPageUrl.forPlugin("risa", "x.y", installed = true)!!.endsWith("?installed=1"))
+        assertTrue(PluginPageUrl.forPlugin("risa", "x.y", installed = false)!!.endsWith("?installed=0"))
+        assertTrue(!PluginPageUrl.forPlugin("risa", "x.y")!!.contains("installed"))
+    }
+
+    @Test
+    fun `the hint does not disturb the encoded path`() {
+        val url = PluginPageUrl.forPlugin("risa", "a b", installed = true)!!
+        assertTrue(url.endsWith("/plugins/a%20b?installed=1"), url)
+    }
 }
