@@ -331,9 +331,20 @@ class PluginManagerAPIImpl(
                 connection.requestMethod = "GET"
                 connection.setRequestProperty("Accept", "application/json")
                 connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
-                // No Authorization header. /list resolves under service role and answers the same
-                // public-and-published set to everyone, so a token would change nothing; sending
-                // one would only widen what this call could be blamed for.
+                // The user's token, because /list now answers per reader.
+                //
+                // It used to resolve under service role and return the same public-and-published
+                // set to everyone, so a token genuinely changed nothing. Since the org-visibility
+                // work it uses the *_for_viewer variant when it can identify the caller, and
+                // without this header the catalogue read above (which IS authenticated) returns
+                // organisation plugins that this map then has no organisation for - leaving them
+                // with a blank org, no chip, no filter entry and an unclickable card.
+                //
+                // Optional on the server: a missing or stale token yields the public list rather
+                // than an error, so a signed-out user still browses.
+                loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() }?.let {
+                    connection.setRequestProperty("Authorization", "Bearer $it")
+                }
                 connection.connectTimeout = 8000
                 connection.readTimeout = 8000
 
