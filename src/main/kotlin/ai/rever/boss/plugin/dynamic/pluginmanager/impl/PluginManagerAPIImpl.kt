@@ -295,6 +295,14 @@ class PluginManagerAPIImpl(
             // and folding it into a failed Result writes "the store is unreachable" to the banner.
             throw e
         } catch (e: Exception) {
+            // Said out loud, once per failed fetch. The Result goes to a banner in the panel, so a
+            // broken catalogue was visible to whoever had the Toolbox open and INVISIBLE in the
+            // console - which is how an "Invalid API key" regression that emptied the store for
+            // everyone got shipped and then verified as working. Plugins have no logger; stderr is
+            // what this file already uses to say something went wrong.
+            System.err.println(
+                "[plugin-manager] store fetch failed: ${e::class.simpleName}: ${e.message}",
+            )
             Result.failure(e)
         }
     }
