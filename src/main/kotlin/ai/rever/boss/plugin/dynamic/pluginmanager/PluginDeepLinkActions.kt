@@ -38,6 +38,17 @@ class PluginDeepLinkActions(
     private val scope: CoroutineScope,
     /** Reveal an installed plugin. Null when this host cannot open panels, which is survivable. */
     private val revealPlugin: ((String) -> Boolean)?,
+    /**
+     * Re-read what is installed, before deciding anything.
+     *
+     * [PluginManagerAPI.isPluginInstalled] answers from a cached list that is filled by the panel
+     * and by a startup pass. A deep link arrives from outside with no panel open and no guarantee
+     * either has run, so asking the cache can answer "not installed" about a plugin that is
+     * plainly installed - and the whole point of `open` is that it must not then offer to install
+     * it. Refreshing first is what makes the answer about this machine rather than about whether
+     * the Toolbox has been looked at yet.
+     */
+    private val refreshInstalled: suspend () -> Unit,
 ) : DeepLinkActionHandler {
 
     override fun handle(action: String, params: Map<String, String>): Boolean {
@@ -45,30 +56,57 @@ class PluginDeepLinkActions(
         val pluginId = params["plugin"]?.trim().orEmpty()
         if (!isPlausiblePluginId(pluginId)) return false
 
-        return when (action.lowercase()) {
-            "install" -> {
-                offerInstall(pluginId)
-                true
-            }
+        val verb = action.lowercase()
+        if (verb != "install" && verb != "open") return false
 
-            "open" -> {
-                if (api.isPluginInstalled(pluginId)) {
+        // Everything happens after a refresh, so no branch below can be decided by a cache that
+        // nothing has filled yet. `handle` cannot suspend, so it reports handled and gets on with
+        // it; every outcome tells the user what happened.
+        scope.launch {
+            runCatching { refreshInstalled() }
+            val installed = installedNow(pluginId)
+            trace("action=$verb plugin=$pluginId installed=$installed")
+
+            when {
+                installed && verb == "open" -> {
                     // Reveal returns false when this host has no route that works without a
                     // window, which is every host before openPanelAsTab. Saying so beats a press
                     // that appears to do nothing.
                     if (revealPlugin?.invoke(pluginId) != true) {
                         toast("It is installed. Open it from the Toolbox.", NotificationType.INFO)
                     }
-                } else {
-                    // Asked to open something that is not here. Offering to install it is the
-                    // useful answer, and it is the same one press either way.
-                    offerInstall(pluginId)
                 }
-                true
-            }
 
-            else -> false
+                // Asked to INSTALL something already here. Never a reinstall: that was the bug
+                // this ordering exists to prevent, and an update is a different verb with its own
+                // button in the Toolbox.
+                installed -> alreadyInstalled(pluginId)
+
+                else -> offerInstall(pluginId)
+            }
         }
+        return true
+    }
+
+    /**
+     * Whether this machine has [pluginId], compared case-insensitively.
+     *
+     * The id makes a round trip through a URL and a database column on its way here, and neither
+     * preserves case by contract. Every id in this store is lower case, so this changes no answer
+     * today; it means one that arrives shouting is still recognised rather than installed twice.
+     */
+    private fun installedNow(pluginId: String): Boolean =
+        api.getInstalledPlugins().any { it.pluginId.equals(pluginId, ignoreCase = true) }
+
+    /**
+     * One line per deep link, to stderr.
+     *
+     * Plugins have no logger, and this path has no UI of its own: without this, "it installed
+     * instead of opening" is a report with nothing behind it, which is exactly how this arrived.
+     * A deep link is a rare, user-initiated event, so one line is not a log to be spammed.
+     */
+    private fun trace(message: String) {
+        System.err.println("[plugin-manager] deeplink $message")
     }
 
     /**
@@ -78,19 +116,18 @@ class PluginDeepLinkActions(
      * install prompt for something the user already has, and the store lookup happens before the
      * user is asked so the question names a real plugin.
      */
-    private fun offerInstall(pluginId: String) {
-        if (api.isPluginInstalled(pluginId)) {
-            notifications?.showToast(
-                message = "It is already installed.",
-                title = pluginId.substringAfterLast('.'),
-                type = NotificationType.INFO,
-                duration = NotificationDuration.SHORT,
-                actionLabel = if (revealPlugin != null) "Open" else null,
-                onAction = revealPlugin?.let { reveal -> { reveal(pluginId); Unit } },
-            )
-            return
-        }
+    private fun alreadyInstalled(pluginId: String) {
+        notifications?.showToast(
+            message = "It is already installed.",
+            title = pluginId.substringAfterLast('.'),
+            type = NotificationType.INFO,
+            duration = NotificationDuration.SHORT,
+            actionLabel = if (revealPlugin != null) "Open" else null,
+            onAction = revealPlugin?.let { reveal -> { reveal(pluginId); Unit } },
+        )
+    }
 
+    private fun offerInstall(pluginId: String) {
         scope.launch {
             val details = api.fetchPluginDetails(pluginId).getOrNull()
             if (details == null) {

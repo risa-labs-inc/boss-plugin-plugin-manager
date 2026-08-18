@@ -75,6 +75,9 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
                     notifications = context.notificationProvider,
                     scope = context.pluginScope,
                     revealPlugin = { id -> revealInstalledPlugin(context, core.api, id) },
+                    // The impl, not the interface: refreshing is how the handler stops depending
+                    // on whether the panel has ever been opened.
+                    refreshInstalled = { core.apiImpl.refreshInstalledPlugins() },
                 ),
             )
         }
