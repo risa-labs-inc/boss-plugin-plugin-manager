@@ -22,6 +22,14 @@ import ai.rever.boss.plugin.ui.BossTextField
 import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.ui.BossThemeColors
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.filterOrgSlugs
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.SYSTEM_ORG_SLUG
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
@@ -61,6 +69,7 @@ import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
 import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -92,6 +101,8 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -308,6 +319,394 @@ private fun FieldError(message: String) {
         color = BossThemeColors.ErrorColor,
         fontSize = 11.sp,
         modifier = Modifier.padding(top = 2.dp)
+    )
+}
+
+/**
+ * The organisation that owns a store plugin.
+ *
+ * Mono and slug-shaped (`@boss`), because that is what it IS - `organisations.slug` is validated
+ * `^[a-z][a-z0-9_]{1,30}$` and the organisation's roles are named after it. Setting it in the same
+ * face as the author's free-text name would suggest the two are the same kind of thing.
+ *
+ * A WASH BEHIND `TextSecondary`, never `AccentColor` as the text fill. Under the Blueprint theme
+ * `AccentColor` is `#0F5BFF`, which clears the 3:1 floor for a UI component but not the 4.5:1 for
+ * text - it is a fill colour, and the host corrected exactly this across ~90 call sites. A badge
+ * is emphasis, so it gets a background, not a coloured glyph.
+ *
+ * Every plugin in the store today resolves to `@boss`, the system organisation every user is a
+ * member of, so this currently reads the same on every card. That is not a bug to hide: it is the
+ * honest state, and it is what makes it visible that organisation ownership is not yet doing any
+ * work.
+ */
+/**
+ * The organisation filter: a compact control that opens a searchable picker.
+ *
+ * WAS A ROW OF CHIPS, and that does not survive growth. One chip per organisation is fine at two
+ * and unreadable at twenty: the row either wraps and eats the header or scrolls sideways, and
+ * either way the organisation somebody wants is the one off-screen. A select degrades gracefully -
+ * the control stays one width whatever the catalogue holds, and the list inside it is searchable.
+ *
+ * A DIALOG RATHER THAN A DROPDOWN MENU, and not by preference. Compose's `DropdownMenu` is a
+ * Popup, and under JxBrowser HARDWARE_ACCELERATED - the host default on every platform since
+ * BossConsole 9.4.1 - Chromium composites its own native window over the Compose scene, so a
+ * Popup in a plugin panel draws BEHIND the page. That is the same bug that had the version sheet
+ * cropped, and it is why every overlay in this file goes through `BossDialog`, which routes to the
+ * host's always-on-top overlay window. There is no `BossPopup` at the declared api floor of
+ * 1.0.73, so a dialog is the only overlay available that actually appears.
+ */
+@Composable
+private fun OrgFilterControl(
+    slugs: List<String>,
+    selected: String?,
+    onSelect: (String?) -> Unit
+) {
+    var picking by remember { mutableStateOf(false) }
+
+    Text(
+        text = selected?.let { "@$it" } ?: "All orgs",
+        color = if (selected != null) BossThemeColors.TextPrimary else BossThemeColors.TextMuted,
+        fontSize = 10.sp,
+        // Mono only when it is showing a slug, which is an identifier. "All orgs" is prose.
+        fontFamily = if (selected != null) FontFamily.Monospace else FontFamily.Default,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            // A wash when filtering, so an active filter is visible without reading the label -
+            // otherwise a list narrowed to one organisation looks like a list with few plugins.
+            .background(
+                if (selected != null) {
+                    BossThemeColors.AccentColor.copy(alpha = 0.16f)
+                } else {
+                    BossThemeColors.TextMuted.copy(alpha = 0.10f)
+                }
+            )
+            .clickable { picking = true }
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+    )
+
+    if (picking) {
+        OrgFilterDialog(
+            slugs = slugs,
+            selected = selected,
+            onSelect = {
+                onSelect(it)
+                picking = false
+            },
+            onDismiss = { picking = false }
+        )
+    }
+}
+
+/**
+ * The picker itself: a search field over the organisation list.
+ *
+ * The field is what makes this scale, so it is always present rather than appearing past some
+ * threshold - a control that changes shape as data grows is one more thing to explain, and the
+ * field costs one row.
+ *
+ * "All organisations" is a row in the list rather than a separate Clear button, so choosing and
+ * un-choosing are the same gesture in the same place.
+ */
+@Composable
+private fun OrgFilterDialog(
+    slugs: List<String>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val shown = remember(slugs, query) { filterOrgSlugs(slugs, query) }
+
+    BossDialog(onDismissRequest = onDismiss) {
+        BossCard(modifier = Modifier.width(320.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Filter by organisation",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+
+                BossTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = "",
+                    placeholder = "Search organisations..."
+                )
+                Spacer(Modifier.height(8.dp))
+
+                OrgFilterRow(
+                    label = "All organisations",
+                    mono = false,
+                    isSelected = selected == null,
+                    onClick = { onSelect(null) }
+                )
+
+                // Bounded, so a long list scrolls inside the dialog instead of growing it past
+                // the window. LazyColumn rather than a Column in a scroll, because the whole
+                // point of this change is that the list may be long.
+                LazyColumn(modifier = Modifier.heightIn(max = 260.dp)) {
+                    items(shown, key = { it }) { slug ->
+                        OrgFilterRow(
+                            label = "@$slug",
+                            mono = true,
+                            isSelected = selected == slug,
+                            onClick = { onSelect(slug) }
+                        )
+                    }
+                }
+
+                if (shown.isEmpty() && query.isNotBlank()) {
+                    Text(
+                        text = "No organisation matches \"$query\".",
+                        color = BossThemeColors.TextMuted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OrgFilterRow(
+    label: String,
+    mono: Boolean,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Text(
+        text = label,
+        color = if (isSelected) BossThemeColors.TextPrimary else BossThemeColors.TextSecondary,
+        fontSize = 12.sp,
+        fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+        maxLines = 1,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(4.dp))
+            // A wash behind TextPrimary marks the selection, never AccentColor as the text fill:
+            // under Blueprint that is #0F5BFF, which clears 3:1 for a UI component but not 4.5:1
+            // for text.
+            .background(
+                if (isSelected) BossThemeColors.AccentColor.copy(alpha = 0.16f) else Color.Transparent
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    )
+}
+
+/**
+ * The organisation a plugin is about to be published under.
+ *
+ * A REAL `BossTextField`, disabled, with a transparent overlay taking the click. Every other input
+ * in this section is one of these, and a hand-rolled box beside them reads as a different kind of
+ * control - which is exactly what the first version did wrong. Borrowing the component means the
+ * label, chrome, spacing and disabled colours cannot drift from the fields above and below it.
+ *
+ * The overlay rather than a `clickable` on a parent: a disabled text field's handling of pointer
+ * events is its own business, and a Box drawn ON TOP receives the click whatever the field does
+ * with it. Nothing here depends on knowing that.
+ *
+ * Disabled is honest - there is nothing to type. The value is an organisation id and the list is
+ * the server's answer to "may I publish here", so the only sensible gesture is to pick.
+ */
+@Composable
+private fun PublishOrgField(
+    targets: List<PublishTarget>,
+    selectedOrgId: String?,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val selected = targets.firstOrNull { it.orgId == selectedOrgId }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        BossTextField(
+            // Name and slug together: the name is what a person recognises, the slug is what the
+            // badge shows afterwards, so the choice made here and the badge seen later are
+            // visibly the same thing.
+            value = selected?.let { "${it.name}  @${it.slug}" } ?: "",
+            onValueChange = {},
+            label = "Organisation",
+            placeholder = "Choose an organisation",
+            enabled = false,
+            modifier = Modifier.fillMaxWidth()
+        )
+        // The affordance. A disabled field reads as "unavailable" on its own; the chevron is what
+        // says "there is a list behind this". BossTextField has no trailing-icon slot - its extra
+        // parameters are enabled, required and singleLine - so it is drawn over the field rather
+        // than passed to it.
+        Icon(
+            Icons.Default.KeyboardArrowDown,
+            contentDescription = "Choose an organisation",
+            tint = BossThemeColors.TextSecondary,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp)
+                .size(18.dp)
+        )
+        // LAST, so it is on top of both. A disabled text field's handling of pointer events is its
+        // own business, and a Box drawn over it receives the click whatever the field does.
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .clickable(enabled = enabled) { onClick() }
+        )
+    }
+    Text(
+        // Said here because it is not recoverable from this screen: a version publish never
+        // re-derives ownership, so republishing does not move a plugin between organisations.
+        text = "Decides which organisation's admins can update this plugin. Set once, when the plugin is created.",
+        color = BossThemeColors.TextMuted,
+        fontSize = 10.sp,
+        modifier = Modifier.padding(top = 3.dp)
+    )
+}
+
+/**
+ * The picker for [PublishOrgField].
+ *
+ * A `BossDialog` for the same reason the filter picker is one: Compose's `DropdownMenu` is a Popup,
+ * and under the host's hardware-accelerated browser a Popup in a plugin panel draws behind the
+ * page. There is no `BossPopup` at the api floor of 1.0.73.
+ *
+ * No "let the server decide" row once a choice exists. Offering it would invite somebody to pick
+ * the vaguest option on the one field here that cannot be changed afterwards.
+ */
+@Composable
+private fun PublishOrgDialog(
+    targets: List<PublishTarget>,
+    selectedOrgId: String?,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val shown = remember(targets, query) {
+        val needle = query.trim().removePrefix("@").lowercase()
+        if (needle.isEmpty()) {
+            targets
+        } else {
+            targets.filter {
+                it.slug.lowercase().contains(needle) || it.name.lowercase().contains(needle)
+            }
+        }
+    }
+
+    BossDialog(onDismissRequest = onDismiss) {
+        BossCard(modifier = Modifier.width(320.dp)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Text(
+                    text = "Publish for",
+                    color = BossThemeColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    // The list is the server's answer, not a guess this side made, so an
+                    // organisation somebody expects and cannot see is a permissions question
+                    // rather than a bug in the picker.
+                    text = "Only organisations you may publish for are listed.",
+                    color = BossThemeColors.TextMuted,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(8.dp))
+
+                BossTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = "",
+                    placeholder = "Search organisations..."
+                )
+                Spacer(Modifier.height(8.dp))
+
+                LazyColumn(modifier = Modifier.heightIn(max = 260.dp)) {
+                    items(shown, key = { it.orgId }) { target ->
+                        OrgFilterRow(
+                            label = "${target.name}  @${target.slug}",
+                            mono = false,
+                            isSelected = target.orgId == selectedOrgId,
+                            onClick = { onSelect(target.orgId) }
+                        )
+                    }
+                }
+
+                if (shown.isEmpty()) {
+                    Text(
+                        text = if (query.isBlank()) {
+                            "You cannot publish for any organisation yet."
+                        } else {
+                            "No organisation matches \"$query\"."
+                        },
+                        color = BossThemeColors.TextMuted,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Where a plugin came from, rendered identically on every card that shows one.
+ *
+ * ONE COMPOSABLE BECAUSE THE THREE TABS HAD DRIFTED. Available put the author under the
+ * description and the organisation beside it; Installed put the organisation up on the title row
+ * next to the version and showed no author at all; Updates put it on the title row after the name.
+ * Same two facts, three positions, and one of them silently missing half of it - which is what
+ * happens when each card is edited where it stands rather than through a shared piece.
+ *
+ * Placed under the description on every card, because that is the "about this plugin" region
+ * rather than the "what state is it in" region: the title row carries version, update and health,
+ * which change, while provenance does not.
+ *
+ * The two facts are not the same kind of thing and are deliberately styled differently. `author`
+ * is free text whoever published typed; the organisation is a row the store resolved, and it is
+ * what visibility and publish policy are actually keyed on. Hence prose against a mono badge.
+ *
+ * Renders NOTHING when both are absent - a sideloaded jar the store has never heard of - rather
+ * than an empty row that shifts every card below it.
+ */
+@Composable
+private fun ProvenanceLine(author: String, orgSlug: String) {
+    if (author.isEmpty() && orgSlug.isEmpty()) return
+
+    Spacer(Modifier.height(2.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (author.isNotEmpty()) {
+            Text(
+                text = "by $author",
+                color = BossThemeColors.TextMuted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+        }
+        if (orgSlug.isNotEmpty()) {
+            if (author.isNotEmpty()) Spacer(Modifier.width(6.dp))
+            OrgBadge(slug = orgSlug)
+        }
+    }
+}
+
+@Composable
+private fun OrgBadge(slug: String) {
+    Text(
+        text = "@$slug",
+        color = BossThemeColors.TextSecondary,
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
+        maxLines = 1,
+        modifier = Modifier
+            .background(
+                BossThemeColors.TextMuted.copy(alpha = 0.14f),
+                RoundedCornerShape(4.dp)
+            )
+            .padding(horizontal = 5.dp, vertical = 1.dp)
     )
 }
 
@@ -945,11 +1344,31 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 .background(BossThemeColors.BackgroundColor)
         ) {
             // Header with tabs and search
+            // Owning organisation per plugin id, built ONCE for every tab.
+            //
+            // The store catalogue is the only thing that knows this: an installed plugin is known
+            // from installed.json and the jar on disk, and an update from a version comparison -
+            // neither records an organisation. `availablePlugins` is only ever assigned the FULL
+            // fetch, never a filtered subset, so it is safe to key off even while a search is
+            // narrowing what the Available tab shows.
+            //
+            // Keyed on the list so it is not rebuilt per recomposition, and empty until the store
+            // fetch returns - which renders no badge rather than a wrong one.
+            val provenanceByPluginId = remember(state.availablePlugins) {
+                storeProvenanceByPluginId(state.availablePlugins)
+            }
+            val orgSlugsInStore = remember(state.availablePlugins) {
+                storeOrgSlugs(state.availablePlugins)
+            }
+
             PluginManagerHeader(
                 currentTab = state.currentTab,
                 updateCount = state.updates.size,
                 searchQuery = state.searchQuery,
                 onSearchQueryChange = { viewModel.setSearchQuery(it) },
+                orgSlugs = orgSlugsInStore,
+                orgFilter = state.orgFilter,
+                onOrgFilterChange = { viewModel.setOrgFilter(it) },
                 onTabSelected = { viewModel.selectTab(it) },
                 onRefresh = { viewModel.refresh() },
                 isLoading = state.isLoading,
@@ -973,7 +1392,13 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
             ) {
                 when (state.currentTab) {
                     PluginManagerTab.INSTALLED -> InstalledPluginsTab(
-                        plugins = filterPlugins(state.installedPlugins, state.searchQuery),
+                        plugins = filterPlugins(state.installedPlugins, state.searchQuery)
+                            .filter {
+                                matchesOrgFilter(
+                                    provenanceByPluginId[it.pluginId]?.orgSlug,
+                                    state.orgFilter
+                                )
+                            },
                         inaccessiblePlugins = state.inaccessiblePlugins,
                         updateIds = state.updates.map { it.pluginId }.toSet(),
                         onToggleEnabled = { id, enabled -> viewModel.togglePluginEnabled(id, enabled) },
@@ -982,6 +1407,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onInstallFromFile = { viewModel.installFromFilePicker() },
                         onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        onOpenPage = { id, slug, orgId, installed ->
+                            viewModel.openPluginPage(id, slug, orgId, installed)
+                        },
                         onOpenPlugin = { p -> viewModel.openPlugin(p.pluginId, p.url) },
                         openablePlugins = state.openablePlugins,
                         isLoading = state.isLoading,
@@ -991,16 +1419,24 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version) },
                         mcpToolRegistry = viewModel.mcpToolRegistry,
                         permissionDescriptions = state.permissionDescriptions,
+                        provenanceByPluginId = provenanceByPluginId,
                         onExtractManifest = { jar, cb -> viewModel.extractManifest(jar, cb) }
                     )
                     PluginManagerTab.AVAILABLE -> AvailablePluginsTab(
-                        plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery),
+                        // orgSlug off the item, not the map: on this tab the catalogue row IS
+                        // the source, so going through the map would add a lookup that can only
+                        // ever agree with it.
+                        plugins = filterAvailablePlugins(state.availablePlugins, state.searchQuery)
+                            .filter { matchesOrgFilter(it.orgSlug.ifEmpty { null }, state.orgFilter) },
                         installedIds = state.installedPlugins.map { it.pluginId }.toSet(),
                         updateIds = state.updates.map { it.pluginId }.toSet(),
                         onInstall = { pluginId -> viewModel.installFromRemote(pluginId) },
                         onUpdate = { pluginId -> viewModel.updatePlugin(pluginId) },
                         onDeleteFromStore = { pluginId -> viewModel.deleteFromStore(pluginId) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        onOpenPage = { id, slug, orgId, installed ->
+                            viewModel.openPluginPage(id, slug, orgId, installed)
+                        },
                         onShowVersions = { item ->
                             viewModel.openVersions(
                                 item.pluginId,
@@ -1022,15 +1458,27 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         permissionDescriptions = state.permissionDescriptions
                     )
                     PluginManagerTab.UPDATES -> UpdatesTab(
-                        updates = state.updates,
+                        updates = state.updates
+                            .filter {
+                                matchesOrgFilter(
+                                    provenanceByPluginId[it.pluginId]?.orgSlug,
+                                    state.orgFilter
+                                )
+                            },
                         onUpdate = { id -> viewModel.updatePlugin(id) },
                         onUpdateAll = { viewModel.updateAllPlugins() },
                         isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins
+                        onOpenUrl = { url -> viewModel.openUrl(url) },
+                        onOpenPage = { id, slug, orgId, installed ->
+                            viewModel.openPluginPage(id, slug, orgId, installed)
+                        },
+                        busyPlugins = state.busyPlugins,
+                        provenanceByPluginId = provenanceByPluginId
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
                         canPublish = state.canPublish,
+                        publishTargets = state.publishTargets,
                         organisationCta = organisationCta,
                         onOrganisationAction = { viewModel.onOrganisationCta() },
                         toolCreatorInstalled = state.installedPlugins.any {
@@ -1042,7 +1490,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         },
                         onBrowseJar = { onResult -> viewModel.browseForPluginJar(onResult) },
                         onExtractManifest = { jarPath, onResult -> viewModel.extractManifest(jarPath, onResult) },
-                        onPublish = { jarPath, pluginId, displayName, version, homepageUrl, authorName, description, changelog, tags, iconUrl, pluginType, apiVersion, minBossVersion, onProgress, onSuccess, onError ->
+                        onPublish = { jarPath, pluginId, displayName, version, homepageUrl, authorName, description, changelog, tags, iconUrl, pluginType, apiVersion, minBossVersion, orgId, onProgress, onSuccess, onError ->
                             viewModel.publishPlugin(
                                 jarPath = jarPath,
                                 pluginId = pluginId,
@@ -1057,6 +1505,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                                 pluginType = pluginType,
                                 apiVersion = apiVersion,
                                 minBossVersion = minBossVersion,
+                                orgId = orgId,
                                 onProgress = onProgress,
                                 onSuccess = onSuccess,
                                 onError = onError
@@ -1142,7 +1591,12 @@ private fun PluginManagerHeader(
     onRefresh: () -> Unit,
     isLoading: Boolean,
     canPublish: Boolean,
-    realtimeConnected: Boolean = false
+    realtimeConnected: Boolean = false,
+    /** Organisations present in the catalogue. Fewer than two renders no control. */
+    orgSlugs: List<String> = emptyList(),
+    /** The one currently selected, or null for all. */
+    orgFilter: String? = null,
+    onOrgFilterChange: (String?) -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -1197,6 +1651,21 @@ private fun PluginManagerHeader(
             placeholder = "Search...",
             modifier = Modifier.weight(1f)
         )
+
+        // Organisation filter. Beside search because it is the same act - narrowing the list -
+        // and it applies to whichever tab is showing, so it does not belong inside one of them.
+        //
+        // Hidden below two organisations: with everything published by one, every chip would
+        // select the whole list and the control would be decoration that costs header width on a
+        // panel that is often narrow.
+        if (orgSlugs.size > 1) {
+            Spacer(Modifier.width(6.dp))
+            OrgFilterControl(
+                slugs = orgSlugs,
+                selected = orgFilter,
+                onSelect = onOrgFilterChange
+            )
+        }
 
         Spacer(Modifier.width(4.dp))
 
@@ -1336,9 +1805,25 @@ private fun InstalledPluginsTab(
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
     onShowVersions: (InstalledPluginState) -> Unit = {},
+    /**
+     * Owning organisation slug per plugin id, from the store catalogue.
+     *
+     * Passed in rather than derived here so all three tabs read ONE map built once from
+     * `availablePlugins`. A missing entry renders no badge, which is the honest answer for a
+     * sideloaded jar and for the window before the store fetch returns.
+     */
+    provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
     mcpToolRegistry: McpToolRegistry? = null,
     permissionDescriptions: Map<String, String> = emptyMap(),
-    onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) }
+    onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) },
+    /**
+     * Open a plugin's web page, signed in where the reader belongs to the owning organisation.
+     *
+     * A callback rather than a URL: the address now depends on a handoff token minted
+     * asynchronously, and whether it can be minted at all is the server's decision to make.
+     */
+    onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
+        { _, _, _, _ -> },
 ) {
     var showGitHubDialog by remember { mutableStateOf(false) }
     var gitHubUrl by remember { mutableStateOf("") }
@@ -1543,9 +2028,15 @@ private fun InstalledPluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
                     onOpenPlugin = { onOpenPlugin(plugin) },
+                    onOpenPage = provenanceByPluginId[plugin.pluginId]
+                        ?.takeIf { it.orgSlug.isNotBlank() }
+                        // On this tab it is installed by definition.
+                        ?.let { p -> { onOpenPage(plugin.pluginId, p.orgSlug, p.orgId, true) } },
                     canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
                     isLoading = plugin.pluginId in busyPlugins,
+                    author = provenanceByPluginId[plugin.pluginId]?.author.orEmpty(),
+                    orgSlug = provenanceByPluginId[plugin.pluginId]?.orgSlug.orEmpty(),
                     mcpToolCount = mcpToolsByPlugin[plugin.pluginId]?.size ?: 0,
                     onShowMcp = { mcpDialogPlugin = plugin },
                     onShowPermissions = { permDialogPlugin = plugin }
@@ -1565,33 +2056,48 @@ private fun InstalledPluginCard(
     onOpenHomepage: () -> Unit,
     /** Reveal the plugin itself (its panel or tab). */
     onOpenPlugin: () -> Unit,
+    /**
+     * Open this plugin's page on the web. Null when it has none, which is the normal answer for a
+     * sideloaded jar: the page lives under the organisation that owns the plugin, and nothing on
+     * disk records one.
+     */
+    onOpenPage: (() -> Unit)? = null,
     /** True when the plugin has a panel or tab to open, which is what renders the Open button. */
     canOpen: Boolean = false,
     onShowVersions: () -> Unit,
     isLoading: Boolean,
+    /**
+     * Who published it, and the organisation that owns it. Empty when unknown.
+     *
+     * BOTH resolved by the caller from the store catalogue rather than read off [plugin]: an
+     * installed plugin is known from `installed.json` and the jar on disk, and neither records an
+     * author or an organisation. Empty is the normal answer for a sideloaded jar, and renders no
+     * provenance line at all.
+     */
+    author: String = "",
+    orgSlug: String = "",
     /** Number of MCP tools this plugin contributes; 0 hides the MCP button. */
     mcpToolCount: Int = 0,
     onShowMcp: () -> Unit = {},
     onShowPermissions: () -> Unit = {}
 ) {
     val hasHomepage = !plugin.url.isNullOrBlank()
+    // The WHOLE card opens the plugin's page, padding included, because BossCard puts the click on
+    // its own Surface. The buttons and the homepage icon inside consume their own clicks, so they
+    // keep working; only the parts of the card that did nothing before are new.
+    val openCard: () -> Unit = onOpenPage ?: onOpenPlugin
 
-    BossCard {
+    BossCard(onClick = openCard) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open the plugin itself. The homepage moved onto its own
-            // icon below: opening a GitHub page was never what "click the plugin" should mean,
-            // and it was the only thing this row did.
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(4.dp))
-                    .clickable { onOpenPlugin() }
-                    .padding(end = 8.dp)
-            ) {
+            // No click of its own any more: the card owns it, so the ripple covers the whole row
+            // rather than stopping at this column's edge. Launching the plugin has not been lost -
+            // that is the Open button, which renders whenever there is something to launch - and a
+            // plugin with no page (a sideloaded jar) still launches from the card.
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = plugin.displayName,
@@ -1665,6 +2171,7 @@ private fun InstalledPluginCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                ProvenanceLine(author = author, orgSlug = orgSlug)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1792,7 +2299,15 @@ private fun AvailablePluginsTab(
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
-    permissionDescriptions: Map<String, String> = emptyMap()
+    permissionDescriptions: Map<String, String> = emptyMap(),
+    /**
+     * Open a plugin's web page, signed in where the reader belongs to the owning organisation.
+     *
+     * A callback rather than a URL: the address now depends on a handoff token minted
+     * asynchronously, and whether it can be minted at all is the server's decision to make.
+     */
+    onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
+        { _, _, _, _ -> },
 ) {
     // Confirmation dialog state for delete from store
     var pluginToDelete by remember { mutableStateOf<PluginStoreItem?>(null) }
@@ -1877,6 +2392,16 @@ private fun AvailablePluginsTab(
                     canInstall = canInstall(plugin),
                     canOpen = plugin.pluginId in openablePlugins,
                     onOpenPlugin = { onOpenPlugin(plugin) },
+                    onOpenPage = plugin.orgSlug.takeIf { it.isNotBlank() }?.let { slug ->
+                        {
+                            onOpenPage(
+                                plugin.pluginId,
+                                slug,
+                                plugin.orgId,
+                                plugin.pluginId in installedIds,
+                            )
+                        }
+                    },
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins,
                     onShowPermissions = { permDialogItem = plugin }
@@ -1900,33 +2425,24 @@ private fun AvailablePluginCard(
     /** True when the plugin is installed AND has a panel or tab to open. */
     canOpen: Boolean = false,
     onOpenPlugin: () -> Unit = {},
+    /** Open this plugin's page on the web. Null when the catalogue row names no organisation. */
+    onOpenPage: (() -> Unit)? = null,
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     onShowPermissions: () -> Unit = {}
 ) {
     val hasHomepage = plugin.url.isNotBlank()
+    // The whole card opens the plugin's page, falling back to the homepage for a catalogue row
+    // that names no organisation and so has no page.
+    val openCard: (() -> Unit)? = onOpenPage ?: onOpenHomepage.takeIf { hasHomepage }
 
-    BossCard {
+    BossCard(onClick = openCard) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left side - clickable to open homepage
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .then(
-                        if (hasHomepage) {
-                            Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable { onOpenHomepage() }
-                                .padding(end = 8.dp)
-                        } else {
-                            Modifier
-                        }
-                    )
-            ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = plugin.displayName,
@@ -1969,14 +2485,7 @@ private fun AvailablePluginCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                if (plugin.author.isNotEmpty()) {
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "by ${plugin.author}",
-                        color = BossThemeColors.TextMuted,
-                        fontSize = 11.sp
-                    )
-                }
+                ProvenanceLine(author = plugin.author, orgSlug = plugin.orgSlug)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2135,7 +2644,25 @@ private fun UpdatesTab(
     onUpdate: (String) -> Unit,
     onUpdateAll: () -> Unit,
     isLoading: Boolean,
-    busyPlugins: Set<String> = emptySet()
+    busyPlugins: Set<String> = emptySet(),
+    /**
+     * Owning organisation slug per plugin id, from the store catalogue.
+     *
+     * Passed in rather than derived here so all three tabs read ONE map built once from
+     * `availablePlugins`. A missing entry renders no badge, which is the honest answer for a
+     * sideloaded jar and for the window before the store fetch returns.
+     */
+    provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
+    /** Open a web address. Used for the plugin page each row links to. */
+    onOpenUrl: (String) -> Unit = {},
+    /**
+     * Open a plugin's web page, signed in where the reader belongs to the owning organisation.
+     *
+     * A callback rather than a URL: the address now depends on a handoff token minted
+     * asynchronously, and whether it can be minted at all is the server's decision to make.
+     */
+    onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
+        { _, _, _, _ -> },
 ) {
     Column(
         modifier = Modifier
@@ -2181,7 +2708,13 @@ private fun UpdatesTab(
                     UpdateCard(
                         update = update,
                         onUpdate = { onUpdate(update.pluginId) },
-                        isLoading = update.pluginId in busyPlugins
+                        isLoading = update.pluginId in busyPlugins,
+                        author = provenanceByPluginId[update.pluginId]?.author.orEmpty(),
+                        orgSlug = provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty(),
+                        onOpenPage = provenanceByPluginId[update.pluginId]
+                            ?.takeIf { it.orgSlug.isNotBlank() }
+                            // An update only exists for something already installed.
+                            ?.let { p -> { onOpenPage(update.pluginId, p.orgSlug, p.orgId, true) } }
                     )
                 }
             }
@@ -2193,15 +2726,29 @@ private fun UpdatesTab(
 private fun UpdateCard(
     update: UpdateInfo,
     onUpdate: () -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    /**
+     * Who the NEW version comes from. Empty when unknown.
+     *
+     * Worth showing here more than anywhere else: this card is a button that replaces running code,
+     * and this says who the replacement is coming from. Resolved from the store catalogue, which is
+     * where the update itself was found.
+     */
+    author: String = "",
+    orgSlug: String = "",
+    /** Open the plugin's page on the web. Null when the store row names no organisation. */
+    onOpenPage: (() -> Unit)? = null
 ) {
-    BossCard {
+    // The whole card, like the other two tabs. Null when the store row names no organisation, and
+    // BossCard then renders exactly as it did before rather than a card that looks pressable and
+    // does nothing.
+    BossCard(onClick = onOpenPage) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = update.displayName,
@@ -2242,6 +2789,7 @@ private fun UpdateCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                ProvenanceLine(author = author, orgSlug = orgSlug)
             }
 
             BossPrimaryButton(
@@ -2540,6 +3088,14 @@ private fun PublishTab(
      * are not.
      */
     canPublish: Boolean,
+    /**
+     * Organisations this user may publish for, from the server's own `can_publish`.
+     *
+     * Empty renders no picker and sends no `orgId`, which leaves the server to derive it exactly
+     * as it did before this control existed - so a user the server cannot answer for is no worse
+     * off than they were.
+     */
+    publishTargets: List<PublishTarget>,
     organisationCta: OrganisationCta?,
     onOrganisationAction: () -> Unit,
     toolCreatorInstalled: Boolean,
@@ -2567,6 +3123,7 @@ private fun PublishTab(
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        orgId: String?,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -2586,6 +3143,19 @@ private fun PublishTab(
         }
         return
     }
+
+    // Defaults to BOSS when it is on offer, because that is where a plugin belongs unless
+    // somebody decides otherwise - it is the platform's own store, and it is what every plugin
+    // published before this control existed was attributed to. Falling back to the sole target
+    // covers a user who cannot publish for boss but can for exactly one other organisation; with
+    // several and no boss it starts unset and the server derives, as it did before.
+    var selectedOrgId by remember(publishTargets) {
+        mutableStateOf(
+            publishTargets.firstOrNull { it.slug == SYSTEM_ORG_SLUG }?.orgId
+                ?: publishTargets.singleOrNull()?.orgId
+        )
+    }
+    var pickingOrg by remember { mutableStateOf(false) }
 
     var jarSource by remember { mutableStateOf(JarSource.GITHUB) }
     var gitHubUrl by remember { mutableStateOf("") }
@@ -2642,10 +3212,39 @@ private fun PublishTab(
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        if (pickingOrg) {
+            PublishOrgDialog(
+                targets = publishTargets,
+                selectedOrgId = selectedOrgId,
+                onSelect = {
+                    selectedOrgId = it
+                    pickingOrg = false
+                },
+                onDismiss = { pickingOrg = false }
+            )
+        }
+
         BossSection(
             title = "Publish Plugin",
             description = "Upload your plugin to the BOSS Plugin Store"
         ) {
+            // WHO it will belong to, under this heading with the rest of the submission and
+            // FIRST, because it is decided once and never again: a version publish does not
+            // re-derive ownership, so unlike every field below it this one cannot be corrected by
+            // republishing.
+            //
+            // Hidden when the server names no target. No orgId is then sent and the server
+            // derives it exactly as before, so a user it cannot answer for is no worse off.
+            if (publishTargets.isNotEmpty()) {
+                PublishOrgField(
+                    targets = publishTargets,
+                    selectedOrgId = selectedOrgId,
+                    enabled = !isPublishing && !isFetching,
+                    onClick = { pickingOrg = true }
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             // Source selection tabs
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -3120,6 +3719,7 @@ private fun PublishTab(
                                 pluginType.value,
                                 apiVersion.ifBlank { "1.0" },
                                 minBossVersion.ifBlank { "1.0.0" },
+                                selectedOrgId,
                                 { progress -> publishProgress = progress },
                                 { result ->
                                     isPublishing = false

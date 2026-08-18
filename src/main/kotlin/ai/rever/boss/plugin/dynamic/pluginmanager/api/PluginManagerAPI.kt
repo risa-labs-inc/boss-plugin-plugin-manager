@@ -209,6 +209,13 @@ interface PluginManagerAPI {
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        /**
+         * Organisation to publish under, or null to let the server derive it.
+         *
+         * Authorised server-side against the caller's publishing rights, so a value here is a
+         * request rather than an instruction - naming one you may not publish for is a 403.
+         */
+        orgId: String?,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit

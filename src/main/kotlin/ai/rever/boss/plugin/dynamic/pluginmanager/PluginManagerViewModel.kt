@@ -6,6 +6,8 @@ import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHandoffToken
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PanelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
@@ -15,7 +17,10 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.supportsOpenPanelAsTab
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePublishTargets
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHandoffToken
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.retainPendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
@@ -61,6 +66,21 @@ data class PluginManagerState(
     /** Per-plugin loading state — tracks which plugins are currently being installed/updated/uninstalled. */
     val busyPlugins: Set<String> = emptySet(),
     val searchQuery: String = "",
+    /**
+     * Organisation slug to narrow every tab to, or null for all of them.
+     *
+     * A slug rather than an id: it is what the badge shows and what the chip is labelled with, so
+     * comparing against the same string the user is reading leaves nothing to translate. The
+     * catalogue is the only source of both.
+     */
+    val orgFilter: String? = null,
+    /**
+     * Organisations the signed-in user may publish a plugin for.
+     *
+     * From the server's own `can_publish`, so an entry here is one the publish endpoint will
+     * accept. Empty offers no picker and lets the server derive the organisation as before.
+     */
+    val publishTargets: List<PublishTarget> = emptyList(),
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
     /** Whether the user may use the Create tab (store admin OR has plugins.create). */
@@ -341,6 +361,18 @@ class PluginManagerViewModel(
      */
     fun setSearchQuery(query: String) {
         _state.value = _state.value.copy(searchQuery = query)
+    }
+
+    /**
+     * Narrow every tab to one organisation, or clear it with null.
+     *
+     * Deliberately NOT reset when the tab changes. The filter is a statement about what the user
+     * is looking for, not about a screen, and clearing it on a tab switch would silently widen the
+     * list at the moment they moved from browsing the store to checking what they have installed -
+     * which is exactly when comparing the two matters.
+     */
+    fun setOrgFilter(slug: String?) {
+        _state.update { it.copy(orgFilter = slug) }
     }
 
     /**
@@ -714,6 +746,10 @@ class PluginManagerViewModel(
             val raw =
                 runCatching { supabase.rpc("get_my_organisations", "{}").getOrNull() }.getOrNull()
             val membership = parseMembership(raw)
+            // Same response, second question. get_my_organisations already projects can_publish
+            // per row, so the publish picker costs no extra round trip - and cannot disagree with
+            // the membership shown beside it, since both are read from one answer.
+            val targets = parsePublishTargets(raw)
 
             // Only asked when it can change the answer. A member already gets
             // INSTALL_PLUGIN or OPEN, so the extra round trip would buy nothing.
@@ -736,6 +772,7 @@ class PluginManagerViewModel(
             _state.value =
                 _state.value.copy(
                     membership = membership,
+                    publishTargets = targets,
                     // Never downgraded by a refresh - see retainPendingRequest for why a
                     // server `false` is not evidence of absence.
                     hasPendingOrgRequest =
@@ -1209,6 +1246,60 @@ class PluginManagerViewModel(
     }
 
     /**
+     * Open a plugin's web page, signed in where that is possible.
+     *
+     * WHY A TOKEN AT ALL. The page is served by an edge function and decides what to show from the
+     * session it holds, so opening it with none renders the public view - and an administrator
+     * clicking their own organisation's plugin got a read-only page with no visibility control.
+     * A handoff token is how these pages are entered from the app; the page exchanges it for a
+     * session, strips it from the URL, and then decides admin-ness SERVER-SIDE. Nothing here
+     * asserts any authority, and the token is single-use and short-lived.
+     *
+     * MINTING IS MEMBERS-ONLY, so a non-member gets none and sees the public page. That is the
+     * right answer rather than a degraded one, and it is why every failure below simply opens
+     * without a token instead of reporting anything: there is nothing wrong for the reader to fix.
+     */
+    fun openPluginPage(
+        pluginId: String,
+        orgSlug: String,
+        orgId: String,
+        installed: Boolean?,
+    ) {
+        val plain = PluginPageUrl.forPlugin(orgSlug, pluginId, installed = installed) ?: return
+        val supabase = supabaseDataProvider
+        if (supabase == null || orgId.isBlank()) {
+            openUrl(plain)
+            return
+        }
+
+        scope.launch {
+            // runCatching, because rpc() can THROW rather than return a failed Result - the same
+            // reason refreshOrganisationMembership catches. A throw here would take the coroutine
+            // down and the page would never open at all, which is worse than opening it signed out.
+            val raw =
+                runCatching {
+                    supabase.rpc(
+                        "mint_organisation_handoff_token",
+                        // Built through the JSON encoder rather than string interpolation. orgId
+                        // comes from a catalogue row, not a literal, and this VM's other RPC calls
+                        // pass hand-written JSON - which is fine until one of them carries a value
+                        // somebody else chose.
+                        buildJsonObject {
+                            put("p_org_id", orgId)
+                            put("p_purpose", "org_view")
+                        }.toString(),
+                    ).getOrNull()
+                }.getOrNull()
+
+            val token = parseHandoffToken(raw)
+            openUrl(
+                PluginPageUrl.forPlugin(orgSlug, pluginId, installed = installed, handoffToken = token)
+                    ?: plain,
+            )
+        }
+    }
+
+    /**
      * Delete a plugin from the store (admin only).
      */
     fun deleteFromStore(pluginId: String) {
@@ -1290,6 +1381,7 @@ class PluginManagerViewModel(
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        orgId: String? = null,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -1309,6 +1401,7 @@ class PluginManagerViewModel(
                 pluginType = pluginType,
                 apiVersion = apiVersion,
                 minBossVersion = minBossVersion,
+                orgId = orgId,
                 onProgress = onProgress,
                 onSuccess = onSuccess,
                 onError = onError

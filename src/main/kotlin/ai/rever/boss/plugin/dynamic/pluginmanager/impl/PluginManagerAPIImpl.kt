@@ -66,6 +66,21 @@ class PluginManagerAPIImpl(
         private const val SUPABASE_URL = "https://api.risaboss.com"
         private const val STORE_API_URL = "https://api.risaboss.com/functions/v1/plugin-store"
         private const val GITHUB_API_URL = "https://api.github.com"
+
+        /**
+         * Page size asked of `/list` when resolving owning organisations.
+         *
+         * The server caps this and returns its own maximum rather than erroring, so this is a
+         * request, not a guarantee - which is why the caller pages on `totalCount` instead of
+         * trusting one response to be complete.
+         */
+        private const val STORE_ORG_PAGE_SIZE = 100
+
+        /**
+         * Hard stop on that paging. The store list is read as `anon` and the view above caps at
+         * 50 rows anyway, so this is a runaway guard, not a real limit.
+         */
+        private const val MAX_STORE_ORG_PAGES = 10
         // Anon key injected at build time from gradle.properties / CI env var
         private val SUPABASE_ANON_KEY = ai.rever.boss.plugin.dynamic.pluginmanager.BuildConfig.SUPABASE_ANON_KEY
     }
@@ -208,21 +223,48 @@ class PluginManagerAPIImpl(
         category: String?
     ): Result<List<PluginStoreItem>> = withContext(Dispatchers.IO) {
         try {
-            val rows = supabaseClient.from("plugins_with_latest_version")
-                .select(Columns.ALL) {
-                    filter {
-                        eq("published", true)
-                    }
-                    if (!query.isNullOrBlank()) {
+            // READ AS THE SIGNED-IN USER where we can, falling back to the anonymous read.
+            //
+            // `plugins_with_latest_version` is a security_invoker view, so it inherits the SELECT
+            // policy on `plugins`, whose predicate is can_view_plugin_row - and that returns public
+            // plugins only for an anonymous caller. Reading with the anon key alone therefore hid
+            // every `org`-visibility plugin from the members it exists for. 20260803000000 said as
+            // much in its own follow-up list.
+            //
+            // DONE OVER PLAIN HTTP, not by handing the supabase client an accessToken provider.
+            // That provider is what the store's own `apikey` header is built from, and the first
+            // attempt at this turned every catalogue read into "Invalid API key" - the whole store,
+            // for everyone. Here the two headers are set separately and visibly: `apikey` is always
+            // the anon key, `Authorization` is the user. The rest of this file already talks to the
+            // store this way.
+            //
+            // The database still decides which rows come back; this only says who is asking.
+            val rows = fetchCatalogueAsUser(query)
+                ?: supabaseClient.from("plugins_with_latest_version")
+                    .select(Columns.ALL) {
                         filter {
-                            ilike("display_name", "%$query%")
+                            eq("published", true)
                         }
+                        if (!query.isNullOrBlank()) {
+                            filter {
+                                ilike("display_name", "%$query%")
+                            }
+                        }
+                        range(0, 49)
                     }
-                    range(0, 49)
-                }
-                .decodeList<PluginWithVersionRow>()
+                    .decodeList<PluginWithVersionRow>()
+
+            // Which organisation owns each plugin. A SECOND source for one list, which is worth
+            // justifying rather than tidying away: the view above is the only thing that carries
+            // `latest_min_boss_version`, and that field gates whether an update is offered at all
+            // - so the list cannot simply be re-sourced from /list, which does not return it. The
+            // view in turn cannot carry the organisation, because it is `security_invoker` and
+            // this client reads as `anon`, which has no SELECT grant on `organisations`: a join
+            // would make the entire plugin list ERROR, not degrade.
+            val orgByPluginId = fetchStoreOrgs()
 
             val storeItems = rows.map { row ->
+                val org = orgByPluginId[row.pluginId]
                 PluginStoreItem(
                     id = row.id,
                     pluginId = row.pluginId,
@@ -240,7 +282,9 @@ class PluginManagerAPIImpl(
                     verified = row.verified,
                     iconUrl = row.iconUrl ?: "",
                     createdAt = row.createdAt ?: "",
-                    updatedAt = row.updatedAt ?: ""
+                    updatedAt = row.updatedAt ?: "",
+                    orgId = org?.orgId.orEmpty(),
+                    orgSlug = org?.orgSlug.orEmpty()
                 )
             }
 
@@ -251,8 +295,123 @@ class PluginManagerAPIImpl(
             // and folding it into a failed Result writes "the store is unreachable" to the banner.
             throw e
         } catch (e: Exception) {
+            // Said out loud, once per failed fetch. The Result goes to a banner in the panel, so a
+            // broken catalogue was visible to whoever had the Toolbox open and INVISIBLE in the
+            // console - which is how an "Invalid API key" regression that emptied the store for
+            // everyone got shipped and then verified as working. Plugins have no logger; stderr is
+            // what this file already uses to say something went wrong.
+            System.err.println(
+                "[plugin-manager] store fetch failed: ${e::class.simpleName}: ${e.message}",
+            )
             Result.failure(e)
         }
+    }
+
+
+    /**
+     * The catalogue, read as the signed-in user, or null to fall back to the anonymous read.
+     *
+     * Null on ANY doubt - no session, a non-200, a body that will not parse. The anonymous read
+     * that follows is exactly what this client did before organisation visibility existed, so the
+     * worst case here is the old behaviour rather than an empty store. That matters more than
+     * usual: the first version of this feature broke every catalogue read, and a fallback is what
+     * turns "the store is gone" into "you cannot see your organisation's plugins yet".
+     */
+    private suspend fun fetchCatalogueAsUser(query: String?): List<PluginWithVersionRow>? =
+        withContext(Dispatchers.IO) {
+            val token = loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() }
+                ?: return@withContext null
+            runCatching {
+                val filter = StringBuilder("published=eq.true&select=*&limit=50")
+                if (!query.isNullOrBlank()) {
+                    // PostgREST's ilike wildcard is `*`, and the value is user-typed, so it is
+                    // encoded rather than pasted: a `&` in a search box would otherwise add a
+                    // parameter of the searcher's choosing to this request.
+                    val encoded = java.net.URLEncoder.encode("*$query*", "UTF-8")
+                    filter.append("&display_name=ilike.").append(encoded)
+                }
+                val connection =
+                    URL("$SUPABASE_URL/rest/v1/plugins_with_latest_version?$filter")
+                        .openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/json")
+                // The anon key stays the apikey. It identifies the PROJECT; the bearer identifies
+                // the person. Conflating them is what produced "Invalid API key".
+                connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+                connection.setRequestProperty("Authorization", "Bearer $token")
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+                try {
+                    if (connection.responseCode != 200) return@runCatching null
+                    val body = connection.inputStream.bufferedReader().use { it.readText() }
+                    json.decodeFromString<List<PluginWithVersionRow>>(body)
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrNull()
+        }
+
+    /**
+     * Owning organisation per plugin id, from the store's own `/list`.
+     *
+     * FAILS SILENTLY, ON PURPOSE. This is a badge on a card. If the store is unreachable, the
+     * plugin list still came back from the view and must still render - degrading to no badge is
+     * the correct outcome, and turning a decoration into "the store is unreachable" would be a
+     * lie about the thing the user is looking at. Nothing here is load-bearing for install,
+     * update or permission checks.
+     *
+     * Paged, because `/list` caps `pageSize` server-side and silently returns its own maximum: a
+     * single request asking for everything would quietly cover only the first page, and the
+     * plugins missing a badge would be whichever ones sort last. `totalCount` is what says when
+     * to stop. The loop is bounded so a server that never advances cannot spin.
+     */
+    private fun fetchStoreOrgs(): Map<String, StoreOrgRow> {
+        val collected = mutableMapOf<String, StoreOrgRow>()
+        var page = 1
+        try {
+            while (page <= MAX_STORE_ORG_PAGES) {
+                val url = "$STORE_API_URL/list?page=$page&pageSize=$STORE_ORG_PAGE_SIZE"
+                val connection = URL(url).openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/json")
+                connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+                // The user's token, because /list now answers per reader.
+                //
+                // It used to resolve under service role and return the same public-and-published
+                // set to everyone, so a token genuinely changed nothing. Since the org-visibility
+                // work it uses the *_for_viewer variant when it can identify the caller, and
+                // without this header the catalogue read above (which IS authenticated) returns
+                // organisation plugins that this map then has no organisation for - leaving them
+                // with a blank org, no chip, no filter entry and an unclickable card.
+                //
+                // Optional on the server: a missing or stale token yields the public list rather
+                // than an error, so a signed-out user still browses.
+                loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() }?.let {
+                    connection.setRequestProperty("Authorization", "Bearer $it")
+                }
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+
+                if (connection.responseCode != 200) return collected
+                val body = connection.inputStream.bufferedReader().readText()
+                val decoded = json.decodeFromString(StoreOrgListResponse.serializer(), body)
+
+                // An empty page ends the loop even if totalCount disagrees, so a wrong count on
+                // the server cannot turn this into MAX_STORE_ORG_PAGES pointless requests.
+                if (decoded.plugins.isEmpty()) return collected
+                decoded.plugins.forEach { row ->
+                    val id = row.pluginId
+                    if (!id.isNullOrBlank()) collected[id] = row
+                }
+                if (collected.size >= decoded.totalCount) return collected
+                page++
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Deliberately swallowed: see the note above about this being a badge.
+        }
+        return collected
     }
 
     override suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem> = withContext(Dispatchers.IO) {
@@ -1502,6 +1661,7 @@ class PluginManagerAPIImpl(
         pluginType: String,
         apiVersion: String,
         minBossVersion: String,
+        orgId: String?,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -1522,6 +1682,7 @@ class PluginManagerAPIImpl(
                     githubUrl = homepageUrl,
                     changelog = changelog,
                     tags = tags,
+                    orgId = orgId,
                     accessToken = accessToken,
                     onProgress = onProgress,
                     onSuccess = onSuccess,
@@ -1555,11 +1716,22 @@ class PluginManagerAPIImpl(
                 append("\"homepageUrl\": \"${homepageUrl.replace("\"", "\\\"")}\",")
                 append("\"type\": \"$pluginType\",")
                 append("\"apiVersion\": \"$apiVersion\"")
+                // Only when chosen. Omitting the key lets the server derive the organisation the
+                // way it does for a CI publish; sending an empty string would be a value it has to
+                // reject.
+                if (!orgId.isNullOrBlank()) {
+                    append(",\"orgId\": \"$orgId\"")
+                }
                 if (!iconUrl.isNullOrBlank()) {
                     append(",\"iconUrl\": \"${iconUrl.replace("\"", "\\\"")}\"")
                 }
                 if (tags.isNotEmpty()) {
                     append(",\"tags\": [${tags.joinToString(",") { "\"$it\"" }}]")
+                }
+                // Only when chosen, so omitting it keeps the server's own derivation - which is
+                // what a CI publish relies on, since the workflow sends no organisation at all.
+                if (!orgId.isNullOrBlank()) {
+                    append(",\"orgId\": \"$orgId\"")
                 }
                 if (requiredPerms.isNotEmpty()) {
                     append(",\"requiredPermissions\": [${requiredPerms.joinToString(",") { "\"${it.replace("\"", "\\\"")}\"" }}]")
@@ -1703,6 +1875,7 @@ class PluginManagerAPIImpl(
         githubUrl: String,
         changelog: String?,
         tags: List<String>,
+        orgId: String?,
         accessToken: String,
         onProgress: (Float) -> Unit,
         onSuccess: (String) -> Unit,

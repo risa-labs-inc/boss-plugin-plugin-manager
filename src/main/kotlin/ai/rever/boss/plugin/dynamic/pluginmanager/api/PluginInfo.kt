@@ -56,7 +56,22 @@ data class PluginStoreItem(
     val ratingCount: Int = 0,
     val iconUrl: String = "",
     /** Permissions the user must hold to install/use this plugin. Empty = open. */
-    val requiredPermissions: List<String> = emptyList()
+    val requiredPermissions: List<String> = emptyList(),
+    /**
+     * The organisation that owns this plugin, and its slug for display.
+     *
+     * NOT from the same source as the rest of this object. The store list is read from the
+     * `plugins_with_latest_version` view, which does not project `org_id` - and it cannot simply
+     * be added there, because that view is `security_invoker` and the Toolbox reads it as `anon`,
+     * which has no SELECT grant on `organisations` at all. A join would make the whole plugin
+     * list fail, not degrade. So these come from the store's own `/list` endpoint, which resolves
+     * the slug server-side under service role and already returns both fields.
+     *
+     * Empty when that enrichment could not run, which is why it is a defaulted empty string
+     * rather than a nullable: a failed lookup must render no badge, never a broken one.
+     */
+    val orgId: String = "",
+    val orgSlug: String = ""
 )
 
 /**
@@ -242,6 +257,37 @@ data class PluginWithVersionRow(
     @SerialName("latest_version") val latestVersion: String? = null,
     @SerialName("latest_min_boss_version") val latestMinBossVersion: String? = null,
     @SerialName("latest_published_at") val latestPublishedAt: String? = null
+)
+
+/**
+ * The two fields the store's `/list` endpoint is read for.
+ *
+ * Deliberately NOT a full model of that response. This is an enrichment lookup keyed by
+ * `pluginId`, and declaring the twenty other fields it returns would make every future change to
+ * the store's shape a change here too, for data nothing reads. `ignoreUnknownKeys` on the decoder
+ * does the rest.
+ */
+@Serializable
+data class StoreOrgRow(
+    val pluginId: String? = null,
+    /**
+     * NULLABLE, not `String = ""`. A default only covers an ABSENT key; an explicit `null` in a
+     * non-nullable slot throws, and because these arrive inside a list that would fail the whole
+     * response, not one row. Null is reachable here: `plugins.org_id` is nullable, and the RPC
+     * projects `orgSlug` from a subquery over it, so a plugin whose org was never resolved sends
+     * both keys as null. Found by a test - the first version of this model threw on it.
+     */
+    val orgId: String? = null,
+    val orgSlug: String? = null
+)
+
+/** Envelope of `GET /plugin-store/list`. `totalCount` decides whether another page is needed. */
+@Serializable
+data class StoreOrgListResponse(
+    val plugins: List<StoreOrgRow> = emptyList(),
+    val totalCount: Int = 0,
+    val page: Int = 1,
+    val pageSize: Int = 0
 )
 
 /**
