@@ -49,6 +49,18 @@ class PluginDeepLinkActions(
      * the Toolbox has been looked at yet.
      */
     private val refreshInstalled: suspend () -> Unit,
+    /**
+     * Ask the operator, modally, and return their answer. Null on a host with no dialog provider.
+     *
+     * A DIALOG rather than a toast, because this is a question whose answer installs software. A
+     * toast is an announcement that happens to carry a button: it can be missed entirely, it times
+     * out on its own, and dismissing it and answering "no" are the same gesture. Asking whether to
+     * run somebody's code deserves a thing that waits for an answer.
+     *
+     * Still nullable, and the toast below is still the fallback: PluginContext providers may be
+     * absent and a plugin must degrade rather than lose the feature.
+     */
+    private val confirmInstall: (suspend (title: String, message: String) -> Boolean)?,
 ) : DeepLinkActionHandler {
 
     override fun handle(action: String, params: Map<String, String>): Boolean {
@@ -137,6 +149,28 @@ class PluginDeepLinkActions(
                 return@launch
             }
 
+            val title = "Install ${details.displayName}?"
+            // The id is in the message deliberately. Display names are chosen by whoever published
+            // the plugin and two of them can read alike; the id is what will actually be fetched.
+            // version is nullable and latestVersion is the store's other name for it; without this
+            // the dialog offers to install "Fake Plugin null".
+            val version = (details.version ?: details.latestVersion)?.takeIf { it.isNotBlank() }
+            val named = if (version == null) details.displayName else "${details.displayName} $version"
+            val message =
+                "$named will be downloaded from the BOSS plugin store and loaded into this app." +
+                    "\n\n$pluginId"
+
+            val ask = confirmInstall
+            if (ask != null) {
+                val confirmed = runCatching { ask(title, message) }.getOrDefault(false)
+                trace("confirm plugin=$pluginId confirmed=$confirmed")
+                if (!confirmed) return@launch
+                install(pluginId, details.displayName)
+                return@launch
+            }
+
+            // No dialog provider on this host. The toast keeps the feature working rather than
+            // dropping it, and it is the weaker of the two on purpose.
             notifications?.showToast(
                 message = "Install ${details.displayName} from the plugin store?",
                 title = "Install plugin",
@@ -147,34 +181,36 @@ class PluginDeepLinkActions(
                 actionLabel = "Install",
                 onAction = {
                     scope.launch {
-                        // Every arm is reported. An install that quietly did nothing is the
-                        // failure mode a toast-driven flow is most prone to, because there is no
-                        // panel on screen to show a result in.
-                        when (val result = api.installPlugin(pluginId)) {
-                            is InstallResult.Success ->
-                                toast("${details.displayName} installed.", NotificationType.SUCCESS)
-
-                            is InstallResult.AlreadyInstalled ->
-                                toast(
-                                    "${details.displayName} is already installed (${result.currentVersion}).",
-                                    NotificationType.INFO,
-                                )
-
-                            is InstallResult.DownloadFailed ->
-                                toast("Download failed: ${result.error}", NotificationType.ERROR)
-
-                            is InstallResult.LoadFailed ->
-                                toast("Could not load it: ${result.error}", NotificationType.ERROR)
-
-                            is InstallResult.VersionConflict ->
-                                toast(
-                                    "${details.displayName} needs ${result.required}; this BOSS is ${result.available}.",
-                                    NotificationType.ERROR,
-                                )
-                        }
+                        install(pluginId, details.displayName)
                     }
                 },
             )
+        }
+    }
+
+    /**
+     * Do it, and say what happened.
+     *
+     * Every arm is reported. An install that quietly did nothing is the failure mode this flow is
+     * most prone to: there is no panel on screen to show a result in, so silence is indistinguishable
+     * from success.
+     */
+    private suspend fun install(pluginId: String, displayName: String) {
+        when (val result = api.installPlugin(pluginId)) {
+            is InstallResult.Success ->
+                toast("$displayName installed.", NotificationType.SUCCESS)
+
+            is InstallResult.AlreadyInstalled ->
+                toast("$displayName is already installed (${result.currentVersion}).", NotificationType.INFO)
+
+            is InstallResult.DownloadFailed ->
+                toast("Download failed: ${result.error}", NotificationType.ERROR)
+
+            is InstallResult.LoadFailed ->
+                toast("Could not load it: ${result.error}", NotificationType.ERROR)
+
+            is InstallResult.VersionConflict ->
+                toast("$displayName needs ${result.required}; this BOSS is ${result.available}.", NotificationType.ERROR)
         }
     }
 

@@ -78,6 +78,17 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
                     // The impl, not the interface: refreshing is how the handler stops depending
                     // on whether the panel has ever been opened.
                     refreshInstalled = { core.apiImpl.refreshInstalledPlugins() },
+                    // Null on a host without the provider; the handler falls back to a toast.
+                    confirmInstall = context.genericDialogProvider?.let { dialogs ->
+                        { title: String, message: String ->
+                            dialogs.showConfirmationDialog(
+                                title = title,
+                                message = message,
+                                confirmText = "Install",
+                                cancelText = "Cancel",
+                            )
+                        }
+                    },
                 ),
             )
         }

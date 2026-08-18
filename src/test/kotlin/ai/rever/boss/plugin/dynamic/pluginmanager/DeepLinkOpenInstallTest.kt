@@ -143,11 +143,17 @@ class DeepLinkOpenInstallTest {
         override fun dismissAll() {}
     }
 
+    /** Records what the dialog was asked, and answers with [confirmAnswer]. */
+    private class FakeDialogs(val confirmAnswer: Boolean) {
+        val asked = mutableListOf<Pair<String, String>>()
+    }
+
     private fun handler(
         api: FakeApi,
         notes: FakeNotifications,
         revealed: MutableList<String>,
         canReveal: Boolean = true,
+        dialogs: FakeDialogs? = null,
     ) = PluginDeepLinkActions(
         handlerId = "toolbox",
         api = api,
@@ -157,6 +163,9 @@ class DeepLinkOpenInstallTest {
         scope = CoroutineScope(Dispatchers.Unconfined),
         revealPlugin = { id -> revealed += id; canReveal },
         refreshInstalled = { api.refresh() },
+        confirmInstall = dialogs?.let { d ->
+            { title: String, message: String -> d.asked += title to message; d.confirmAnswer }
+        },
     )
 
     private val installed = listOf(PluginInfo("a.b.c", "Fake Plugin", "1.0.0"))
@@ -242,5 +251,59 @@ class DeepLinkOpenInstallTest {
         assertEquals(false, h.handle("open", mapOf("plugin" to "a/b")))
         assertEquals(false, h.handle("open", emptyMap()))
         assertEquals(0, api.refreshes, "a refused link still touched the host")
+    }
+
+    @Test
+    fun `install asks in a dialog, and installs only when it is confirmed`() {
+        // A dialog, not a toast: this question's answer runs somebody else's code, and a toast can
+        // be missed entirely, times out on its own, and makes "dismiss" and "no" the same gesture.
+        val api = FakeApi(onRefresh = emptyList())
+        val notes = FakeNotifications()
+        val dialogs = FakeDialogs(confirmAnswer = true)
+
+        handler(api, notes, mutableListOf(), dialogs = dialogs).handle("install", mapOf("plugin" to "a.b.c"))
+
+        assertEquals(1, dialogs.asked.size, "no dialog was shown")
+        assertTrue(dialogs.asked[0].first.contains("Fake Plugin"), dialogs.asked[0].first)
+        // The id is in the message: display names are publisher-chosen and two can read alike.
+        assertTrue(dialogs.asked[0].second.contains("a.b.c"), dialogs.asked[0].second)
+        assertEquals(listOf("a.b.c"), api.installedCalls)
+        // No toast prompt when a dialog was available - one question, asked once.
+        assertTrue(notes.toasts.none { it.startsWith("Install ") }, notes.toasts.toString())
+    }
+
+    @Test
+    fun `declining the dialog installs nothing`() {
+        val api = FakeApi(onRefresh = emptyList())
+        val dialogs = FakeDialogs(confirmAnswer = false)
+
+        handler(api, FakeNotifications(), mutableListOf(), dialogs = dialogs).handle("install", mapOf("plugin" to "a.b.c"))
+
+        assertEquals(1, dialogs.asked.size)
+        assertTrue(api.installedCalls.isEmpty(), "installed after being declined: ${api.installedCalls}")
+    }
+
+    @Test
+    fun `open on an absent plugin asks in the dialog too`() {
+        val api = FakeApi(onRefresh = emptyList())
+        val dialogs = FakeDialogs(confirmAnswer = true)
+
+        handler(api, FakeNotifications(), mutableListOf(), dialogs = dialogs).handle("open", mapOf("plugin" to "a.b.c"))
+
+        assertEquals(1, dialogs.asked.size, "open fell back to the toast")
+    }
+
+    @Test
+    fun `a host with no dialog provider still works, via the toast`() {
+        // Providers may be absent; a plugin degrades rather than losing the feature.
+        val api = FakeApi(onRefresh = emptyList())
+        val notes = FakeNotifications()
+
+        handler(api, notes, mutableListOf(), dialogs = null).handle("install", mapOf("plugin" to "a.b.c"))
+
+        assertTrue(notes.toasts.any { it.startsWith("Install ") }, notes.toasts.toString())
+        assertTrue(api.installedCalls.isEmpty(), "installed without asking")
+        notes.lastAction!!.invoke()
+        assertEquals(listOf("a.b.c"), api.installedCalls)
     }
 }
