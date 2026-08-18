@@ -65,6 +65,14 @@ fun matchesOrgFilter(
 data class StoreProvenance(
     val author: String,
     val orgSlug: String,
+    /**
+     * The owning organisation's UUID, for minting a web-page handoff.
+     *
+     * The slug addresses the page; the id is what `mint_organisation_handoff_token` takes. Kept
+     * beside the slug rather than looked up later because both come from the same catalogue row,
+     * and a second lookup could only ever disagree with it.
+     */
+    val orgId: String = "",
 )
 
 /**
@@ -88,4 +96,10 @@ fun storeProvenanceByPluginId(items: List<PluginStoreItem>): Map<String, StorePr
         // one id would then depend on server ordering for what is shown. First wins, matching the
         // order the store returned.
         .distinctBy { it.pluginId }
-        .associate { it.pluginId to StoreProvenance(author = it.author, orgSlug = it.orgSlug) }
+        .associate {
+            it.pluginId to StoreProvenance(
+                author = it.author,
+                orgSlug = it.orgSlug,
+                orgId = it.orgId,
+            )
+        }

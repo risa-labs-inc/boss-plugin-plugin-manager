@@ -42,13 +42,28 @@ object PluginPageUrl {
          * stale or absent flag costs a wrong label and nothing else.
          */
         installed: Boolean? = null,
+        /**
+         * A single-use handoff token, or null to open the page signed out.
+         *
+         * This is what turns the page from the public view into the one that can change
+         * visibility: the page exchanges it for an org session and then decides, server-side,
+         * whether the holder is an admin. Minting it requires membership, so a non-member simply
+         * has none and sees the public page - which is the correct outcome, not a degraded one.
+         */
+        handoffToken: String? = null,
     ): String? {
         if (orgSlug.isBlank() || pluginId.isBlank()) return null
-        val query = when (installed) {
-            true -> "?installed=1"
-            false -> "?installed=0"
-            null -> ""
+        val params = buildList {
+            // `t` first, because that is how every other handoff link in this app reads. The page
+            // strips it and redirects to the rest, so the others must survive it.
+            if (!handoffToken.isNullOrBlank()) add("t=" + encodePathSegment(handoffToken))
+            when (installed) {
+                true -> add("installed=1")
+                false -> add("installed=0")
+                null -> {}
+            }
         }
+        val query = if (params.isEmpty()) "" else "?" + params.joinToString("&")
         return "$base/o/${encodePathSegment(orgSlug)}/plugins/${encodePathSegment(pluginId)}$query"
     }
 

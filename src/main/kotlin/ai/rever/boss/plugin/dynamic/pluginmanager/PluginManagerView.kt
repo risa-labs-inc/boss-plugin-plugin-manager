@@ -1407,6 +1407,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onInstallFromFile = { viewModel.installFromFilePicker() },
                         onInstallFromGitHub = { url -> viewModel.installFromGitHub(url) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        onOpenPage = { id, slug, orgId, installed ->
+                            viewModel.openPluginPage(id, slug, orgId, installed)
+                        },
                         onOpenPlugin = { p -> viewModel.openPlugin(p.pluginId, p.url) },
                         openablePlugins = state.openablePlugins,
                         isLoading = state.isLoading,
@@ -1431,6 +1434,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdate = { pluginId -> viewModel.updatePlugin(pluginId) },
                         onDeleteFromStore = { pluginId -> viewModel.deleteFromStore(pluginId) },
                         onOpenHomepage = { url -> viewModel.openUrl(url) },
+                        onOpenPage = { id, slug, orgId, installed ->
+                            viewModel.openPluginPage(id, slug, orgId, installed)
+                        },
                         onShowVersions = { item ->
                             viewModel.openVersions(
                                 item.pluginId,
@@ -1463,6 +1469,9 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onUpdateAll = { viewModel.updateAllPlugins() },
                         isLoading = state.isLoading,
                         onOpenUrl = { url -> viewModel.openUrl(url) },
+                        onOpenPage = { id, slug, orgId, installed ->
+                            viewModel.openPluginPage(id, slug, orgId, installed)
+                        },
                         busyPlugins = state.busyPlugins,
                         provenanceByPluginId = provenanceByPluginId
                     )
@@ -1806,7 +1815,15 @@ private fun InstalledPluginsTab(
     provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
     mcpToolRegistry: McpToolRegistry? = null,
     permissionDescriptions: Map<String, String> = emptyMap(),
-    onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) }
+    onExtractManifest: (String, (ExtractedManifest?) -> Unit) -> Unit = { _, cb -> cb(null) },
+    /**
+     * Open a plugin's web page, signed in where the reader belongs to the owning organisation.
+     *
+     * A callback rather than a URL: the address now depends on a handoff token minted
+     * asynchronously, and whether it can be minted at all is the server's decision to make.
+     */
+    onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
+        { _, _, _, _ -> },
 ) {
     var showGitHubDialog by remember { mutableStateOf(false) }
     var gitHubUrl by remember { mutableStateOf("") }
@@ -2011,12 +2028,10 @@ private fun InstalledPluginsTab(
                     onUpdate = { onUpdate(plugin.pluginId) },
                     onOpenHomepage = { plugin.url?.let { onOpenHomepage(it) } },
                     onOpenPlugin = { onOpenPlugin(plugin) },
-                    onOpenPage = PluginPageUrl.forPlugin(
-                        provenanceByPluginId[plugin.pluginId]?.orgSlug.orEmpty(),
-                        plugin.pluginId,
+                    onOpenPage = provenanceByPluginId[plugin.pluginId]
+                        ?.takeIf { it.orgSlug.isNotBlank() }
                         // On this tab it is installed by definition.
-                        installed = true,
-                    )?.let { url -> { onOpenHomepage(url) } },
+                        ?.let { p -> { onOpenPage(plugin.pluginId, p.orgSlug, p.orgId, true) } },
                     canOpen = plugin.pluginId in openablePlugins,
                     onShowVersions = { onShowVersions(plugin) },
                     isLoading = plugin.pluginId in busyPlugins,
@@ -2284,7 +2299,15 @@ private fun AvailablePluginsTab(
     isStoreAdmin: Boolean,
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
-    permissionDescriptions: Map<String, String> = emptyMap()
+    permissionDescriptions: Map<String, String> = emptyMap(),
+    /**
+     * Open a plugin's web page, signed in where the reader belongs to the owning organisation.
+     *
+     * A callback rather than a URL: the address now depends on a handoff token minted
+     * asynchronously, and whether it can be minted at all is the server's decision to make.
+     */
+    onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
+        { _, _, _, _ -> },
 ) {
     // Confirmation dialog state for delete from store
     var pluginToDelete by remember { mutableStateOf<PluginStoreItem?>(null) }
@@ -2369,11 +2392,16 @@ private fun AvailablePluginsTab(
                     canInstall = canInstall(plugin),
                     canOpen = plugin.pluginId in openablePlugins,
                     onOpenPlugin = { onOpenPlugin(plugin) },
-                    onOpenPage = PluginPageUrl.forPlugin(
-                        plugin.orgSlug,
-                        plugin.pluginId,
-                        installed = plugin.pluginId in installedIds,
-                    )?.let { url -> { onOpenHomepage(url) } },
+                    onOpenPage = plugin.orgSlug.takeIf { it.isNotBlank() }?.let { slug ->
+                        {
+                            onOpenPage(
+                                plugin.pluginId,
+                                slug,
+                                plugin.orgId,
+                                plugin.pluginId in installedIds,
+                            )
+                        }
+                    },
                     isStoreAdmin = isStoreAdmin,
                     isLoading = plugin.pluginId in busyPlugins,
                     onShowPermissions = { permDialogItem = plugin }
@@ -2627,6 +2655,14 @@ private fun UpdatesTab(
     provenanceByPluginId: Map<String, StoreProvenance> = emptyMap(),
     /** Open a web address. Used for the plugin page each row links to. */
     onOpenUrl: (String) -> Unit = {},
+    /**
+     * Open a plugin's web page, signed in where the reader belongs to the owning organisation.
+     *
+     * A callback rather than a URL: the address now depends on a handoff token minted
+     * asynchronously, and whether it can be minted at all is the server's decision to make.
+     */
+    onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
+        { _, _, _, _ -> },
 ) {
     Column(
         modifier = Modifier
@@ -2675,12 +2711,10 @@ private fun UpdatesTab(
                         isLoading = update.pluginId in busyPlugins,
                         author = provenanceByPluginId[update.pluginId]?.author.orEmpty(),
                         orgSlug = provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty(),
-                        onOpenPage = PluginPageUrl.forPlugin(
-                            provenanceByPluginId[update.pluginId]?.orgSlug.orEmpty(),
-                            update.pluginId,
+                        onOpenPage = provenanceByPluginId[update.pluginId]
+                            ?.takeIf { it.orgSlug.isNotBlank() }
                             // An update only exists for something already installed.
-                            installed = true,
-                        )?.let { url -> { onOpenUrl(url) } }
+                            ?.let { p -> { onOpenPage(update.pluginId, p.orgSlug, p.orgId, true) } }
                     )
                 }
             }

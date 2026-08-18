@@ -6,6 +6,8 @@ import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHandoffToken
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PanelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.RegisteredSurface
@@ -18,6 +20,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePublishTargets
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseMembership
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHandoffToken
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.retainPendingRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.submitRequestError
@@ -1239,6 +1242,60 @@ class PluginManagerViewModel(
     fun openUrl(url: String) {
         if (url.isNotBlank()) {
             onOpenUrl?.invoke(url)
+        }
+    }
+
+    /**
+     * Open a plugin's web page, signed in where that is possible.
+     *
+     * WHY A TOKEN AT ALL. The page is served by an edge function and decides what to show from the
+     * session it holds, so opening it with none renders the public view - and an administrator
+     * clicking their own organisation's plugin got a read-only page with no visibility control.
+     * A handoff token is how these pages are entered from the app; the page exchanges it for a
+     * session, strips it from the URL, and then decides admin-ness SERVER-SIDE. Nothing here
+     * asserts any authority, and the token is single-use and short-lived.
+     *
+     * MINTING IS MEMBERS-ONLY, so a non-member gets none and sees the public page. That is the
+     * right answer rather than a degraded one, and it is why every failure below simply opens
+     * without a token instead of reporting anything: there is nothing wrong for the reader to fix.
+     */
+    fun openPluginPage(
+        pluginId: String,
+        orgSlug: String,
+        orgId: String,
+        installed: Boolean?,
+    ) {
+        val plain = PluginPageUrl.forPlugin(orgSlug, pluginId, installed = installed) ?: return
+        val supabase = supabaseDataProvider
+        if (supabase == null || orgId.isBlank()) {
+            openUrl(plain)
+            return
+        }
+
+        scope.launch {
+            // runCatching, because rpc() can THROW rather than return a failed Result - the same
+            // reason refreshOrganisationMembership catches. A throw here would take the coroutine
+            // down and the page would never open at all, which is worse than opening it signed out.
+            val raw =
+                runCatching {
+                    supabase.rpc(
+                        "mint_organisation_handoff_token",
+                        // Built through the JSON encoder rather than string interpolation. orgId
+                        // comes from a catalogue row, not a literal, and this VM's other RPC calls
+                        // pass hand-written JSON - which is fine until one of them carries a value
+                        // somebody else chose.
+                        buildJsonObject {
+                            put("p_org_id", orgId)
+                            put("p_purpose", "org_view")
+                        }.toString(),
+                    ).getOrNull()
+                }.getOrNull()
+
+            val token = parseHandoffToken(raw)
+            openUrl(
+                PluginPageUrl.forPlugin(orgSlug, pluginId, installed = installed, handoffToken = token)
+                    ?: plain,
+            )
         }
     }
 

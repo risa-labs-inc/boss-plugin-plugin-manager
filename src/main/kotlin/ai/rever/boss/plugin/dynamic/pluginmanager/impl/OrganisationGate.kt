@@ -417,3 +417,23 @@ fun parsePublishTargets(raw: String?): List<PublishTarget> {
         }
     }.getOrDefault(emptyList())
 }
+
+/**
+ * The token from `mint_organisation_handoff_token`, or null.
+ *
+ * Null is the ordinary answer, not an error: minting is members-only, so anyone outside the owning
+ * organisation gets a refusal here and opens the plugin's page signed out - which is the public
+ * view they are entitled to. The caller must not report anything for it.
+ *
+ * The envelope is checked before the token is read. `{"success": false, "error": "..."}` carries no
+ * token, and reading a missing key as an empty string would put `?t=` on the URL with nothing after
+ * it, which the page would try to exchange and refuse.
+ */
+fun parseHandoffToken(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    return runCatching {
+        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return null
+        if (root["success"]?.jsonPrimitive?.booleanOrNull != true) return null
+        root["token"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+}

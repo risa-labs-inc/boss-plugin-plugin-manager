@@ -83,4 +83,32 @@ class PluginPageUrlTest {
         val url = PluginPageUrl.forPlugin("risa", "a b", installed = true)!!
         assertTrue(url.endsWith("/plugins/a%20b?installed=1"), url)
     }
+
+    @Test
+    fun `a handoff token rides along with the installed hint`() {
+        // Both matter and both must survive: the page exchanges `t` for a session and redirects to
+        // the SAME url minus that one parameter, so anything else on it has to still be there
+        // afterwards or the label reverts to "unknown" the moment you sign in.
+        val url = PluginPageUrl.forPlugin("risa", "x.y", installed = true, handoffToken = "tok123")!!
+        assertTrue(url.contains("t=tok123"), url)
+        assertTrue(url.contains("installed=1"), url)
+        assertTrue(url.contains("?"), url)
+        assertEquals(1, url.count { it == '?' }, "more than one query separator: $url")
+    }
+
+    @Test
+    fun `no token means no t parameter at all`() {
+        // An empty `t=` is worse than none: the page would try to exchange it and refuse.
+        assertTrue(!PluginPageUrl.forPlugin("risa", "x.y", handoffToken = null)!!.contains("t="))
+        assertTrue(!PluginPageUrl.forPlugin("risa", "x.y", handoffToken = "")!!.contains("t="))
+        assertTrue(!PluginPageUrl.forPlugin("risa", "x.y", handoffToken = "  ")!!.contains("t="))
+    }
+
+    @Test
+    fun `a token is encoded into the query`() {
+        // Tokens are url-safe base64 today, so this changes nothing now; it means a token that ever
+        // carries a + or / cannot end the parameter early.
+        val url = PluginPageUrl.forPlugin("risa", "x.y", handoffToken = "a+b/c=")!!
+        assertTrue(url.contains("t=a%2Bb%2Fc%3D"), url)
+    }
 }
