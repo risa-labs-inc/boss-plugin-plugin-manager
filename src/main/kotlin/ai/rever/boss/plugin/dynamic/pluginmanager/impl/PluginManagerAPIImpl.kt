@@ -92,31 +92,6 @@ class PluginManagerAPIImpl(
             supabaseKey = SUPABASE_ANON_KEY
         ) {
             install(Postgrest)
-            // READ AS THE SIGNED-IN USER, not as `anon`.
-            //
-            // `plugins_with_latest_version` is a security_invoker view, so it inherits the SELECT
-            // policy on `plugins`, whose predicate is can_view_plugin_row - and that returns public
-            // plugins only for an anonymous caller. Reading the catalogue with the anon key alone
-            // therefore hid every `org`-visibility plugin from the very members it is visible to.
-            // 20260803000000 says as much in its own follow-up list: "its anon grant now yields
-            // public plugins only ... that IS a behaviour change for any consumer that expected
-            // everything."
-            //
-            // The database still decides. This supplies an identity; which rows it unlocks is
-            // can_view_plugin_row's answer, so nothing here can widen access beyond the policy - a
-            // member sees their organisation's plugins, and `unlisted` stays admin-only.
-            //
-            // Suspend and read per request, never captured once: getAccessToken() returns the
-            // CURRENT session, and the host refreshes it. Holding a token at construction would
-            // work until the first refresh and then quietly fall back to anon-shaped results, which
-            // looks like plugins disappearing rather than like an auth failure.
-            // Falls back to the anon key rather than returning nothing. A signed-out user, or a
-            // host whose delegate is absent, must still get the public catalogue - handing the
-            // client an empty bearer would break browsing the store entirely, which is a far worse
-            // failure than not seeing organisation plugins.
-            accessToken = {
-                loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() } ?: SUPABASE_ANON_KEY
-            }
         }
     }
 
@@ -248,19 +223,36 @@ class PluginManagerAPIImpl(
         category: String?
     ): Result<List<PluginStoreItem>> = withContext(Dispatchers.IO) {
         try {
-            val rows = supabaseClient.from("plugins_with_latest_version")
-                .select(Columns.ALL) {
-                    filter {
-                        eq("published", true)
-                    }
-                    if (!query.isNullOrBlank()) {
+            // READ AS THE SIGNED-IN USER where we can, falling back to the anonymous read.
+            //
+            // `plugins_with_latest_version` is a security_invoker view, so it inherits the SELECT
+            // policy on `plugins`, whose predicate is can_view_plugin_row - and that returns public
+            // plugins only for an anonymous caller. Reading with the anon key alone therefore hid
+            // every `org`-visibility plugin from the members it exists for. 20260803000000 said as
+            // much in its own follow-up list.
+            //
+            // DONE OVER PLAIN HTTP, not by handing the supabase client an accessToken provider.
+            // That provider is what the store's own `apikey` header is built from, and the first
+            // attempt at this turned every catalogue read into "Invalid API key" - the whole store,
+            // for everyone. Here the two headers are set separately and visibly: `apikey` is always
+            // the anon key, `Authorization` is the user. The rest of this file already talks to the
+            // store this way.
+            //
+            // The database still decides which rows come back; this only says who is asking.
+            val rows = fetchCatalogueAsUser(query)
+                ?: supabaseClient.from("plugins_with_latest_version")
+                    .select(Columns.ALL) {
                         filter {
-                            ilike("display_name", "%$query%")
+                            eq("published", true)
                         }
+                        if (!query.isNullOrBlank()) {
+                            filter {
+                                ilike("display_name", "%$query%")
+                            }
+                        }
+                        range(0, 49)
                     }
-                    range(0, 49)
-                }
-                .decodeList<PluginWithVersionRow>()
+                    .decodeList<PluginWithVersionRow>()
 
             // Which organisation owns each plugin. A SECOND source for one list, which is worth
             // justifying rather than tidying away: the view above is the only thing that carries
@@ -306,6 +298,50 @@ class PluginManagerAPIImpl(
             Result.failure(e)
         }
     }
+
+
+    /**
+     * The catalogue, read as the signed-in user, or null to fall back to the anonymous read.
+     *
+     * Null on ANY doubt - no session, a non-200, a body that will not parse. The anonymous read
+     * that follows is exactly what this client did before organisation visibility existed, so the
+     * worst case here is the old behaviour rather than an empty store. That matters more than
+     * usual: the first version of this feature broke every catalogue read, and a fallback is what
+     * turns "the store is gone" into "you cannot see your organisation's plugins yet".
+     */
+    private suspend fun fetchCatalogueAsUser(query: String?): List<PluginWithVersionRow>? =
+        withContext(Dispatchers.IO) {
+            val token = loaderDelegate?.getAccessToken()?.takeIf { it.isNotBlank() }
+                ?: return@withContext null
+            runCatching {
+                val filter = StringBuilder("published=eq.true&select=*&limit=50")
+                if (!query.isNullOrBlank()) {
+                    // PostgREST's ilike wildcard is `*`, and the value is user-typed, so it is
+                    // encoded rather than pasted: a `&` in a search box would otherwise add a
+                    // parameter of the searcher's choosing to this request.
+                    val encoded = java.net.URLEncoder.encode("*$query*", "UTF-8")
+                    filter.append("&display_name=ilike.").append(encoded)
+                }
+                val connection =
+                    URL("$SUPABASE_URL/rest/v1/plugins_with_latest_version?$filter")
+                        .openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/json")
+                // The anon key stays the apikey. It identifies the PROJECT; the bearer identifies
+                // the person. Conflating them is what produced "Invalid API key".
+                connection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
+                connection.setRequestProperty("Authorization", "Bearer $token")
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+                try {
+                    if (connection.responseCode != 200) return@runCatching null
+                    val body = connection.inputStream.bufferedReader().use { it.readText() }
+                    json.decodeFromString<List<PluginWithVersionRow>>(body)
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrNull()
+        }
 
     /**
      * Owning organisation per plugin id, from the store's own `/list`.
