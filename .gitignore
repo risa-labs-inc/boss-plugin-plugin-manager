@@ -23,3 +23,8 @@ gradle.properties
 .codex/
 .gemini/
 .opencode/
+
+# Git worktrees. Feature checkouts live under .worktrees/, so without this the directory
+# shows up as untracked in `git status` on every branch. Ignored rather than tracked because
+# what lives there is per-developer and per-task.
+.worktrees/
