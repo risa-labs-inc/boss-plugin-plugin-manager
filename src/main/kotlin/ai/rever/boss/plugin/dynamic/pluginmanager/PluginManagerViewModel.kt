@@ -1022,6 +1022,12 @@ class PluginManagerViewModel(
                         error = "Uninstall failed: ${result.error}"
                     )
                 }
+                // The user declined the host's prompt about restarting the plugins that depend
+                // on this one. Nothing happened, and nothing went wrong - so clear the spinner
+                // and say nothing rather than leaving a red banner over their own decision.
+                is UninstallResult.CancelledByUser -> {
+                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
+                }
             }
         }
     }
@@ -1498,6 +1504,12 @@ internal fun failureReasonFor(
         // it and a future producer must not land back in a silent branch.
         is InstallResult.VersionConflict ->
             "needs version ${result.required}, but ${result.available} is available"
+        // The user declined the host's prompt about restarting the plugins that depend on this
+        // one. Null, so no banner: nothing was downloaded and nothing was unloaded, and telling
+        // someone their own Cancel "failed" is worse than saying nothing. It is also not counted
+        // as a failure by Update All, which would otherwise report a decline alongside real
+        // errors and keep the row looking broken.
+        is InstallResult.CancelledByUser -> null
     }
 
 /**
