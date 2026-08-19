@@ -211,6 +211,12 @@ class PluginDeepLinkActions(
 
             is InstallResult.VersionConflict ->
                 toast("$displayName needs ${result.required}; this BOSS is ${result.available}.", NotificationType.ERROR)
+
+            // The user declined the host's prompt about restarting the plugins that depend on
+            // this one. Still reported, because this flow has no panel on screen and silence
+            // would look identical to success - but as INFO, not an error they caused.
+            is InstallResult.CancelledByUser ->
+                toast("$displayName was left as it is.", NotificationType.INFO)
         }
     }
 

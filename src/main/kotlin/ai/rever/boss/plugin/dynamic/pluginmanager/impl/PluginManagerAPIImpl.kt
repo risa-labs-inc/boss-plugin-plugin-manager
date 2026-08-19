@@ -2,6 +2,8 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
+import ai.rever.boss.plugin.api.PluginUnloadIntent
+import ai.rever.boss.plugin.dynamic.pluginmanager.HostUnload
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadKind
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadProgressTracker
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
@@ -853,8 +855,12 @@ class PluginManagerAPIImpl(
             persistSignatureSidecar(destFile, downloadInfo.signature)
 
             // Replace any already-loaded copy so the new version loads cleanly
-            // (no manual uninstall needed).
-            unloadIfAlreadyLoaded(destFile, knownPluginId = pluginId)
+            // (no manual uninstall needed). A declined dependent-restart prompt stops here: the
+            // downloaded jar stays on disk for a later attempt, and loading it now would fail
+            // with "Plugin already loaded" anyway.
+            if (!unloadIfAlreadyLoaded(destFile, knownPluginId = pluginId)) {
+                return InstallResult.CancelledByUser
+            }
 
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
@@ -921,13 +927,20 @@ class PluginManagerAPIImpl(
      *
      * Unloading only detaches the plugin from the runtime — it does not delete
      * the JAR — so the freshly-downloaded JAR we're about to load is untouched.
+     *
+     * Declared as an UPDATE: the new jar is on disk and about to be loaded, so if the host asks
+     * about restarting dependents it can promise they come back on the new version, and hold
+     * their restart until it lands rather than reloading them into the gap.
+     *
+     * @return false when the user declined the host's prompt, so the caller stops rather than
+     *   pressing on to a load that would fail with "Plugin already loaded".
      */
-    private suspend fun unloadIfAlreadyLoaded(jarFile: File, knownPluginId: String? = null) {
-        val delegate = loaderDelegate ?: return
-        val pluginId = knownPluginId ?: readPluginIdFromJar(jarFile) ?: return
-        if (delegate.isPluginLoaded(pluginId)) {
-            delegate.unloadPlugin(pluginId)
-        }
+    private suspend fun unloadIfAlreadyLoaded(jarFile: File, knownPluginId: String? = null): Boolean {
+        val delegate = loaderDelegate ?: return true
+        val pluginId = knownPluginId ?: readPluginIdFromJar(jarFile) ?: return true
+        if (!delegate.isPluginLoaded(pluginId)) return true
+        val result = HostUnload.unloadWithIntent(delegate, pluginId, PluginUnloadIntent.UPDATE)
+        return !result.cancelledByUser
     }
 
     /**
@@ -1041,8 +1054,10 @@ class PluginManagerAPIImpl(
             persistSignatureSidecar(destFile, null)
 
             // Replace any already-loaded copy so the new version loads cleanly
-            // (no manual uninstall needed).
-            unloadIfAlreadyLoaded(destFile)
+            // (no manual uninstall needed). A declined dependent-restart prompt stops here.
+            if (!unloadIfAlreadyLoaded(destFile)) {
+                return InstallResult.CancelledByUser
+            }
 
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
@@ -1097,8 +1112,10 @@ class PluginManagerAPIImpl(
             persistSignatureSidecar(destFile, null)
 
             // Replace any already-loaded copy so the new version loads cleanly
-            // (no manual uninstall needed).
-            unloadIfAlreadyLoaded(destFile)
+            // (no manual uninstall needed). A declined dependent-restart prompt stops here.
+            if (!unloadIfAlreadyLoaded(destFile)) {
+                return@withContext InstallResult.CancelledByUser
+            }
 
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
@@ -1123,7 +1140,20 @@ class PluginManagerAPIImpl(
         }
     }
 
-    override suspend fun uninstallPlugin(pluginId: String): UninstallResult = withContext(Dispatchers.IO) {
+    override suspend fun uninstallPlugin(pluginId: String): UninstallResult =
+        uninstallPlugin(pluginId, PluginUnloadIntent.REMOVE)
+
+    /**
+     * @param intent why the plugin is going. [updatePluginInternal] reuses this whole function
+     *   to make room for the new version, and it is not a removal: the host words its
+     *   dependent-restart prompt from this, and holds the dependents' restart until the new
+     *   version loads instead of reloading them into the gap. Passing REMOVE there would tell
+     *   someone that Flow is about to stop working, seconds before it came back.
+     */
+    private suspend fun uninstallPlugin(
+        pluginId: String,
+        intent: PluginUnloadIntent,
+    ): UninstallResult = withContext(Dispatchers.IO) {
         val plugin = getInstalledPlugin(pluginId)
             ?: return@withContext UninstallResult.NotFound(pluginId)
 
@@ -1132,19 +1162,42 @@ class PluginManagerAPIImpl(
         }
 
         try {
-            // Unload from runtime via delegate
-            val unloaded = loaderDelegate?.unloadPlugin(pluginId) ?: false
-            if (!unloaded && loaderDelegate != null) {
-                // The delegate hands back a bare Boolean, so the host's reasons cannot reach
-                // here - say where they are instead of restating the failure. The host logs
-                // them as "Plugin unload refused".
+            // Unload from runtime via delegate. On a REMOVE the host words its
+            // dependent-restart prompt as "this will stop working" rather than promising a newer
+            // version, and restarts the dependents straight away instead of holding them for a
+            // load that will never arrive; on an UPDATE it does the opposite.
+            val delegate = loaderDelegate
+            val result = delegate?.let { HostUnload.unloadWithIntent(it, pluginId, intent) }
+            if (result != null && !result.unloaded) {
+                // Declining is an answer, not a fault: the plugin is untouched and its jar is
+                // still on disk. Reporting it as a failure put "Uninstall failed" in front of
+                // someone who had just pressed Cancel.
+                if (result.cancelledByUser) return@withContext UninstallResult.CancelledByUser
+                // The host's own reasons, which name the plugins standing in the way. Before
+                // api 1.0.79 this could only be guessed at - the delegate returned a bare
+                // Boolean and the reasons went to the host log and nowhere else.
                 return@withContext UninstallResult.Failed(
-                    "the host refused to unload it (it may still be in use by another plugin)"
+                    result.reasons.takeIf { it.isNotEmpty() }?.joinToString("; ")
+                        ?: "the host refused to unload it (see the app logs for why)"
                 )
             }
 
-            // Delete JAR file (and its signature sidecar)
-            if (plugin.jarPath.isNotBlank()) {
+            // Delete the JAR (and its signature sidecar) only when the plugin is actually going.
+            //
+            // An UPDATE reuses this function to make room for the new version, and deleting here
+            // destroyed the plugin whenever the download that follows failed: `updatePluginInternal`
+            // is uninstall-then-reinstall with no rollback, so a store 404 left the user with no
+            // plugin at all and nothing on disk to fall back to. Seen live, on the AI Gateway.
+            //
+            // Nothing leaks by keeping it: both install paths finish with
+            // `cleanupOldVersionJars(pluginId, newJar, previousJarPath)`, which removes the old
+            // file once the new one has actually loaded - the delete belongs after the success,
+            // not before the attempt.
+            //
+            // This mattered less before the host started asking about dependents rather than
+            // refusing outright: the AI Gateway's update was blocked at the unload, so it never
+            // reached the delete. Now it does.
+            if (intent == PluginUnloadIntent.REMOVE && plugin.jarPath.isNotBlank()) {
                 val jarFile = File(plugin.jarPath)
                 if (jarFile.exists()) {
                     jarFile.delete()
@@ -1189,10 +1242,18 @@ class PluginManagerAPIImpl(
             return result
         }
 
-        // Regular plugins: uninstall then reinstall
-        val uninstallResult = uninstallPlugin(pluginId)
+        // Regular plugins: uninstall then reinstall. Declared as an UPDATE, not a removal - the
+        // plugin comes straight back at a newer version, and the host's prompt and its restart
+        // timing both depend on knowing that.
+        val uninstallResult = uninstallPlugin(pluginId, PluginUnloadIntent.UPDATE)
         if (uninstallResult is UninstallResult.CannotUnload) {
             return InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
+        }
+        // Cancelled, not failed. Nothing was downloaded and nothing was unloaded, so the plugin
+        // is still running the version it was - reporting this as an error would put "Update
+        // failed" in front of someone who had just pressed Cancel.
+        if (uninstallResult is UninstallResult.CancelledByUser) {
+            return InstallResult.CancelledByUser
         }
         if (uninstallResult is UninstallResult.Failed) {
             return InstallResult.LoadFailed("could not replace the installed version - ${uninstallResult.error}")

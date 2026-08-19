@@ -164,4 +164,22 @@ class UpdateOutcomeTest {
 
         assertEquals(emptyList(), remainingUpdates(current, succeeded = setOf("a", "b")))
     }
+
+    @Test
+    fun `declining the dependent-restart prompt says nothing at all`() {
+        // The opposite failure mode to the one above, and the reason it is not simply folded
+        // into LoadFailed: the user pressed Cancel on the host's prompt, so nothing was
+        // downloaded and nothing was unloaded. "Update failed" over their own answer would be
+        // wrong, and would leave a red banner they cannot clear by doing anything differently.
+        assertNull(outcomeErrorFor(InstallResult.CancelledByUser, PluginAction.UPDATE))
+        assertNull(outcomeErrorFor(InstallResult.CancelledByUser, PluginAction.INSTALL))
+    }
+
+    @Test
+    fun `a decline is not counted as a failure`() {
+        // failureReasonFor feeds Update All's tally as well as the single-plugin banner. A
+        // decline counted there would name the plugin alongside real errors and keep its row
+        // looking broken.
+        assertNull(failureReasonFor(InstallResult.CancelledByUser, PluginAction.UPDATE))
+    }
 }

@@ -126,6 +126,16 @@ sealed class InstallResult {
     data class DownloadFailed(val error: String) : InstallResult()
     data class LoadFailed(val error: String) : InstallResult()
     data class VersionConflict(val required: String, val available: String) : InstallResult()
+
+    /**
+     * The user declined the host's prompt to restart the plugins that depend on this one.
+     *
+     * Not a failure: nothing was downloaded and nothing was unloaded, so the plugin is still
+     * running the version it was. Kept out of [LoadFailed] because everything that reads these
+     * results turns a failure into "Update failed", which is the wrong sentence for an answer
+     * the user just gave on purpose.
+     */
+    data object CancelledByUser : InstallResult()
 }
 
 /**
@@ -136,6 +146,9 @@ sealed class UninstallResult {
     data class NotFound(val pluginId: String) : UninstallResult()
     data class CannotUnload(val reason: String) : UninstallResult()
     data class Failed(val error: String) : UninstallResult()
+
+    /** The user declined the host's dependent-restart prompt. See [InstallResult.CancelledByUser]. */
+    data object CancelledByUser : UninstallResult()
 }
 
 /**
