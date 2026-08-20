@@ -27,7 +27,6 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeOrgSlugs
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.matchesOrgFilter
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.SYSTEM_ORG_SLUG
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
@@ -36,6 +35,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.defaultPublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaNeedsCreateTab
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationDomainError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
@@ -1478,7 +1478,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
                         canPublish = state.canPublish,
-                        publishTargets = state.publishTargets,
+                        canPublishGlobally = state.canPublishGlobally,
+                        publishTargets = state.offeredPublishTargets,
                         organisationCta = organisationCta,
                         onOrganisationAction = { viewModel.onOrganisationCta() },
                         toolCreatorInstalled = state.installedPlugins.any {
@@ -3089,11 +3090,22 @@ private fun PublishTab(
      */
     canPublish: Boolean,
     /**
-     * Organisations this user may publish for, from the server's own `can_publish`.
+     * Whether they may publish to the BOSS store, i.e. hold `plugins.create` or are an admin.
+     *
+     * False for an org-scoped publisher, and it changes two things: the picker offers only their
+     * own organisations, and naming one becomes MANDATORY. Sending no `orgId` means "server, you
+     * derive it", and the server's derivation lands on the BOSS store for anyone without exactly
+     * one organisation - which they may not publish to, so it would be a 403 after the upload.
+     */
+    canPublishGlobally: Boolean,
+    /**
+     * Organisations this user may publish for, from the server's own `can_publish`, already
+     * narrowed to the ones they may actually be offered (`state.offeredPublishTargets`).
      *
      * Empty renders no picker and sends no `orgId`, which leaves the server to derive it exactly
      * as it did before this control existed - so a user the server cannot answer for is no worse
-     * off than they were.
+     * off than they were. That path is only reachable for a global publisher now: an org-scoped one
+     * with no target cannot publish at all, and never gets this far.
      */
     publishTargets: List<PublishTarget>,
     organisationCta: OrganisationCta?,
@@ -3149,13 +3161,22 @@ private fun PublishTab(
     // published before this control existed was attributed to. Falling back to the sole target
     // covers a user who cannot publish for boss but can for exactly one other organisation; with
     // several and no boss it starts unset and the server derives, as it did before.
-    var selectedOrgId by remember(publishTargets) {
-        mutableStateOf(
-            publishTargets.firstOrNull { it.slug == SYSTEM_ORG_SLUG }?.orgId
-                ?: publishTargets.singleOrNull()?.orgId
-        )
+    //
+    // The system organisation is only a default for somebody who may actually publish there. An
+    // org-scoped publisher is never offered it at all (the list is pre-filtered), so this reads
+    // `isSystem` rather than the slug: the flag is the server's own answer, and matching on the
+    // slug would put the BOSS store back as the default for anyone whose organisation happened to
+    // be called that.
+    var selectedOrgId by remember(publishTargets, canPublishGlobally) {
+        mutableStateOf(defaultPublishTarget(publishTargets, canPublishGlobally))
     }
     var pickingOrg by remember { mutableStateOf(false) }
+
+    // An org-scoped publisher must NAME the organisation. Omitting orgId asks the server to derive
+    // it, and its derivation is the BOSS store for anyone without exactly one organisation - which
+    // is precisely what they may not publish to. Refusing here beats a 403 after a JAR upload.
+    val orgRequired = !canPublishGlobally
+    val orgChosen = !orgRequired || selectedOrgId != null
 
     var jarSource by remember { mutableStateOf(JarSource.GITHUB) }
     var gitHubUrl by remember { mutableStateOf("") }
@@ -3226,7 +3247,14 @@ private fun PublishTab(
 
         BossSection(
             title = "Publish Plugin",
-            description = "Upload your plugin to the BOSS Plugin Store"
+            description = if (canPublishGlobally) {
+                "Upload your plugin to the BOSS Plugin Store"
+            } else {
+                // Says where it will actually go. Publishing for an organisation is not publishing
+                // to the platform's store, and the plugin starts visible to that organisation only.
+                "Upload your plugin for one of your organisations. It is listed for that " +
+                    "organisation's members; an organisation admin can make it public later."
+            }
         ) {
             // WHO it will belong to, under this heading with the rest of the submission and
             // FIRST, because it is decided once and never again: a version publish does not
@@ -3242,6 +3270,14 @@ private fun PublishTab(
                     enabled = !isPublishing && !isFetching,
                     onClick = { pickingOrg = true }
                 )
+                if (orgRequired && selectedOrgId == null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Choose which organisation this plugin belongs to.",
+                        fontSize = 12.sp,
+                        color = BossThemeColors.TextSecondary
+                    )
+                }
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
@@ -3702,7 +3738,7 @@ private fun PublishTab(
                 BossPrimaryButton(
                     text = "Publish",
                     onClick = {
-                        if (jarPath.isNotBlank() && pluginId.isNotBlank() && displayName.isNotBlank() && version.isNotBlank() && authorName.isNotBlank()) {
+                        if (orgChosen && jarPath.isNotBlank() && pluginId.isNotBlank() && displayName.isNotBlank() && version.isNotBlank() && authorName.isNotBlank()) {
                             isPublishing = true
                             publishStatus = null
                             onPublish(
@@ -3746,7 +3782,7 @@ private fun PublishTab(
                             )
                         }
                     },
-                    enabled = !isLoading && !isPublishing && jarPath.isNotBlank() && pluginId.isNotBlank() && displayName.isNotBlank() && version.isNotBlank() && authorName.isNotBlank(),
+                    enabled = orgChosen && !isLoading && !isPublishing && jarPath.isNotBlank() && pluginId.isNotBlank() && displayName.isNotBlank() && version.isNotBlank() && authorName.isNotBlank(),
                     icon = Icons.Default.Upload
                 )
             }

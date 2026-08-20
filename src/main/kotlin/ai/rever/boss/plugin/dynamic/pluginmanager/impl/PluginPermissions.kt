@@ -52,15 +52,46 @@ internal fun tokenPermissions(token: String?): Set<String> {
 }
 
 /**
- * Whether a user may use the Create tab (submit / publish their own plugins).
- * Store admins always can; otherwise the token must carry [PLUGIN_CREATE_PERMISSION].
+ * Whether a user holds the GLOBAL publishing right: store admin, or a token carrying
+ * [PLUGIN_CREATE_PERMISSION].
+ *
+ * This is the unrestricted one - it reaches the BOSS store itself. It is no longer the only way to
+ * publish (see [canPublishAnywhereWith]), which is why it is named for what it is rather than for
+ * the tab it used to gate.
  *
  * Pure so the short-circuit itself is testable — inverting `isAdmin ||` is the
  * kind of edit a refactor makes silently, and the API impl cannot be constructed
  * in a test.
  */
-internal fun canPublishWith(isAdmin: Boolean, token: String?): Boolean =
+internal fun canPublishGloballyWith(isAdmin: Boolean, token: String?): Boolean =
     isAdmin || PLUGIN_CREATE_PERMISSION in tokenPermissions(token)
+
+/**
+ * The organisations a publish may actually be attributed to by an org-scoped publisher: everything
+ * the server said they may publish for, minus the system organisation.
+ *
+ * `@boss` is dropped even though `get_my_organisations` reports `can_publish` for it, because that
+ * column answers the organisation's own publish policy and says nothing about the store the
+ * organisation IS. Offering it would present a choice the server refuses.
+ */
+internal fun orgPublishTargets(targets: List<PublishTarget>): List<PublishTarget> =
+    targets.filter { !it.isSystem }
+
+/**
+ * Whether the Create tab's publishing surfaces are reachable at all.
+ *
+ * Two ways, mirroring the server's own gate in `services/publish-authz.ts`: the global right, or at
+ * least one organisation the server says this user may publish for. The second is why an approved
+ * organisation can ship a plugin without a platform admin granting anything - its admin role
+ * satisfies the default `publish_policy` of 'admins' on the day it is created.
+ *
+ * Takes the resolved right rather than the token so the two inputs cannot be confused at a call
+ * site, and so this stays a pure predicate over both.
+ */
+internal fun canPublishAnywhereWith(
+    globalRight: Boolean,
+    targets: List<PublishTarget>,
+): Boolean = globalRight || orgPublishTargets(targets).isNotEmpty()
 
 /**
  * Whether a user may install a plugin declaring [requiredPermissions]. Empty ⇒
