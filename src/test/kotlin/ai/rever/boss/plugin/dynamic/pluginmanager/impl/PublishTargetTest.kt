@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -19,10 +20,12 @@ class PublishTargetTest {
         canPublish: Boolean,
         status: String? = "active",
         name: String? = null,
+        isSystem: Boolean? = null,
     ): String {
         val nameJson = if (name == null) "" else ""","name":"$name""""
         val statusJson = if (status == null) "" else ""","status":"$status""""
-        return """{"id":"$id","slug":"$slug","can_publish":$canPublish$statusJson$nameJson}"""
+        val systemJson = if (isSystem == null) "" else ""","is_system":$isSystem"""
+        return """{"id":"$id","slug":"$slug","can_publish":$canPublish$statusJson$nameJson$systemJson}"""
     }
 
     private fun envelope(vararg rows: String) =
@@ -46,11 +49,57 @@ class PublishTargetTest {
     fun `the system organisation is offered when the server allows it`() {
         // Unlike the server's own DERIVATION, which excludes boss because it holds everyone and so
         // cannot disambiguate. Here the user picks explicitly, and publishing to the BOSS store
-        // itself is a legitimate choice when the server says they may.
+        // itself is a legitimate choice when the server says they may - so it stays in the list and
+        // is FLAGGED, and the caller decides who is offered it.
         val targets = parsePublishTargets(
-            envelope(row("id-boss", "boss", canPublish = true, name = "BOSS")),
+            envelope(row("id-boss", "boss", canPublish = true, name = "BOSS", isSystem = true)),
         )
         assertEquals(listOf("boss"), targets.map { it.slug })
+        assertTrue(targets.single().isSystem, "the flag is what keeps it off an org publisher's picker")
+    }
+
+    @Test
+    fun `an absent is_system reads as not the system organisation`() {
+        // The safe direction. Defaulting to true would flag every organisation as the system one
+        // and leave an org-scoped publisher with an empty picker and no Create tab - a feature
+        // silently missing rather than a visible error.
+        val targets = parsePublishTargets(envelope(row("id-risa", "risa", canPublish = true)))
+        assertFalse(targets.single().isSystem)
+    }
+
+    // -----------------------------------------------------------------------
+    // Which one the form starts on
+    // -----------------------------------------------------------------------
+
+    private fun target(id: String, slug: String, isSystem: Boolean = false) =
+        PublishTarget(orgId = id, slug = slug, name = slug, isSystem = isSystem)
+
+    @Test
+    fun `a global publisher starts on the BOSS store`() {
+        val targets = listOf(target("id-risa", "risa"), target("id-boss", "boss", isSystem = true))
+        assertEquals("id-boss", defaultPublishTarget(targets, canPublishGlobally = true))
+    }
+
+    @Test
+    fun `an org publisher never starts on the system organisation`() {
+        // Reachable: can_publish is the organisation's own policy answer, so a 'members' policy on
+        // @boss would put it in the list for everybody. Defaulting to it would attribute a plugin
+        // to the platform's store on a form the user never touched - and then 403 on publish.
+        val targets = listOf(target("id-boss", "boss", isSystem = true), target("id-risa", "risa"))
+        assertEquals(null, defaultPublishTarget(targets, canPublishGlobally = false))
+    }
+
+    @Test
+    fun `a sole organisation is the default for either kind of publisher`() {
+        val targets = listOf(target("id-risa", "risa"))
+        assertEquals("id-risa", defaultPublishTarget(targets, canPublishGlobally = false))
+        assertEquals("id-risa", defaultPublishTarget(targets, canPublishGlobally = true))
+    }
+
+    @Test
+    fun `several organisations and no BOSS starts unset`() {
+        val targets = listOf(target("id-risa", "risa"), target("id-acme", "acme"))
+        assertEquals(null, defaultPublishTarget(targets, canPublishGlobally = true))
     }
 
     @Test
@@ -121,8 +170,10 @@ class PublishTargetTest {
 
     @Test
     fun `boss is identified by a shared constant, not a literal at each call site`() {
-        // The publish-target default and the server-side derivation both key on this slug. A
-        // literal in two places is a literal that eventually disagrees.
+        // The server-side derivation and the store's own org index key on this slug. A literal in
+        // two places is a literal that eventually disagrees. The publish-target default no longer
+        // reads it - it keys on the row's own is_system flag - but the constant still names the one
+        // organisation the org-scoped publish path may never reach.
         assertEquals("boss", SYSTEM_ORG_SLUG)
     }
 
@@ -134,8 +185,10 @@ class PublishTargetTest {
                 row("id-boss", SYSTEM_ORG_SLUG, canPublish = true, name = "BOSS"),
             ),
         )
-        // What the default selection looks up. If boss were filtered out as a system organisation
-        // - which the SERVER's derivation does - the Create tab would have no default at all.
+        // It survives parsing. If boss were filtered out here as a system organisation - which the
+        // SERVER's derivation does - a global publisher would have no default at all. WHO gets
+        // offered it is decided later, by isSystem rather than by this slug: see
+        // `a global publisher starts on the BOSS store` and its org-scoped twin.
         assertEquals("id-boss", targets.firstOrNull { it.slug == SYSTEM_ORG_SLUG }?.orgId)
     }
 

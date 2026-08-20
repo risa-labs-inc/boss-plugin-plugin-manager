@@ -366,6 +366,16 @@ data class PublishTarget(
     val orgId: String,
     val slug: String,
     val name: String,
+    /**
+     * The system organisation, `@boss`.
+     *
+     * Load-bearing rather than informational: publishing for an organisation is now a right an
+     * organisation's own publish policy can grant, with no global permission involved, and the one
+     * place that right must never reach is the platform's own store. Every signup is a member of
+     * `@boss`, so if its policy ever admitted members this flag is what keeps the BOSS store off
+     * the picker. The server refuses it too - this only avoids offering a choice that would 403.
+     */
+    val isSystem: Boolean = false,
 )
 
 /**
@@ -386,7 +396,9 @@ data class PublishTarget(
  * `is_system` organisations are NOT excluded here, unlike the publish path's own derivation. There
  * the point was that `boss` holds everyone so it could not disambiguate; here the user is picking
  * explicitly, and "publish this to the BOSS store itself" is a legitimate thing to choose when the
- * server says they may.
+ * server says they may. They are FLAGGED instead ([PublishTarget.isSystem]), because that is only
+ * legitimate for somebody holding `plugins.create`: an org-scoped publisher may publish for their
+ * own organisations and nothing else, and the caller decides which list to offer.
  */
 fun parsePublishTargets(raw: String?): List<PublishTarget> {
     if (raw.isNullOrBlank()) return emptyList()
@@ -410,6 +422,7 @@ fun parsePublishTargets(raw: String?): List<PublishTarget> {
             PublishTarget(
                 orgId = id,
                 slug = slug,
+                isSystem = row["is_system"]?.jsonPrimitive?.booleanOrNull ?: false,
                 // Falls back to the slug rather than dropping the row: a nameless organisation is
                 // still one you may publish for.
                 name = row["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: slug,
@@ -417,6 +430,24 @@ fun parsePublishTargets(raw: String?): List<PublishTarget> {
         }
     }.getOrDefault(emptyList())
 }
+
+/**
+ * Which organisation the publish form should start on, or null to leave it unset.
+ *
+ * BOSS first, but only for somebody who may actually publish there: it is the platform's own store
+ * and where every plugin published before the picker existed was attributed, so it is the right
+ * default for a `plugins.create` holder and the one thing an org-scoped publisher must never be
+ * pointed at. Then the sole target, which covers the common case of one organisation and nothing to
+ * choose. Otherwise null: several candidates and no default is a choice for the person publishing,
+ * and for a global publisher the server derives it exactly as it did before this control existed.
+ *
+ * Keyed on [PublishTarget.isSystem] rather than the slug. The flag is the server's own answer;
+ * matching `"boss"` would make an organisation that happens to be called that the default, and
+ * would silently stop working the day the system organisation is renamed.
+ */
+fun defaultPublishTarget(targets: List<PublishTarget>, canPublishGlobally: Boolean): String? =
+    targets.firstOrNull { canPublishGlobally && it.isSystem }?.orgId
+        ?: targets.singleOrNull()?.orgId
 
 /**
  * The token from `mint_organisation_handoff_token`, or null.

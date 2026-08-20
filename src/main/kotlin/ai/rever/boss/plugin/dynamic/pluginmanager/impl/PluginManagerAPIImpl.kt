@@ -1414,16 +1414,18 @@ class PluginManagerAPIImpl(
     fun isCurrentUserAdmin(): Boolean = loaderDelegate?.isCurrentUserAdmin() ?: false
 
     /**
-     * Whether the current user may use the Create tab (submit / publish their own
-     * plugins). Store admins always can; non-admins can if their JWT carries the
-     * `plugins.create` permission, held by the `boss_plugin_admin` role.
+     * Whether the current user holds the GLOBAL publishing right: store admin, or a JWT carrying
+     * `plugins.create` (held by the `boss_plugin_admin` role).
      *
-     * This mirrors a real server gate: the store's publish endpoints require
-     * `plugins.create` plus ownership. Moderation actions (verify / delete any
-     * plugin) stay admin-only and keep using `plugins.admin.publish`.
+     * This mirrors a real server gate, and it is the unrestricted half of it: the store's publish
+     * endpoints accept `plugins.create` plus ownership for any organisation, the BOSS store
+     * included. They ALSO accept an organisation whose own publish policy admits the caller, which
+     * needs no permission at all and is answered by `get_my_organisations`.`can_publish` - see
+     * `canPublishAnywhereWith`. Moderation actions (verify / delete any plugin) stay admin-only and
+     * keep using `plugins.admin.publish`.
      */
-    fun canPublish(): Boolean =
-        canPublishWith(isCurrentUserAdmin(), loaderDelegate?.getAccessToken())
+    fun canPublishGlobally(): Boolean =
+        canPublishGloballyWith(isCurrentUserAdmin(), loaderDelegate?.getAccessToken())
 
     /**
      * Whether the current user may install a plugin that requires

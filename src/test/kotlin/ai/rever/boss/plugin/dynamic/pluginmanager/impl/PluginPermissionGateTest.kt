@@ -69,17 +69,57 @@ class PluginPermissionGateTest {
     // -----------------------------------------------------------------------
 
     @Test
-    fun `canPublish requires plugins-create for a non-admin`() {
-        assertTrue(canPublishWith(isAdmin = false, token = tokenWithPermissions("plugins.create")))
-        assertFalse(canPublishWith(isAdmin = false, token = tokenWithPermissions("plugins.admin.publish")))
-        assertFalse(canPublishWith(isAdmin = false, token = null))
+    fun `the global right requires plugins-create for a non-admin`() {
+        assertTrue(canPublishGloballyWith(isAdmin = false, token = tokenWithPermissions("plugins.create")))
+        assertFalse(canPublishGloballyWith(isAdmin = false, token = tokenWithPermissions("plugins.admin.publish")))
+        assertFalse(canPublishGloballyWith(isAdmin = false, token = null))
     }
 
     @Test
-    fun `canPublish admits an admin holding nothing`() {
-        assertTrue(canPublishWith(isAdmin = true, token = tokenWithPermissions()))
+    fun `the global right admits an admin holding nothing`() {
+        assertTrue(canPublishGloballyWith(isAdmin = true, token = tokenWithPermissions()))
         // Even with no token at all — admin is decided by the host, not the claim.
-        assertTrue(canPublishWith(isAdmin = true, token = null))
+        assertTrue(canPublishGloballyWith(isAdmin = true, token = null))
+    }
+
+    // -----------------------------------------------------------------------
+    // The second way to be allowed: an organisation that admits you
+    // -----------------------------------------------------------------------
+
+    private fun target(slug: String, isSystem: Boolean = false) =
+        PublishTarget(orgId = "id-$slug", slug = slug, name = slug.uppercase(), isSystem = isSystem)
+
+    @Test
+    fun `an organisation admits the Create tab with no permission at all`() {
+        // The whole feature. An approved organisation's admin role carries organisation.admin and
+        // organisation.read - no plugins.create anywhere - and its default publish_policy is
+        // 'admins', so the server says can_publish for it.
+        assertTrue(canPublishAnywhereWith(globalRight = false, targets = listOf(target("risa"))))
+    }
+
+    @Test
+    fun `the system organisation alone does not admit anything`() {
+        // Every signup is a member of @boss. If this admitted, "publish for your organisation"
+        // would mean "publish to the platform's own store" for every user in the system - and the
+        // Create tab would appear for all of them.
+        assertFalse(canPublishAnywhereWith(globalRight = false, targets = listOf(target("boss", isSystem = true))))
+    }
+
+    @Test
+    fun `no targets and no permission admits nothing`() {
+        assertFalse(canPublishAnywhereWith(globalRight = false, targets = emptyList()))
+    }
+
+    @Test
+    fun `the global right needs no target`() {
+        // A boss_plugin_admin belonging to no organisation still publishes, to the BOSS store.
+        assertTrue(canPublishAnywhereWith(globalRight = true, targets = emptyList()))
+    }
+
+    @Test
+    fun `orgPublishTargets drops only the system organisation`() {
+        val targets = listOf(target("boss", isSystem = true), target("risa"), target("acme"))
+        assertEquals(listOf("risa", "acme"), orgPublishTargets(targets).map { it.slug })
     }
 
     @Test

@@ -6,6 +6,8 @@ import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.canPublishAnywhereWith
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgPublishTargets
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parseHandoffToken
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
@@ -83,8 +85,13 @@ data class PluginManagerState(
     val publishTargets: List<PublishTarget> = emptyList(),
     val error: String? = null,
     val isStoreAdmin: Boolean = false,
-    /** Whether the user may use the Create tab (store admin OR has plugins.create). */
-    val canPublish: Boolean = false,
+    /**
+     * Whether the user holds the GLOBAL publishing right (store admin OR `plugins.create`).
+     *
+     * Distinct from [canPublish]: this one reaches the BOSS store, and it is the only thing that
+     * does. An org-scoped publisher may publish for their own organisations and nowhere else.
+     */
+    val canPublishGlobally: Boolean = false,
     /** Installed plugins hidden from this (non-admin) user for lack of permissions. */
     val inaccessiblePlugins: List<InaccessiblePluginInfo> = emptyList(),
     val realtimeConnected: Boolean = false,
@@ -129,7 +136,29 @@ data class PluginManagerState(
      * its panel moves the button in both places at once.
      */
     val openablePlugins: Set<String> = emptySet()
-)
+) {
+    /**
+     * The organisations to offer in the publish picker.
+     *
+     * Everything the server said they may publish for when they hold the global right - "publish
+     * this to the BOSS store" is a legitimate choice for a `boss_plugin_admin`. Non-system only
+     * otherwise, because that is the only thing the server will accept from them.
+     */
+    val offeredPublishTargets: List<PublishTarget>
+        get() = if (canPublishGlobally) publishTargets else orgPublishTargets(publishTargets)
+
+    /**
+     * Whether the publishing surfaces are reachable at all: the global right, or an organisation
+     * that admits them.
+     *
+     * DERIVED, not stored, and that is the point: [canPublishGlobally] is written by `refresh` and
+     * [publishTargets] by `refreshOrganisationMembership`, two independent coroutines with no
+     * ordering between them. A stored flag computed by whichever finished first would be wrong for
+     * whatever the other one carried, and the failure is invisible - a Create tab that is simply
+     * missing until the next refresh happens to interleave the other way.
+     */
+    val canPublish: Boolean get() = canPublishAnywhereWith(canPublishGlobally, publishTargets)
+}
 
 /**
  * Prompt shown after a successful update so the new version actually takes effect.
@@ -399,8 +428,8 @@ class PluginManagerViewModel(
                         } catch (e: Exception) {
                             false
                         }
-                        val canPublish = try {
-                            apiImpl.canPublish()
+                        val canPublishGlobally = try {
+                            apiImpl.canPublishGlobally()
                         } catch (e: Exception) {
                             isAdmin
                         }
@@ -413,7 +442,7 @@ class PluginManagerViewModel(
                         _state.update {
                             it.copy(
                                 isStoreAdmin = isAdmin,
-                                canPublish = canPublish,
+                                canPublishGlobally = canPublishGlobally,
                                 inaccessiblePlugins = inaccessible
                             )
                         }
