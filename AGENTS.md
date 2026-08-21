@@ -57,6 +57,47 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
 
+## The two version floors
+
+A published plugin version declares two floors, they fail differently, and until now the Toolbox
+only judged one of them.
+
+| Floor | Source | Enforced by | Consequence of a miss |
+|---|---|---|---|
+| `minIpcVersion` | `plugin_versions.min_ipc_version` | `IpcCompat` (reads `boss.ipc.version`) | a plugin's out-of-process half cannot speak to this host |
+| `minBossVersion` | `plugin_versions.min_boss_version` | `BossCompat` (reads `boss.app.version`) | `DynamicPluginLoader` **refuses the jar** - the plugin does not exist |
+
+The second is the stricter one and was unchecked, because the host published `boss.api.version` and
+`boss.ipc.version` but never its own app version - so there was nothing to compare `minBossVersion`
+against and every published version looked installable. The failure was silent: Install downloaded
+the jar, the host refused it, and the only trace was one ERROR line in the host log. fluck-browser
+1.2.22 (`minBossVersion` 9.4.23) on a 9.4.22 host is the case that prompted this, and there the
+missing plugin *is* the browser.
+
+Four call sites now apply it, and all four matter separately:
+
+- **`AvailablePluginCard`** - the store card. Judges the LATEST version, because that is what its
+  Install button fetches. `PluginStoreItem.minBossVersion` is the view's `latest_min_boss_version`.
+- **`VersionRow`** - the version sheet, per row, via `PluginVersionInfo.blockedReason()`. This one
+  checks both floors; the card cannot, because the IPC floor is not projected into the store list.
+- **`loadableUpdates`** - the Updates tab. The panel's list comes from `checkForUpdatesResult`,
+  which filtered on "is it newer" and nothing else. Taking such an update is destructive rather
+  than merely useless: the update path downloads *over* the installed jar, so a refused version
+  removes a working plugin.
+- **both download paths** - belt and braces, for a deep link or a stale list that reaches install
+  without passing a UI filter.
+
+**Every one of them fails open on unknown.** A host that does not publish `boss.app.version` -
+which is every BOSS up to 9.4.22 - and a version with no declared floor both stay installable. That
+is not laziness: this plugin has to keep working on those hosts, and refusing every install there to
+prevent the subset that would fail would be a worse bug than the one being fixed. The corollary is
+that **the fix is inert until the host publishes the property**; it narrows what is offered on new
+hosts and changes nothing on old ones.
+
+The floor arrives as a **system property** rather than an API member on purpose: plugins load in
+separate classloaders and cannot see `AppVersion`, and a property needs no `boss-plugin-api`
+release, so this required no version-floor bump of its own.
+
 ## Code Quality
 
 - Use Compose Multiplatform APIs (not Android-specific)

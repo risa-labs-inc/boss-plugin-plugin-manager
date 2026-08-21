@@ -1,6 +1,8 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.ui.BossDialog
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.BossCompat
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.blockedReason
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.DefinedPermissionData
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstalledPluginState
@@ -1259,14 +1261,16 @@ private fun VersionRow(
             fontSize = 13.sp,
             modifier = Modifier.width(96.dp)
         )
-        IpcBadge(version.compatibility)
+        CompatibilityBadge(version)
         Spacer(Modifier.weight(1f))
         val isInstalled = installedVersion != null && version.version == installedVersion
-        val installable = version.compatibility == IpcCompat.Status.COMPATIBLE ||
-            version.compatibility == IpcCompat.Status.UNKNOWN
+        // BOTH floors, via one tested predicate. This read the IPC status alone, which is the
+        // narrower of the two and not the one that stops a plugin loading - so a version above the
+        // app floor rendered with an Install button that downloaded a jar the host then refused.
+        val blockedLabel = version.blockedReason()
         when {
             isInstalled -> Text("Installed", color = BossThemeColors.TextMuted, fontSize = 12.sp)
-            !installable -> Text("Needs newer BOSS", color = BossThemeColors.WarningColor, fontSize = 11.sp)
+            blockedLabel != null -> Text(blockedLabel, color = BossThemeColors.WarningColor, fontSize = 11.sp)
             busy -> Text("…", color = BossThemeColors.TextMuted, fontSize = 12.sp)
             else -> BossSecondaryButton(
                 text = when {
@@ -1282,14 +1286,35 @@ private fun VersionRow(
     }
 }
 
+/**
+ * One badge for a version's compatibility, across both floors.
+ *
+ * This used to read the IPC status alone, which put a green "Compatible" next to a row whose only
+ * available action said the host was too old - and made a version above the app floor look
+ * installable, which is the whole complaint. The app floor is checked FIRST because it is the
+ * stricter consequence: an IPC mismatch degrades a feature, a `minBossVersion` miss means
+ * `DynamicPluginLoader` refuses the jar and the plugin does not exist.
+ */
 @Composable
-private fun IpcBadge(status: IpcCompat.Status) {
-    val (color, label) = when (status) {
+private fun CompatibilityBadge(version: PluginVersionInfo) {
+    if (version.bossCompatibility == BossCompat.Status.REQUIRES_HOST_UPDATE) {
+        CompatibilityChip(BossThemeColors.WarningColor, "Host update")
+        return
+    }
+    val (color, label) = when (version.compatibility) {
         IpcCompat.Status.COMPATIBLE -> BossThemeColors.SuccessColor to "Compatible"
         IpcCompat.Status.REQUIRES_HOST_UPDATE -> BossThemeColors.WarningColor to "Host update"
         IpcCompat.Status.MAJOR_MISMATCH -> BossThemeColors.ErrorColor to "Incompatible"
         IpcCompat.Status.UNKNOWN -> return
     }
+    CompatibilityChip(color, label)
+}
+
+@Composable
+private fun CompatibilityChip(
+    color: Color,
+    label: String
+) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
@@ -2437,6 +2462,14 @@ private fun AvailablePluginCard(
     // that names no organisation and so has no page.
     val openCard: (() -> Unit)? = onOpenPage ?: onOpenHomepage.takeIf { hasHomepage }
 
+    // Whether this host meets the LATEST version's app floor. `plugin.minBossVersion` is the
+    // catalogue row's `latest_min_boss_version`, so it judges what Install would fetch and says
+    // nothing about older versions - which is why the version sheet judges each row separately.
+    // Non-null exactly when this host cannot load the latest version, which is what the branch
+    // below tests - a nullable val rather than a boolean plus a string, so the branch reads the
+    // message through a smart cast and there is no second, unreachable fallback to keep in step.
+    val bossFloorLabel = plugin.blockedReason()
+
     BossCard(onClick = openCard) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -2574,6 +2607,34 @@ private fun AvailablePluginCard(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                    // The latest published version needs a newer host than this one, so
+                    // `DynamicPluginLoader` would refuse the jar Install downloads. Offering the
+                    // button anyway produced the only outcome worth avoiding here: a download, a
+                    // silent refusal, and a plugin that never appeared.
+                    //
+                    // BELOW isInstalled on purpose. For an already-installed plugin the card
+                    // keeps saying "Installed", which is true and is the state the user cares
+                    // about; the blocked newer version shows up in the version sheet, where
+                    // there is room to name it. No Update button appears either way, since the
+                    // update check now applies the same floor.
+                    bossFloorLabel != null -> {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = "Update BOSS to install",
+                                color = BossThemeColors.WarningColor,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = bossFloorLabel,
+                                color = BossThemeColors.TextMuted,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 180.dp)
+                            )
+                        }
                     }
                     !canInstall -> {
                         // The user lacks the permission(s) this plugin requires to
