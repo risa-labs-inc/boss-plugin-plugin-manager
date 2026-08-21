@@ -524,17 +524,16 @@ class PluginManagerAPIImpl(
             return result
         }
 
-        // Regular plugins: unload (if installed) then load the requested version.
-        if (existing != null) {
-            when (val u = uninstallPlugin(pluginId)) {
-                is UninstallResult.CannotUnload ->
-                    return InstallResult.LoadFailed("Cannot change version: ${u.reason}")
-                is UninstallResult.Failed ->
-                    return InstallResult.LoadFailed("could not replace the installed version - ${u.error}")
-                else -> { /* unloaded */ }
-            }
-        }
-
+        // Regular plugins: `downloadFromStore` replaces the installed copy itself, and it does so
+        // only AFTER the replacement bytes are on disk and their SHA-256 has verified.
+        //
+        // This used to call `uninstallPlugin(pluginId)` first, which deletes the JAR. Any later
+        // failure - a store 5xx, a dropped connection, a SHA mismatch - then left the plugin
+        // uninstalled with nothing to fall back to, because the file it had been running was
+        // already gone. That is not a theoretical window: it removed Fluck Agent from a live
+        // install, and the host log shows the shape exactly - `Plugin uninstalled successfully`
+        // followed by nothing at all. The download is the part that can fail, so it has to happen
+        // before anything is destroyed.
         val result = downloadFromStore(pluginId, version, progressKey)
         if (result is InstallResult.Success && previousVersion != null) {
             _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
@@ -818,10 +817,18 @@ class PluginManagerAPIImpl(
                 )
             }
 
-            // Download the JAR from the signed URL
+            // Download the JAR from the signed URL.
+            //
+            // Into a `.part` sibling, never straight onto `destFile`. Reinstalling the version
+            // that is already installed resolves to the SAME filename, and `outputStream()`
+            // truncates on open - so writing directly would destroy the JAR the plugin is
+            // currently running from the instant the connection opened, before anything had been
+            // verified. The suffix deliberately does not end in `.jar`, so a part file left by a
+            // kill is ignored by the host's directory scan rather than loaded.
             pluginsDir.mkdirs()
             val jarFileName = "${pluginId.replace(".", "_")}_${downloadInfo.version}.jar"
             val destFile = File(pluginsDir, jarFileName)
+            val partFile = File(pluginsDir, "$jarFileName.part")
 
             val jarConnection = URL(downloadInfo.downloadUrl).openConnection() as HttpURLConnection
             jarConnection.instanceFollowRedirects = true
@@ -833,35 +840,65 @@ class PluginManagerAPIImpl(
                 return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
             }
 
-            downloadWithProgress(jarConnection, destFile, progressKey, downloadInfo.size)
+            downloadWithProgress(jarConnection, partFile, progressKey, downloadInfo.size)
 
-            // Verify SHA-256 if provided
+            // Verify SHA-256 if provided. On the PART file, so a corrupt download is discarded
+            // without the installed copy having been touched.
             if (downloadInfo.sha256.isNotBlank()) {
-                val actualSha256 = calculateSha256(destFile)
+                val actualSha256 = calculateSha256(partFile)
                 if (!actualSha256.equals(downloadInfo.sha256, ignoreCase = true)) {
-                    destFile.delete()
-                    // Clear any sidecar left from a prior install at this path,
-                    // so it doesn't dangle pointing at bytes that are now gone.
-                    deleteSignatureSidecar(destFile)
+                    partFile.delete()
                     return InstallResult.DownloadFailed("SHA-256 verification failed")
                 }
+            }
+
+            // Everything that can fail without consequence has now happened, so this is where
+            // the installed copy gets replaced. A refused unload is reported rather than
+            // ignored: `unloadIfAlreadyLoaded` discards the delegate's Boolean, which would
+            // leave the old plugin loaded and then load a second copy over it.
+            unloadForReplacement(pluginId)?.let { reason ->
+                partFile.delete()
+                return InstallResult.LoadFailed("could not replace the installed version - $reason")
+            }
+
+            // Promote the verified bytes. The old JAR at this path (a same-version reinstall) is
+            // gone by now via the unload, but delete defensively so the rename cannot fail on a
+            // platform that refuses to overwrite.
+            if (destFile.exists()) destFile.delete()
+            if (!partFile.renameTo(destFile)) {
+                partFile.delete()
+                return InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
             }
 
             // Persist the store signature as a `<jar>.sig` sidecar so the host
             // verifies it against the pinned key at load time — the real
             // authenticity gate; this download only checks integrity.
+            // After the promotion, never before: a sidecar sitting next to bytes that are still
+            // being written is a present-but-wrong signature, which hard-fails the load.
             persistSignatureSidecar(destFile, downloadInfo.signature)
-
-            // Replace any already-loaded copy so the new version loads cleanly
-            // (no manual uninstall needed).
-            unloadIfAlreadyLoaded(destFile, knownPluginId = pluginId)
 
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return InstallResult.LoadFailed(
+            if (loadedInfo == null) {
+                // The new JAR is verified but will not load, and `cleanupOldVersionJars` below
+                // never ran - so the previous version is still on disk. Leaving both would put
+                // two JARs declaring one pluginId in the directory, and the host's startup scan
+                // can pick either, which is how a "successful" restart comes back on the old
+                // version with no explanation. Drop the one that does not work and let a restart
+                // recover the version that did.
+                //
+                // Unless they are the same file: re-installing the version already present
+                // resolves to one path, so deleting it would leave the plugin with no JAR at all.
+                val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
+                if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
+                    runCatching { destFile.delete() }
+                    deleteSignatureSidecar(destFile)
+                }
+                return InstallResult.LoadFailed(
                     if (loaderDelegate == null) "No plugin loader available"
                     else "Failed to load plugin '$pluginId' (see app logs for details)"
                 )
+            }
 
             val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
@@ -878,6 +915,11 @@ class PluginManagerAPIImpl(
             return InstallResult.Success(pluginInfo)
 
         } catch (e: Exception) {
+            // A throw anywhere above can strand the part file. It is inert (the host's scan only
+            // looks at `.jar`), but leaving one per failed attempt would accumulate silently.
+            pluginsDir.listFiles { f ->
+                f.isFile && f.name.startsWith(pluginId.replace(".", "_")) && f.name.endsWith(".jar.part")
+            }?.forEach { runCatching { it.delete() } }
             return InstallResult.DownloadFailed("Store download error: ${e.message}")
         }
     }
@@ -922,6 +964,24 @@ class PluginManagerAPIImpl(
      * Unloading only detaches the plugin from the runtime — it does not delete
      * the JAR — so the freshly-downloaded JAR we're about to load is untouched.
      */
+    /**
+     * Unload the installed copy so a freshly downloaded one can take its place.
+     *
+     * Returns null when there was nothing to unload or the unload succeeded, and a reason when
+     * the host refused. [unloadIfAlreadyLoaded] cannot be used for this: it drops the delegate's
+     * Boolean, so a refusal reads as success and the caller then loads a second copy on top of a
+     * plugin that is still running.
+     *
+     * The delegate hands back a bare Boolean, so the host's own reasons cannot reach here - it
+     * logs them as "Plugin unload refused". Say where they are rather than inventing them.
+     */
+    private suspend fun unloadForReplacement(pluginId: String): String? {
+        val delegate = loaderDelegate ?: return null
+        if (!delegate.isPluginLoaded(pluginId)) return null
+        return if (delegate.unloadPlugin(pluginId)) null
+        else "the host refused to unload it (it may still be in use by another plugin; see the app log)"
+    }
+
     private suspend fun unloadIfAlreadyLoaded(jarFile: File, knownPluginId: String? = null) {
         val delegate = loaderDelegate ?: return
         val pluginId = knownPluginId ?: readPluginIdFromJar(jarFile) ?: return
