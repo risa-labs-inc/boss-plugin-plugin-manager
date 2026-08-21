@@ -150,22 +150,36 @@ class PluginManagerAPIImpl(
     }
 
     /**
-     * `LoadedPluginInfo.sourceUrl` arrived in boss-plugin-api 1.0.84, and the host serves that type
-     * parent-first from its own api layer - so on an older host the getter is not there at all and
-     * reading it is a NoSuchMethodError, not a blank. Caught rather than gated behind a
-     * `minApiVersion` bump so this plugin keeps loading on those hosts: the update fix below is the
-     * point of this change and it must not wait on a host release to reach anyone.
+     * `LoadedPluginInfo.sourceUrl` arrived in boss-plugin-api 1.0.84, read REFLECTIVELY on purpose.
      *
-     * "" is the honest answer for such a host, and [updateSourceFor] reads it as "ask the store" -
-     * which is where all but one of a normal installation's plugins came from, and is exactly the
-     * behaviour that was missing.
+     * 1.9.19 wrote `info.sourceUrl` inside a `try { } catch (_: LinkageError)`, on the assumption
+     * that an absent getter would surface as a catchable error at the call site. It does not, and
+     * that assumption cost the Toolbox its own ability to load. A direct read compiles to a
+     * `Methodref` on `ai.rever.boss.plugin.api.LoadedPluginInfo.getSourceUrl` in this class's
+     * constant pool, and the host's `BinaryCompatibilityValidator` walks every constant pool in the
+     * JAR before loading anything, resolving each `ai.rever.boss.plugin.*` reference with
+     * `getMethod`. One that does not resolve fails the WHOLE PLUGIN with "has binary
+     * incompatibilities" - only `ai.rever.boss.plugin.runtime.*` gets a soft pass. The catch block
+     * never runs, because loading never gets far enough to reach it.
+     *
+     * That is not theoretical. During an api layer hot swap the Toolbox is re-verified while the
+     * previous layer is still installed, so 1.9.19 failed exactly there: "Hot swap: reload failed
+     * ... getSourceUrl(): method not found", 36 plugins back, the Toolbox gone from the UI.
+     *
+     * Reflection keeps the method name in a string constant, which is not a `Methodref` and so is
+     * invisible to the validator. The Toolbox therefore loads against any api layer and reads real
+     * provenance on the layers that have it. `minApiVersion` would also be honest, but it makes the
+     * Toolbox refuse to load on an older host, and the Toolbox is how a user repairs plugins.
+     *
+     * Resolved once, not per call: [getLoadedPlugins] maps every installed plugin through here.
      */
+    private val sourceUrlGetter: java.lang.reflect.Method? by lazy {
+        runCatching { LoadedPluginInfo::class.java.getMethod("getSourceUrl") }.getOrNull()
+    }
+
+    /** "" whenever the running api layer has no such field, which [updateSourceFor] reads as "ask the store". */
     private fun LoadedPluginInfo.sourceUrlOrEmpty(): String =
-        try {
-            sourceUrl
-        } catch (_: LinkageError) {
-            ""
-        }
+        runCatching { sourceUrlGetter?.invoke(this) as? String }.getOrNull().orEmpty()
 
     /**
      * Convert LoadedPluginInfo from plugin-api to our local PluginInfo.
