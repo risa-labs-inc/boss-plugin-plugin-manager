@@ -4,7 +4,29 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.BossCompat
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginUpdateRow
 
 /**
- * Which installed plugins have a newer published version **this host can actually load**.
+ * The result of judging update candidates: what can be taken, and what was held back.
+ *
+ * [blockedByHost] exists because dropping those rows silently would recreate the problem this whole
+ * change is about. Without it a user on an out-of-date host sees "All plugins are up to date" while
+ * updates they cannot have go unmentioned - a different silence, not an improvement on the one it
+ * replaced.
+ */
+internal data class UpdateCandidates(
+    /** Plugin id to the version it can be updated to. */
+    val loadable: Map<String, String> = emptyMap(),
+    /** Newer versions held back because this host does not meet their `minBossVersion`. */
+    val blockedByHost: List<BlockedUpdate> = emptyList(),
+)
+
+/** A newer version that exists but this host cannot load. */
+internal data class BlockedUpdate(
+    val pluginId: String,
+    val version: String,
+    val requiredBossVersion: String,
+)
+
+/**
+ * Which installed plugins have a newer published version, split by whether this host can load it.
  *
  * Extracted from `checkForUpdatesResult` so the decision can be tested without Postgrest. It was
  * three lines inline, and being untestable is a large part of why it was wrong for so long: the
@@ -21,16 +43,26 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginUpdateRow
 internal fun loadableUpdates(
     rows: List<PluginUpdateRow>,
     installedVersions: Map<String, String>,
-): Map<String, String> =
-    rows.mapNotNull { row ->
-        val latest = row.latestVersion ?: return@mapNotNull null
-        val current = installedVersions[row.pluginId] ?: return@mapNotNull null
-        // Floor first, and note it fails OPEN: a blank column or a host that does not publish its
-        // version leaves the update offered, exactly as before. This narrows what is offered, it
-        // does not make offering conditional on new data being present.
-        if (!BossCompat.isInstallable(row.latestMinBossVersion)) return@mapNotNull null
-        if (isNewerVersion(latest, current)) row.pluginId to latest else null
-    }.toMap()
+): UpdateCandidates {
+    val loadable = mutableMapOf<String, String>()
+    val blocked = mutableListOf<BlockedUpdate>()
+    rows.forEach { row ->
+        val latest = row.latestVersion ?: return@forEach
+        val current = installedVersions[row.pluginId] ?: return@forEach
+        // Newness first: a version that is not newer is not an update whatever its floor, and
+        // reporting it as "blocked" would invent a problem the user does not have.
+        if (!isNewerVersion(latest, current)) return@forEach
+        // The floor fails OPEN: a blank column or a host that does not publish its version leaves
+        // the update offered, exactly as before. This narrows what is offered, it does not make
+        // offering conditional on new data being present.
+        if (BossCompat.isInstallable(row.latestMinBossVersion)) {
+            loadable[row.pluginId] = latest
+        } else {
+            blocked += BlockedUpdate(row.pluginId, latest, row.latestMinBossVersion ?: "")
+        }
+    }
+    return UpdateCandidates(loadable = loadable, blockedByHost = blocked)
+}
 
 /**
  * Whether [newVersion] sorts above [currentVersion], comparing segment by segment as integers.

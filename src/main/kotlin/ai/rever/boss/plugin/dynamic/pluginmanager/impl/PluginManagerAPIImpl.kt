@@ -536,7 +536,6 @@ class PluginManagerAPIImpl(
                     publishedAt = v.publishedAt ?: "",
                     compatibility = IpcCompat.status(v.minIpcVersion),
                     minBossVersion = v.minBossVersion ?: "",
-                    bossCompatibility = BossCompat.status(v.minBossVersion),
                 )
             })
         } catch (e: Exception) {
@@ -588,7 +587,7 @@ class PluginManagerAPIImpl(
     }
 
     override suspend fun checkForUpdates(): Map<String, String> =
-        checkForUpdatesResult().getOrDefault(emptyMap())
+        checkForUpdatesResult().getOrNull()?.loadable ?: emptyMap()
 
     /**
      * [checkForUpdates], but able to say it failed.
@@ -598,9 +597,9 @@ class PluginManagerAPIImpl(
      * fine for a caller that writes the result to UI state: a background check running while the
      * network is down would clear the user's pending-update list and make it look resolved.
      */
-    suspend fun checkForUpdatesResult(): Result<Map<String, String>> = withContext(Dispatchers.IO) {
+    internal suspend fun checkForUpdatesResult(): Result<UpdateCandidates> = withContext(Dispatchers.IO) {
         val installed = getInstalledPlugins()
-        if (installed.isEmpty()) return@withContext Result.success(emptyMap())
+        if (installed.isEmpty()) return@withContext Result.success(UpdateCandidates())
 
         val installedIds = installed.map { it.pluginId }
         val installedVersionMap = installed.associate { it.pluginId to it.version }
@@ -840,11 +839,7 @@ class PluginManagerAPIImpl(
             // and the failure this prevents is silent (the host refuses the jar at load and says
             // so only in its log). Blank resolves to UNKNOWN and installs, which is what keeps
             // this working against a store that does not send the field yet.
-            BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
-                return InstallResult.DownloadFailed(
-                    "Version ${downloadInfo.version} $requirement."
-                )
-            }
+            bossFloorRefusal(downloadInfo)?.let { return it }
 
             // Download the JAR from the signed URL.
             //
@@ -1407,11 +1402,7 @@ class PluginManagerAPIImpl(
             // App-floor gate. This path REPLACES the installed jar, so an incompatible version
             // here does not merely fail to arrive, it takes the working plugin with it - which is
             // how a 1.2.21 filename ended up holding 1.2.22 bytes that no longer loaded.
-            BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
-                return InstallResult.DownloadFailed(
-                    "Version ${downloadInfo.version} $requirement."
-                )
-            }
+            bossFloorRefusal(downloadInfo)?.let { return it }
 
             // Download new JAR to a temp file first
             val destFile = File(existing.jarPath)
@@ -2118,6 +2109,23 @@ class PluginManagerAPIImpl(
     // ========================================
     // HELPERS
     // ========================================
+
+
+    /**
+     * Refuse a download whose app floor this host cannot meet, or null to proceed.
+     *
+     * Shared by both download paths so they cannot word the same refusal differently. The message
+     * lowercases [BossCompat.requirement]'s first letter: that string is written for a UI label,
+     * where it starts a line, and dropping it in mid-sentence otherwise reads "Version 1.2.22 Needs
+     * BOSS 9.4.23".
+     */
+    private fun bossFloorRefusal(downloadInfo: DownloadInfoResponse): InstallResult? =
+        BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
+            InstallResult.DownloadFailed(
+                "Version ${downloadInfo.version} cannot be installed: " +
+                    requirement.replaceFirstChar { it.lowercaseChar() } + "."
+            )
+        }
 
 }
 
