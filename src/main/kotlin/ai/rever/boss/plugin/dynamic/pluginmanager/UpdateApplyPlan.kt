@@ -38,21 +38,56 @@ sealed class UpdateApplyPlan {
 const val API_PLUGIN_ID = "ai.rever.boss.plugin.api"
 
 /**
+ * Toolbox's own plugin id.
+ *
+ * Applying an update to this one is different in kind from any other: the force-unload disposes
+ * the plugin that is doing the applying, cancelling the very coroutine mid-call. See
+ * [selfLast] for how that is handled and why the cancellation is a success signal.
+ */
+const val TOOLBOX_PLUGIN_ID = "ai.rever.boss.plugin.dynamic.pluginmanager"
+
+/**
  * Plugins a running Toolbox cannot hot-reload, so their updates only apply on
  * a full restart:
- * - Toolbox itself: the force-unload disposes this plugin — cancelling the very
- *   coroutine driving the reload — before the new version could be loaded.
- *   (Goes away once the host runs reloads in a detached scope, like the #848
- *   API swap does; gate on host version before removing.)
  * - The API plugin: normally offered as [UpdateApplyPlan.SwapApiLayer]; kept
  *   here as the fallback when its loaded entry can't be resolved.
  * - The microkernel runtime: a classpath component, never a loadable plugin.
+ *
+ * **Toolbox itself is deliberately NOT here any more.** It was, because a force-unload cancelled
+ * the coroutine driving its own reload and left it unloaded. The host fixed that by running
+ * reloads in a scope detached from the caller (`PluginLoaderDelegateImpl.reloadPlugin`, mirroring
+ * the API-layer swap), so the reload now completes even though the caller is torn down partway
+ * through it.
+ *
+ * The old note here said to gate on host version before removing it. **The gate already exists
+ * and is the manifest**: `minBossVersion` is 9.4.2, while the detached reload has shipped in every
+ * release from 9.2.53 onward - so a host new enough to run this build of Toolbox is necessarily
+ * new enough to reload it. A separate runtime check would only restate that, and the host has no
+ * app-version system property for a plugin to read anyway (it publishes `boss.api.version` and
+ * `boss.ipc.version`, neither of which tracks this).
  */
 private val RESTART_ONLY_PLUGIN_IDS = setOf(
-    "ai.rever.boss.plugin.dynamic.pluginmanager",
     API_PLUGIN_ID,
     "ai.rever.boss.microkernel.runtime",
 )
+
+/**
+ * Split [ids] so Toolbox is applied last, and say whether it is in the batch at all.
+ *
+ * Applying Toolbox's own update force-unloads it, which cancels the coroutine calling
+ * `reloadPlugin`/`resetPluginInstances`. The host's side of that call is detached, so the work
+ * finishes regardless - but the CALLER does not survive to see it. That has two consequences a
+ * caller has to respect:
+ *
+ * 1. Do the others FIRST, and report on them before touching Toolbox. Anything after the self
+ *    apply may never run.
+ * 2. Do not `runCatching` the self apply and read its result as success or failure. The
+ *    cancellation IS the expected outcome, and reporting it as a failure is how a working
+ *    self-update ends up showing "could not be hot-reloaded, restart BOSS" - from a classloader
+ *    that is already closing.
+ */
+fun selfLast(ids: List<String>): Pair<List<String>, Boolean> =
+    ids.filterNot { it == TOOLBOX_PLUGIN_ID } to ids.contains(TOOLBOX_PLUGIN_ID)
 
 /**
  * Build the apply plan for the given just-updated plugins.

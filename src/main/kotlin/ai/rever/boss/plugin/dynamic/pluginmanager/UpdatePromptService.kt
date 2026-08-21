@@ -149,7 +149,10 @@ class UpdatePromptService(
         val notifications = notifications ?: return
         when (val plan = buildUpdateApplyPlan(succeeded, loaderDelegate)) {
             is UpdateApplyPlan.Reload -> scope.launch {
-                val failed = plan.pluginIds.filter { id ->
+                // Toolbox last, and unreported: reloading it cancels this coroutine, so anything
+                // after it may not run and its cancellation is success rather than failure.
+                val (others, includesSelf) = selfLast(plan.pluginIds)
+                val failed = others.filter { id ->
                     runCatching { loaderDelegate?.reloadPlugin(id) }.getOrNull() == null
                 }
                 if (failed.isEmpty()) {
@@ -165,6 +168,7 @@ class UpdatePromptService(
                         onAction = { loaderDelegate?.restartApplication() }
                     )
                 }
+                if (includesSelf) loaderDelegate?.reloadPlugin(TOOLBOX_PLUGIN_ID)
             }
             is UpdateApplyPlan.SwapApiLayer -> notifications.showToast(
                 message = "${plan.displayName} updated. Applying hot-swaps the API layer — " +
@@ -200,9 +204,13 @@ class UpdatePromptService(
                 actionLabel = "Reset",
                 onAction = {
                     scope.launch {
-                        plan.pluginIds.forEach { id ->
+                        // Toolbox last: resetting it disposes this plugin, so any id after it
+                        // would never be reset. See `selfLast`.
+                        val (others, includesSelf) = selfLast(plan.pluginIds)
+                        others.forEach { id ->
                             runCatching { loaderDelegate?.resetPluginInstances(id) }
                         }
+                        if (includesSelf) loaderDelegate?.resetPluginInstances(TOOLBOX_PLUGIN_ID)
                     }
                 }
             )
