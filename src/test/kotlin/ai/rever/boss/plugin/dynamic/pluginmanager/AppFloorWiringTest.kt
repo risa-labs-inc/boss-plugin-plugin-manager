@@ -55,7 +55,23 @@ class AppFloorWiringTest {
         val block = view.substringAfter("val bossFloorLabel = plugin.blockedReason()")
         val branch = block.indexOf("bossFloorLabel != null -> {")
         val install = block.indexOf("""text = "Install",""")
-        assertTrue(branch in 0 until install, "the floor branch is not reached before Install is rendered")
+        // Both located first. `x in 0 until -1` is false either way, so without this a renamed
+        // Install button would fail as "wrong order" and send a reader looking in the wrong place.
+        assertTrue(branch >= 0, "the card's floor branch is gone")
+        assertTrue(install >= 0, "could not find the card's Install button to compare against")
+        assertTrue(branch < install, "the floor branch is not reached before Install is rendered")
+    }
+
+    @Test
+    fun `a permission refusal is decided before the floor`() {
+        // The server answers 403 whatever version of BOSS is running, so "Update BOSS to install"
+        // for someone who lacks the permission sends them to do something that cannot help.
+        val block = view.substringAfter("val bossFloorLabel = plugin.blockedReason()")
+        val permission = block.indexOf("!canInstall -> {")
+        val floor = block.indexOf("bossFloorLabel != null -> {")
+        assertTrue(permission >= 0, "the permission branch is gone")
+        assertTrue(floor >= 0, "the card's floor branch is gone")
+        assertTrue(permission < floor, "the app floor is now answered before a permission refusal")
     }
 
     @Test
@@ -74,17 +90,35 @@ class AppFloorWiringTest {
     fun `the compatibility badge reflects the app floor`() {
         // A green "Compatible" chip beside a blocked row is the exact wording the user objected to.
         assertTrue(
-            view.contains("if (version.bossCompatibility == BossCompat.Status.REQUIRES_HOST_UPDATE)"),
+            view.contains("version.bossCompatibility == BossCompat.Status.REQUIRES_HOST_UPDATE"),
             "the badge is back to reading the IPC status alone",
         )
+    }
+
+    @Test
+    fun `the badge answers a hard incompatibility before the app floor`() {
+        // MAJOR_MISMATCH is the one a BOSS update may not fix, so labelling it amber "Host update"
+        // would point the user at the wrong action. Severity order, not floor order.
+        val badge = view.substringAfter("private fun CompatibilityBadge(")
+        val mismatch = badge.indexOf("IpcCompat.Status.MAJOR_MISMATCH")
+        val appFloor = badge.indexOf("BossCompat.Status.REQUIRES_HOST_UPDATE")
+        assertTrue(mismatch >= 0, "the badge no longer distinguishes a hard incompatibility")
+        assertTrue(appFloor >= 0, "the badge no longer reads the app floor")
+        assertTrue(mismatch < appFloor, "an IPC major mismatch would render as an amber host update")
     }
 
     @Test
     fun `both download paths gate on the floor`() {
         // The last line of defence, and the one that covers a deep link or a stale list reaching
         // install without passing any UI filter. Two call sites: fresh install and update.
-        val gates = Regex("""BossCompat\.requirement\(downloadInfo\.minBossVersion\)""").findAll(impl).count()
-        assertTrue(gates == 2, "expected the floor gate on both download paths, found $gates")
+        // `>=`, not `==`: a third install path is a reason to celebrate, not to fail. What must
+        // not happen is one of them losing the gate.
+        val gates = Regex("""bossFloorRefusal\(downloadInfo\)\s*\?\.let""").findAll(impl).count()
+        assertTrue(gates >= 2, "expected the floor gate on both download paths, found $gates")
+        assertTrue(
+            impl.contains("BossCompat.requirement(downloadInfo.minBossVersion)"),
+            "the shared refusal no longer consults the floor",
+        )
     }
 
     @Test
@@ -96,6 +130,21 @@ class AppFloorWiringTest {
         assertTrue(
             impl.contains("BossCompat.isInstallable(versionRow?.minBossVersion)"),
             "checkForCompatibleUpdates no longer applies the app floor",
+        )
+    }
+
+    @Test
+    fun `the held-back updates are surfaced, not dropped`() {
+        // Hiding an update the loader would refuse is right; hiding the FACT that one exists just
+        // moves the silence. This is the assertion that keeps the second half from being deleted as
+        // dead weight.
+        assertTrue(
+            view.contains("BlockedUpdatesNotice(blockedUpdates)"),
+            "the Updates tab no longer says anything about updates it held back",
+        )
+        assertTrue(
+            view.contains("blockedUpdates = state.blockedUpdates"),
+            "the notice is rendered but never given anything to show",
         )
     }
 

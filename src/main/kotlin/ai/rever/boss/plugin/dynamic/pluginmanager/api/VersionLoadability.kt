@@ -16,7 +16,14 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.api
  * property.
  */
 fun PluginVersionInfo.isLoadableHere(): Boolean =
-    IpcCompat.isInstallable(minIpcVersion) &&
+    // `compatibility`, NOT `IpcCompat.isInstallable(minIpcVersion)`. The two are built from
+    // different inputs and disagree: `min_ipc_version` is nullable, and the entry coerces the
+    // string to "1.0.0" while resolving the status from the raw null. So a version declaring no
+    // IPC floor resolves to UNKNOWN (the badge shows nothing) while the string "1.0.0" would read
+    // as MAJOR_MISMATCH on any host whose IPC major is not 1 - a row with no badge and no action.
+    // Latent while host IPC stays on 1.x, and a divergence from the badge either way.
+    compatibility != IpcCompat.Status.REQUIRES_HOST_UPDATE &&
+        compatibility != IpcCompat.Status.MAJOR_MISMATCH &&
         bossCompatibility != BossCompat.Status.REQUIRES_HOST_UPDATE
 
 /**
@@ -42,3 +49,15 @@ fun PluginVersionInfo.blockedReason(): String? =
  * Judging the LATEST version is the right scope for a card whose button installs exactly that.
  */
 fun PluginStoreItem.blockedReason(): String? = BossCompat.requirement(minBossVersion)
+
+/**
+ * A newer version of an installed plugin that this host cannot load, ready to render.
+ *
+ * The display-ready counterpart of the store-side `BlockedUpdate`: the same fact with the plugin's
+ * name resolved, so the Updates tab does not have to reach back into the installed list to draw it.
+ */
+data class BlockedUpdateNotice(
+    val displayName: String,
+    val newVersion: String,
+    val requiredBossVersion: String,
+)

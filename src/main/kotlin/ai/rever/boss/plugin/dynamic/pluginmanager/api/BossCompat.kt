@@ -49,8 +49,8 @@ object BossCompat {
 
     fun status(minBossVersion: String?): Status {
         if (minBossVersion.isNullOrBlank()) return Status.UNKNOWN
-        val host = parse(hostVersion ?: return Status.UNKNOWN) ?: return Status.UNKNOWN
-        val required = parse(minBossVersion) ?: return Status.UNKNOWN
+        val host = SemVer.parse(hostVersion ?: return Status.UNKNOWN) ?: return Status.UNKNOWN
+        val required = SemVer.parse(minBossVersion) ?: return Status.UNKNOWN
         // A FLOOR: equal satisfies it. Reading this as strict would refuse the exact release built
         // to carry the plugin - 9.4.23 does satisfy "9.4.23 or later".
         return if (compare(host, required) >= 0) Status.COMPATIBLE else Status.REQUIRES_HOST_UPDATE
@@ -83,14 +83,4 @@ object BossCompat {
             a.second != b.second -> a.second - b.second
             else -> a.third - b.third
         }
-
-    private fun parse(version: String): Triple<Int, Int, Int>? {
-        val core = version.substringBefore('-').substringBefore('+')
-        val parts = core.split('.')
-        if (parts.size < 3) return null
-        val major = parts[0].toIntOrNull() ?: return null
-        val minor = parts[1].toIntOrNull() ?: return null
-        val patch = parts[2].toIntOrNull() ?: return null
-        return Triple(major, minor, patch)
-    }
 }

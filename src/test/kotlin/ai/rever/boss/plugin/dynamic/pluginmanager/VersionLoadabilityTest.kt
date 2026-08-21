@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.BossCompat
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.IpcCompat
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.blockedReason
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.isLoadableHere
@@ -30,16 +31,22 @@ class VersionLoadabilityTest {
         System.clearProperty(ipcProperty)
     }
 
+    /**
+     * @param compatibility defaulted from [minIpc] but overridable, because the two are NOT built
+     *   from the same input in production: `min_ipc_version` is nullable, and the entry coerces the
+     *   string to "1.0.0" while resolving the status from the raw null. Deriving both from one
+     *   argument here made them equal by construction and hid a real divergence.
+     */
     private fun version(
         v: String = "1.2.22",
         minIpc: String = "1.0.0",
         minBoss: String = "",
+        compatibility: IpcCompat.Status = IpcCompat.status(minIpc),
     ) = PluginVersionInfo(
         version = v,
         minIpcVersion = minIpc,
-        compatibility = IpcCompat.status(minIpc),
+        compatibility = compatibility,
         minBossVersion = minBoss,
-        bossCompatibility = BossCompat.status(minBoss),
     )
 
     @Test
@@ -98,9 +105,95 @@ class VersionLoadabilityTest {
 
     @Test
     fun `a default-constructed entry is loadable`() {
-        // `bossCompatibility` defaults to UNKNOWN, so an entry built by a caller that does not set
-        // it (or decoded from a store that does not send the column) is never blocked by accident.
+        // `minBossVersion` defaults to blank, which resolves to UNKNOWN, so an entry built by a
+        // caller that does not set it is never blocked by accident.
         System.setProperty(property, "9.4.22")
-        assertTrue(PluginVersionInfo(version = "1.0.0", minIpcVersion = "1.0.0", compatibility = IpcCompat.Status.UNKNOWN).isLoadableHere())
+        val bare =
+            PluginVersionInfo(
+                version = "1.0.0",
+                minIpcVersion = "1.0.0",
+                compatibility = IpcCompat.Status.UNKNOWN,
+            )
+        assertTrue(bare.isLoadableHere())
+        assertNull(bare.blockedReason())
+    }
+
+    @Test
+    fun `the verdict is derived, so it cannot disagree with the floor`() {
+        // The two used to be independently defaulted constructor parameters, and the consumers
+        // disagreed about which was authoritative: setting the floor and forgetting the verdict
+        // (easy, it was defaulted) rendered a blocked version as installable.
+        System.setProperty(property, "9.4.22")
+        val blocked = version(minBoss = "9.4.23")
+        assertEquals(BossCompat.Status.REQUIRES_HOST_UPDATE, blocked.bossCompatibility)
+        assertFalse(blocked.isLoadableHere())
+    }
+
+    @Test
+    fun `a resolved UNKNOWN status is not overridden by the coerced string`() {
+        // The divergence this predicate had. `min_ipc_version` null resolves to UNKNOWN and the
+        // badge shows nothing, while the coerced "1.0.0" string would read as MAJOR_MISMATCH on any
+        // host whose IPC major is not 1 - a row with no badge and no action, for a version that
+        // declares no IPC floor at all.
+        System.setProperty(ipcProperty, "2.0.0")
+        val noIpcFloor = version(minIpc = "1.0.0", compatibility = IpcCompat.Status.UNKNOWN)
+        assertTrue(
+            noIpcFloor.isLoadableHere(),
+            "a version declaring no IPC floor was blocked by a coerced default the badge never showed",
+        )
+    }
+
+    @Test
+    fun `a hard IPC mismatch still blocks`() {
+        // The other side of the same fix: reading the resolved status must not have made the
+        // predicate more permissive than the badge.
+        System.setProperty(ipcProperty, "2.0.0")
+        val mismatched = version(minIpc = "1.0.0", compatibility = IpcCompat.Status.MAJOR_MISMATCH)
+        assertFalse(mismatched.isLoadableHere())
+        assertEquals("Needs newer BOSS", mismatched.blockedReason())
+    }
+}
+
+/**
+ * The store card's predicate, which judges the LATEST version only.
+ *
+ * Separate from the version sheet's because the two see different data: a catalogue row carries
+ * `latest_min_boss_version` and no IPC floor at all, so the card can answer one question and the
+ * sheet answers both. This was the one of the four call sites with no behavioural test behind it.
+ */
+class StoreItemBlockedReasonTest {
+    private val property = "boss.app.version"
+
+    @AfterTest
+    fun clearHostVersion() {
+        System.clearProperty(property)
+    }
+
+    @Test
+    fun `a latest version above the floor is blocked and names both versions`() {
+        System.setProperty(property, "9.4.22")
+        val item = PluginStoreItem(pluginId = "com.example.plugin", minBossVersion = "9.4.23")
+        assertEquals("Needs BOSS 9.4.23 (you have 9.4.22)", item.blockedReason())
+    }
+
+    @Test
+    fun `a met floor is not blocked`() {
+        System.setProperty(property, "9.4.23")
+        assertNull(PluginStoreItem(pluginId = "com.example.plugin", minBossVersion = "9.4.23").blockedReason())
+    }
+
+    @Test
+    fun `a row with no floor is not blocked`() {
+        // The default for `PluginStoreItem.minBossVersion` is blank, and most catalogue rows are
+        // blank or "1.0.0". Blocking on absence would empty the store.
+        System.setProperty(property, "9.4.22")
+        assertNull(PluginStoreItem(pluginId = "com.example.plugin").blockedReason())
+        assertNull(PluginStoreItem(pluginId = "com.example.plugin", minBossVersion = "1.0.0").blockedReason())
+    }
+
+    @Test
+    fun `an older host that publishes no version is not blocked`() {
+        System.clearProperty(property)
+        assertNull(PluginStoreItem(pluginId = "com.example.plugin", minBossVersion = "99.0.0").blockedReason())
     }
 }

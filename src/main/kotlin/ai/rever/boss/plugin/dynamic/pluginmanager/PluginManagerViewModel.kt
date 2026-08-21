@@ -64,6 +64,13 @@ data class PluginManagerState(
     val installedPlugins: List<InstalledPluginState> = emptyList(),
     val availablePlugins: List<PluginStoreItem> = emptyList(),
     val updates: List<UpdateInfo> = emptyList(),
+    /**
+     * Newer versions this host cannot load, so the Updates tab can say so.
+     *
+     * Kept beside [updates] rather than mixed into them: they are not actionable, and putting them
+     * in the same list would give "Update All" something it cannot do.
+     */
+    val blockedUpdates: List<BlockedUpdateNotice> = emptyList(),
     val isLoading: Boolean = false,
     /** Per-plugin loading state — tracks which plugins are currently being installed/updated/uninstalled. */
     val busyPlugins: Set<String> = emptySet(),
@@ -511,8 +518,8 @@ class PluginManagerViewModel(
      */
     private suspend fun checkForUpdatesInternal() {
         try {
-            val updateMap = apiImpl.checkForUpdatesResult().getOrElse { return }
-            val updateInfos = updateMap.map { (pluginId, newVersion) ->
+            val candidates = apiImpl.checkForUpdatesResult().getOrElse { return }
+            val updateInfos = candidates.loadable.map { (pluginId, newVersion) ->
                 val installed = _state.value.installedPlugins.find { it.pluginId == pluginId }
                 UpdateInfo(
                     pluginId = pluginId,
@@ -521,7 +528,19 @@ class PluginManagerViewModel(
                     newVersion = newVersion
                 )
             }
-            _state.update { it.copy(updates = updateInfos) }
+            // The held-back ones travel with them. Filtering them out and saying nothing would
+            // leave a user on an out-of-date host reading "All plugins are up to date" while
+            // updates they cannot have go unmentioned - a different silence, not a fix for the one
+            // this replaced.
+            val blocked = candidates.blockedByHost.map { held ->
+                val installed = _state.value.installedPlugins.find { it.pluginId == held.pluginId }
+                BlockedUpdateNotice(
+                    displayName = installed?.displayName ?: held.pluginId,
+                    newVersion = held.version,
+                    requiredBossVersion = held.requiredBossVersion
+                )
+            }
+            _state.update { it.copy(updates = updateInfos, blockedUpdates = blocked) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

@@ -356,9 +356,19 @@ data class PluginVersionInfo(
     val compatibility: IpcCompat.Status,
     /** The app version this build declares it needs, as published to the store. */
     val minBossVersion: String = "",
-    /** Whether THIS host meets [minBossVersion]. See [BossCompat]. */
-    val bossCompatibility: BossCompat.Status = BossCompat.Status.UNKNOWN,
-)
+) {
+    /**
+     * Whether THIS host meets [minBossVersion]. See [BossCompat].
+     *
+     * DERIVED, not a constructor parameter. As two independently defaulted fields they had to be
+     * kept in step by every construction site, and the consumers disagreed about which was
+     * authoritative - so setting `minBossVersion` and forgetting the verdict (easy, it was
+     * defaulted) rendered a blocked version as installable. `BossCompat.status` is pure over the
+     * floor and a system property, so there is nothing to store.
+     */
+    val bossCompatibility: BossCompat.Status
+        get() = BossCompat.status(minBossVersion)
+}
 
 /**
  * Internal data class for parsing plugin.json manifest.

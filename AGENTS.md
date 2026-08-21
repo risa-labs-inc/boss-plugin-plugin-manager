@@ -84,8 +84,25 @@ Four call sites now apply it, and all four matter separately:
   which filtered on "is it newer" and nothing else. Taking such an update is destructive rather
   than merely useless: the update path downloads *over* the installed jar, so a refused version
   removes a working plugin.
-- **both download paths** - belt and braces, for a deep link or a stale list that reaches install
-  without passing a UI filter.
+- **both download paths**, through one shared `bossFloorRefusal` - belt and braces, for a deep link
+  or a stale list that reaches install without passing a UI filter.
+
+**A hidden update still gets said out loud.** `loadableUpdates` returns what it held back as well as
+what it kept, and the Updates tab renders "N updates need a newer BOSS" naming each one. Filtering
+them out and saying nothing would have replaced one silence with another: a user on an out-of-date
+host reading "All plugins are up to date" while updates they cannot have go unmentioned.
+
+Two things about `PluginVersionInfo` that were wrong first and are worth not re-introducing:
+
+- **`bossCompatibility` is derived, not stored.** As two independently defaulted constructor
+  parameters, `minBossVersion` and its verdict had to be kept in step by every construction site,
+  and the consumers disagreed about which was authoritative - so setting the floor and forgetting
+  the verdict rendered a blocked version as installable.
+- **`isLoadableHere()` reads the resolved `compatibility`, never `IpcCompat.isInstallable(minIpcVersion)`.**
+  Those two are built from different inputs: `min_ipc_version` is nullable, and the entry coerces
+  the string to `"1.0.0"` while resolving the status from the raw null. A version declaring no IPC
+  floor resolves to UNKNOWN (no badge) while the coerced string reads as `MAJOR_MISMATCH` on any
+  host whose IPC major is not 1 - a row with no badge and no action.
 
 **Every one of them fails open on unknown.** A host that does not publish `boss.app.version` -
 which is every BOSS up to 9.4.22 - and a version with no declared floor both stay installable. That
