@@ -101,6 +101,23 @@ data class DownloadInfoResponse(
     val size: Long = 0,
     val versionId: String = "",
     val minIpcVersion: String = "1.0.0",
+    /**
+     * The app version this build needs, from `plugin_versions.min_boss_version`.
+     *
+     * NULLABLE, and defaulted null rather than "1.0.0". Two separate reasons, both load-bearing:
+     *
+     * A default only covers an ABSENT key. `min_boss_version` is `TEXT DEFAULT '1.0.0'` with no
+     * NOT NULL, so an explicit null is reachable - and a null in a non-nullable slot throws for
+     * the whole object, which here would turn a missing floor into a failed install. The same trap
+     * is documented on [StoreOrgRow].
+     *
+     * And a floor must not be invented: a made-up "1.0.0" reads as a real answer meaning "any host
+     * will do", so a genuinely incompatible version would sail through the gate that exists to
+     * stop it. Absent is honestly unknown, and [BossCompat] treats unknown as installable - the
+     * same fail-open the IPC gate uses, and what lets this keep working against a store that does
+     * not send the field at all.
+     */
+    val minBossVersion: String? = null,
     val requiredPermissions: List<String> = emptyList()
 )
 
@@ -296,7 +313,14 @@ data class StoreOrgListResponse(
 @Serializable
 data class PluginUpdateRow(
     @SerialName("plugin_id") val pluginId: String,
-    @SerialName("latest_version") val latestVersion: String? = null
+    @SerialName("latest_version") val latestVersion: String? = null,
+    /**
+     * The latest version's app floor, so an update can be judged from the same row that found it.
+     *
+     * The alternative was a second query per candidate, and that cost is exactly why the check
+     * skipped the floor and offered updates the host would refuse to load.
+     */
+    @SerialName("latest_min_boss_version") val latestMinBossVersion: String? = null,
 )
 
 /**
@@ -315,16 +339,36 @@ data class PluginVersionRow(
 )
 
 /**
- * A single published version of a plugin, with its host-IPC compatibility
- * resolved against this host. Surfaced in the version-history / downgrade UI.
+ * A single published version of a plugin, with its compatibility resolved against this host.
+ * Surfaced in the version-history / downgrade UI.
+ *
+ * TWO floors, because they fail differently and only one of them used to be here. The IPC contract
+ * governs whether a plugin's out-of-process half can talk to this host; `minBossVersion` governs
+ * whether `DynamicPluginLoader` will load the jar AT ALL. Carrying only the first meant a version
+ * above the app floor rendered as installable, and Install then downloaded something the loader
+ * refused - visible only as a plugin that did not appear.
  */
 data class PluginVersionInfo(
     val version: String,
     val minIpcVersion: String,
     val changelog: String = "",
     val publishedAt: String = "",
-    val compatibility: IpcCompat.Status
-)
+    val compatibility: IpcCompat.Status,
+    /** The app version this build declares it needs, as published to the store. */
+    val minBossVersion: String = "",
+) {
+    /**
+     * Whether THIS host meets [minBossVersion]. See [BossCompat].
+     *
+     * DERIVED, not a constructor parameter. As two independently defaulted fields they had to be
+     * kept in step by every construction site, and the consumers disagreed about which was
+     * authoritative - so setting `minBossVersion` and forgetting the verdict (easy, it was
+     * defaulted) rendered a blocked version as installable. `BossCompat.status` is pure over the
+     * floor and a system property, so there is nothing to store.
+     */
+    val bossCompatibility: BossCompat.Status
+        get() = BossCompat.status(minBossVersion)
+}
 
 /**
  * Internal data class for parsing plugin.json manifest.

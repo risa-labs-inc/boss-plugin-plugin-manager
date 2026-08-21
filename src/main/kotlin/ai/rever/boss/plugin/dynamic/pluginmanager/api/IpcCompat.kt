@@ -36,8 +36,8 @@ object IpcCompat {
 
     fun status(minIpcVersion: String?): Status {
         if (minIpcVersion.isNullOrBlank()) return Status.UNKNOWN
-        val host = parse(hostVersion ?: return Status.UNKNOWN) ?: return Status.UNKNOWN
-        val rt = parse(minIpcVersion) ?: return Status.UNKNOWN
+        val host = SemVer.parse(hostVersion ?: return Status.UNKNOWN) ?: return Status.UNKNOWN
+        val rt = SemVer.parse(minIpcVersion) ?: return Status.UNKNOWN
         return when {
             rt.first != host.first -> Status.MAJOR_MISMATCH
             rt.second > host.second -> Status.REQUIRES_HOST_UPDATE
@@ -49,14 +49,4 @@ object IpcCompat {
     /** Installable when compatible, or unknown (legacy / no host IPC info). */
     fun isInstallable(minIpcVersion: String?): Boolean =
         status(minIpcVersion).let { it == Status.COMPATIBLE || it == Status.UNKNOWN }
-
-    private fun parse(version: String): Triple<Int, Int, Int>? {
-        val core = version.substringBefore('-').substringBefore('+')
-        val parts = core.split('.')
-        if (parts.size < 3) return null
-        val major = parts[0].toIntOrNull() ?: return null
-        val minor = parts[1].toIntOrNull() ?: return null
-        val patch = parts[2].toIntOrNull() ?: return null
-        return Triple(major, minor, patch)
-    }
 }

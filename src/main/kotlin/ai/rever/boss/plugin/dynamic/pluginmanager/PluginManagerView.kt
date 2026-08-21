@@ -1,6 +1,9 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.ui.BossDialog
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.BlockedUpdateNotice
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.BossCompat
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.blockedReason
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.DefinedPermissionData
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstalledPluginState
@@ -1259,14 +1262,16 @@ private fun VersionRow(
             fontSize = 13.sp,
             modifier = Modifier.width(96.dp)
         )
-        IpcBadge(version.compatibility)
+        CompatibilityBadge(version)
         Spacer(Modifier.weight(1f))
         val isInstalled = installedVersion != null && version.version == installedVersion
-        val installable = version.compatibility == IpcCompat.Status.COMPATIBLE ||
-            version.compatibility == IpcCompat.Status.UNKNOWN
+        // BOTH floors, via one tested predicate. This read the IPC status alone, which is the
+        // narrower of the two and not the one that stops a plugin loading - so a version above the
+        // app floor rendered with an Install button that downloaded a jar the host then refused.
+        val blockedLabel = version.blockedReason()
         when {
             isInstalled -> Text("Installed", color = BossThemeColors.TextMuted, fontSize = 12.sp)
-            !installable -> Text("Needs newer BOSS", color = BossThemeColors.WarningColor, fontSize = 11.sp)
+            blockedLabel != null -> Text(blockedLabel, color = BossThemeColors.WarningColor, fontSize = 11.sp)
             busy -> Text("…", color = BossThemeColors.TextMuted, fontSize = 12.sp)
             else -> BossSecondaryButton(
                 text = when {
@@ -1282,14 +1287,45 @@ private fun VersionRow(
     }
 }
 
+/**
+ * One badge for a version's compatibility, across both floors.
+ *
+ * This used to read the IPC status alone, which put a green "Compatible" next to a row whose only
+ * available action said the host was too old - and made a version above the app floor look
+ * installable, which is the whole complaint.
+ *
+ * Ordered by SEVERITY, not by which floor is newer. `MAJOR_MISMATCH` is checked first because it is
+ * the one thing a BOSS update may not fix, so labelling it "Host update" would send the user to do
+ * something that cannot help. The app floor comes next: it is amber for the same reason an update
+ * resolves it. An IPC minor gap and a `minBossVersion` miss both read as "Host update" because both
+ * are true and both are fixed the same way.
+ */
 @Composable
-private fun IpcBadge(status: IpcCompat.Status) {
-    val (color, label) = when (status) {
-        IpcCompat.Status.COMPATIBLE -> BossThemeColors.SuccessColor to "Compatible"
-        IpcCompat.Status.REQUIRES_HOST_UPDATE -> BossThemeColors.WarningColor to "Host update"
-        IpcCompat.Status.MAJOR_MISMATCH -> BossThemeColors.ErrorColor to "Incompatible"
-        IpcCompat.Status.UNKNOWN -> return
+private fun CompatibilityBadge(version: PluginVersionInfo) {
+    val (color, label) = when {
+        version.compatibility == IpcCompat.Status.MAJOR_MISMATCH ->
+            BossThemeColors.ErrorColor to "Incompatible"
+
+        version.bossCompatibility == BossCompat.Status.REQUIRES_HOST_UPDATE ->
+            BossThemeColors.WarningColor to "Host update"
+
+        version.compatibility == IpcCompat.Status.REQUIRES_HOST_UPDATE ->
+            BossThemeColors.WarningColor to "Host update"
+
+        version.compatibility == IpcCompat.Status.COMPATIBLE ->
+            BossThemeColors.SuccessColor to "Compatible"
+
+        // UNKNOWN with both floors clear: no badge rather than a guess.
+        else -> return
     }
+    CompatibilityChip(color, label)
+}
+
+@Composable
+private fun CompatibilityChip(
+    color: Color,
+    label: String
+) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
@@ -1473,7 +1509,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                             viewModel.openPluginPage(id, slug, orgId, installed)
                         },
                         busyPlugins = state.busyPlugins,
-                        provenanceByPluginId = provenanceByPluginId
+                        provenanceByPluginId = provenanceByPluginId,
+                        blockedUpdates = state.blockedUpdates
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
                     PluginManagerTab.PUBLISH -> PublishTab(
@@ -2412,6 +2449,48 @@ private fun AvailablePluginsTab(
     }
 }
 
+/**
+ * "N updates need a newer BOSS", with what each one wants.
+ *
+ * The point of showing this at all: hiding an update the loader would refuse is right, but hiding
+ * the fact that one exists just moves the silence. Naming the version needed is what makes it
+ * something the user can act on rather than a warning they cannot resolve.
+ */
+@Composable
+private fun BlockedUpdatesNotice(blocked: List<BlockedUpdateNotice>) {
+    BossCard {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Upgrade,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = BossThemeColors.WarningColor
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "${blocked.size} update${if (blocked.size != 1) "s" else ""} need a newer BOSS",
+                    color = BossThemeColors.WarningColor,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            // Every one of them, not a count alone: which plugin is held back is the part a user
+            // needs, and a list of blocked updates is short by construction.
+            blocked.forEach { held ->
+                Text(
+                    text = "${held.displayName} ${held.newVersion} needs BOSS ${held.requiredBossVersion}",
+                    color = BossThemeColors.TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun AvailablePluginCard(
     plugin: PluginStoreItem,
@@ -2436,6 +2515,14 @@ private fun AvailablePluginCard(
     // The whole card opens the plugin's page, falling back to the homepage for a catalogue row
     // that names no organisation and so has no page.
     val openCard: (() -> Unit)? = onOpenPage ?: onOpenHomepage.takeIf { hasHomepage }
+
+    // Whether this host meets the LATEST version's app floor. `plugin.minBossVersion` is the
+    // catalogue row's `latest_min_boss_version`, so it judges what Install would fetch and says
+    // nothing about older versions - which is why the version sheet judges each row separately.
+    // Non-null exactly when this host cannot load the latest version, which is what the branch
+    // below tests - a nullable val rather than a boolean plus a string, so the branch reads the
+    // message through a smart cast and there is no second, unreachable fallback to keep in step.
+    val bossFloorLabel = plugin.blockedReason()
 
     BossCard(onClick = openCard) {
         Row(
@@ -2607,6 +2694,38 @@ private fun AvailablePluginCard(
                             }
                         }
                     }
+                    // The latest published version needs a newer host than this one, so
+                    // `DynamicPluginLoader` would refuse the jar Install downloads. Offering the
+                    // button anyway produced the only outcome worth avoiding here: a download, a
+                    // silent refusal, and a plugin that never appeared.
+                    //
+                    // Placed BELOW two other branches, both deliberately:
+                    //
+                    // - `isInstalled`, so an installed plugin keeps saying "Installed", which is
+                    //   the state the user cares about; the blocked newer version shows up in the
+                    //   version sheet, where there is room to name it. No Update button appears
+                    //   either way, since the update check applies the same floor.
+                    // - `!canInstall`, because a permission refusal outranks this. The server
+                    //   answers 403 whatever version of BOSS is running, so "Update BOSS to
+                    //   install" would send the user to do something that cannot help.
+                    bossFloorLabel != null -> {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = "Update BOSS to install",
+                                color = BossThemeColors.WarningColor,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = bossFloorLabel,
+                                color = BossThemeColors.TextMuted,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 180.dp)
+                            )
+                        }
+                    }
                     else -> {
                         BossPrimaryButton(
                             text = "Install",
@@ -2664,21 +2783,43 @@ private fun UpdatesTab(
      */
     onOpenPage: (pluginId: String, orgSlug: String, orgId: String, installed: Boolean?) -> Unit =
         { _, _, _, _ -> },
+    /**
+     * Newer versions this host cannot load.
+     *
+     * Shown rather than dropped. The floor check narrows what the Updates tab offers, and without
+     * this the narrowing is itself silent: a user on an out-of-date host reads "All plugins are up
+     * to date" while updates they cannot have go unmentioned.
+     */
+    blockedUpdates: List<BlockedUpdateNotice> = emptyList(),
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
+        if (blockedUpdates.isNotEmpty()) {
+            BlockedUpdatesNotice(blockedUpdates)
+            Spacer(Modifier.height(12.dp))
+        }
         if (updates.isEmpty()) {
             Box(
-                modifier = Modifier.fillMaxSize(),
+                // Not fillMaxSize when a notice is above it: the empty state would push the notice
+                // off the top of a short panel, hiding the one thing that explains the emptiness.
+                modifier = if (blockedUpdates.isEmpty()) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
                 BossEmptyState(
                     icon = Icons.Default.Check,
-                    message = "All plugins are up to date",
-                    description = "No updates available"
+                    message = if (blockedUpdates.isEmpty()) {
+                        "All plugins are up to date"
+                    } else {
+                        "No updates you can install yet"
+                    },
+                    description = if (blockedUpdates.isEmpty()) {
+                        "No updates available"
+                    } else {
+                        "The updates above need a newer BOSS"
+                    }
                 )
             }
         } else {
