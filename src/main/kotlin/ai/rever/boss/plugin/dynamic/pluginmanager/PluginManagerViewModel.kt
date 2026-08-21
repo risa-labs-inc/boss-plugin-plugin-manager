@@ -1182,8 +1182,15 @@ class PluginManagerViewModel(
     private suspend fun buildPostUpdatePrompt(pluginIds: List<String>): PostUpdatePrompt? {
         return when (val plan = buildUpdateApplyPlan(pluginIds, loaderDelegate)) {
             is UpdateApplyPlan.Reload -> {
-                val failed = plan.pluginIds.filter { id ->
+                // Toolbox last, and unreported: reloading it cancels this coroutine, so its
+                // cancellation is the success path rather than a failure. See `selfLast`.
+                val (others, includesSelf) = selfLast(plan.pluginIds)
+                val failed = others.filter { id ->
                     runCatching { loaderDelegate?.reloadPlugin(id) }.getOrNull() == null
+                }
+                if (includesSelf && failed.isEmpty()) {
+                    loaderDelegate?.reloadPlugin(TOOLBOX_PLUGIN_ID)
+                    return null
                 }
                 if (failed.isEmpty()) null
                 else PostUpdatePrompt(
@@ -1218,9 +1225,13 @@ class PluginManagerViewModel(
         val prompt = _state.value.postUpdatePrompt ?: return
         _state.value = _state.value.copy(postUpdatePrompt = null)
         scope.launch {
-            prompt.pluginIds.forEach { id ->
+            // Toolbox last: resetting it disposes this plugin and cancels this coroutine, so any
+            // id after it would never be reset. See `selfLast`.
+            val (others, includesSelf) = selfLast(prompt.pluginIds)
+            others.forEach { id ->
                 runCatching { loaderDelegate?.resetPluginInstances(id) }
             }
+            if (includesSelf) loaderDelegate?.resetPluginInstances(TOOLBOX_PLUGIN_ID)
         }
     }
 
