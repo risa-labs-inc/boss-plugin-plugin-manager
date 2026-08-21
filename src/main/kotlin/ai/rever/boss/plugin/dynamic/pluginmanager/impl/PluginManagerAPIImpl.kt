@@ -534,7 +534,9 @@ class PluginManagerAPIImpl(
                     minIpcVersion = v.minIpcVersion ?: "1.0.0",
                     changelog = v.changelog ?: "",
                     publishedAt = v.publishedAt ?: "",
-                    compatibility = IpcCompat.status(v.minIpcVersion)
+                    compatibility = IpcCompat.status(v.minIpcVersion),
+                    minBossVersion = v.minBossVersion ?: "",
+                    bossCompatibility = BossCompat.status(v.minBossVersion),
                 )
             })
         } catch (e: Exception) {
@@ -605,22 +607,14 @@ class PluginManagerAPIImpl(
 
         try {
             val rows = supabaseClient.from("plugins_with_latest_version")
-                .select(Columns.raw("plugin_id, latest_version")) {
+                .select(Columns.raw("plugin_id, latest_version, latest_min_boss_version")) {
                     filter {
                         isIn("plugin_id", installedIds)
                     }
                 }
                 .decodeList<PluginUpdateRow>()
 
-            Result.success(
-                rows.mapNotNull { row ->
-                    val latestVersion = row.latestVersion ?: return@mapNotNull null
-                    val currentVersion = installedVersionMap[row.pluginId] ?: return@mapNotNull null
-                    if (isNewerVersion(latestVersion, currentVersion)) {
-                        row.pluginId to latestVersion
-                    } else null
-                }.toMap()
-            )
+            Result.success(loadableUpdates(rows, installedVersionMap))
         } catch (e: CancellationException) {
             // A cancelled check is not a failed one: absorbing it into Result.failure would
             // report "the store is unreachable" every time a panel closes mid-check.
@@ -654,6 +648,13 @@ class PluginManagerAPIImpl(
             // A missing row resolves to UNKNOWN → installable, matching the
             // install-time gate in downloadFromStore().
             if (!IpcCompat.isInstallable(versionRow?.minIpcVersion)) return@mapNotNull null
+            // The app floor, which is the one that stops a plugin LOADING. The row is already in
+            // hand, so this costs nothing - and without it the Toolbox offered "Update available"
+            // for a jar `DynamicPluginLoader` then refused, leaving the plugin gone and the
+            // reason only in the host log. fluck-browser 1.2.22 (minBossVersion 9.4.23) did
+            // exactly that on 9.4.22, and for that plugin the visible symptom is the browser tab
+            // disappearing.
+            if (!BossCompat.isInstallable(versionRow?.minBossVersion)) return@mapNotNull null
             UpdateInfo(
                 pluginId = pluginId,
                 displayName = current.displayName,
@@ -831,6 +832,17 @@ class PluginManagerAPIImpl(
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
                 return InstallResult.DownloadFailed(
                     "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
+                )
+            }
+
+            // App-floor gate. Belt and braces behind the browse-time filter: a deep link, a
+            // stale list or a direct version pick all reach here without passing that filter,
+            // and the failure this prevents is silent (the host refuses the jar at load and says
+            // so only in its log). Blank resolves to UNKNOWN and installs, which is what keeps
+            // this working against a store that does not send the field yet.
+            BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
+                return InstallResult.DownloadFailed(
+                    "Version ${downloadInfo.version} $requirement."
                 )
             }
 
@@ -1389,6 +1401,15 @@ class PluginManagerAPIImpl(
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
                 return InstallResult.DownloadFailed(
                     "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
+                )
+            }
+
+            // App-floor gate. This path REPLACES the installed jar, so an incompatible version
+            // here does not merely fail to arrive, it takes the working plugin with it - which is
+            // how a 1.2.21 filename ended up holding 1.2.22 bytes that no longer loaded.
+            BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
+                return InstallResult.DownloadFailed(
+                    "Version ${downloadInfo.version} $requirement."
                 )
             }
 
@@ -2098,8 +2119,6 @@ class PluginManagerAPIImpl(
     // HELPERS
     // ========================================
 
-    private fun isNewerVersion(newVersion: String, currentVersion: String): Boolean =
-        isVersionNewer(newVersion, currentVersion)
 }
 
 /**
