@@ -1347,9 +1347,23 @@ class PluginManagerAPIImpl(
             // rejects the legitimate plugin as tampered).
             deleteSignatureSidecar(destFile)
 
-            // Replace old JAR with new one
-            destFile.delete()
-            tempFile.renameTo(destFile)
+            // Swap in ONE filesystem operation. This used to be `destFile.delete()` followed by
+            // `tempFile.renameTo(destFile)`, which leaves a window with no JAR at the path at all
+            // - and this path is taken for SYSTEM plugins, whose absence is not a missing feature
+            // but a missing part of the app. A crash or a failed rename in that window leaves the
+            // plugin with nothing, and nothing to fall back to, since the verified replacement is
+            // still sitting under a name the host's directory scan ignores.
+            //
+            // ATOMIC_MOVE with REPLACE_EXISTING is the same operation both halves needed, and it
+            // cannot half-happen. `renameTo` returning false was also silently ignored, so a
+            // failed swap reported success while leaving the OLD version on disk and the new one
+            // orphaned as a `.update` file.
+            if (!promoteJar(tempFile, destFile)) {
+                tempFile.delete()
+                return InstallResult.DownloadFailed(
+                    "Downloaded v${downloadInfo.version} but could not put it in place."
+                )
+            }
 
             // Write the new sidecar (no-op clear if this version is unsigned).
             persistSignatureSidecar(destFile, downloadInfo.signature)
@@ -1429,8 +1443,13 @@ class PluginManagerAPIImpl(
             // no sidecar degrades to warn, not a tampered rejection). GitHub
             // installs carry no store signature, so it stays cleared.
             deleteSignatureSidecar(destFile)
-            destFile.delete()
-            tempFile.renameTo(destFile)
+            // One operation, for the same reason as the store path above: this is the fallback
+            // when the store is unreachable, so it runs precisely when a half-completed swap is
+            // hardest to recover from.
+            if (!promoteJar(tempFile, destFile)) {
+                tempFile.delete()
+                return InstallResult.DownloadFailed("Downloaded the JAR but could not put it in place.")
+            }
 
             return InstallResult.Success(PluginInfo(
                 pluginId = "",
