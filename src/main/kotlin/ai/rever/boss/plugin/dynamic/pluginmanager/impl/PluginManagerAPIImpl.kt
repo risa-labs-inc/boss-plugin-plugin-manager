@@ -4,6 +4,8 @@ import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadKind
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadProgressTracker
+import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
+import ai.rever.boss.plugin.dynamic.pluginmanager.updateSourceFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
@@ -148,6 +150,24 @@ class PluginManagerAPIImpl(
     }
 
     /**
+     * `LoadedPluginInfo.sourceUrl` arrived in boss-plugin-api 1.0.84, and the host serves that type
+     * parent-first from its own api layer - so on an older host the getter is not there at all and
+     * reading it is a NoSuchMethodError, not a blank. Caught rather than gated behind a
+     * `minApiVersion` bump so this plugin keeps loading on those hosts: the update fix below is the
+     * point of this change and it must not wait on a host release to reach anyone.
+     *
+     * "" is the honest answer for such a host, and [updateSourceFor] reads it as "ask the store" -
+     * which is where all but one of a normal installation's plugins came from, and is exactly the
+     * behaviour that was missing.
+     */
+    private fun LoadedPluginInfo.sourceUrlOrEmpty(): String =
+        try {
+            sourceUrl
+        } catch (_: LinkageError) {
+            ""
+        }
+
+    /**
      * Convert LoadedPluginInfo from plugin-api to our local PluginInfo.
      */
     private fun LoadedPluginInfo.toPluginInfo(): PluginInfo {
@@ -158,6 +178,7 @@ class PluginManagerAPIImpl(
             description = description,
             author = author,
             url = url,
+            sourceUrl = sourceUrlOrEmpty(),
             type = type,
             apiVersion = apiVersion,
             minBossVersion = minBossVersion,
@@ -1082,6 +1103,12 @@ class PluginManagerAPIImpl(
             // Download JAR
             pluginsDir.mkdirs()
             val destFile = File(pluginsDir, jarFileName)
+            // Staged, for the reason the store path stages: this serves updates too, a release
+            // asset name can resolve to the very JAR the plugin is running from, and
+            // `outputStream()` truncates on open - so writing directly would destroy a working
+            // install the moment the connection opened. `.part` rather than `.jar` keeps a
+            // half-written file out of every scan that looks for plugins.
+            val partFile = File(pluginsDir, "$jarFileName.part")
 
             val downloadConnection = URL(jarUrl).openConnection() as HttpURLConnection
             downloadConnection.instanceFollowRedirects = true
@@ -1093,23 +1120,56 @@ class PluginManagerAPIImpl(
                 return InstallResult.DownloadFailed("Download failed: HTTP ${downloadConnection.responseCode}")
             }
 
-            downloadWithProgress(downloadConnection, destFile, progressKey)
+            downloadWithProgress(downloadConnection, partFile, progressKey)
+
+            // Read the id out of the downloaded bytes. This path is reached by "install from a
+            // GitHub URL" as well as by update, so the caller does not always know it, and it is
+            // needed BEFORE the load now that the unload below is checked.
+            val incomingPluginId = readPluginIdFromJar(partFile)
+            val previousJarPath = incomingPluginId?.let { getInstalledPlugin(it)?.jarPath }
+
+            // Nothing above this line touched the installed copy. Everything below does, so a
+            // refused unload is reported rather than discarded: `unloadIfAlreadyLoaded` throws
+            // away the delegate's Boolean, which would leave the old plugin loaded and then load
+            // a second copy on top of it.
+            if (incomingPluginId != null) {
+                unloadForReplacement(incomingPluginId)?.let { reason ->
+                    partFile.delete()
+                    return InstallResult.LoadFailed("could not replace the installed version - $reason")
+                }
+            }
+
+            // Promote the downloaded bytes. Delete first so the rename cannot fail on a platform
+            // that refuses to overwrite; the unload above has already released any handle.
+            if (destFile.exists()) destFile.delete()
+            if (!partFile.renameTo(destFile)) {
+                partFile.delete()
+                return InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
+            }
 
             // GitHub installs carry no store signature — clear any stale
             // sidecar so load-time verification treats it as unsigned rather
             // than rejecting it against a leftover signature.
             persistSignatureSidecar(destFile, null)
 
-            // Replace any already-loaded copy so the new version loads cleanly
-            // (no manual uninstall needed).
-            unloadIfAlreadyLoaded(destFile)
-
             // Load the plugin via delegate
             val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return InstallResult.LoadFailed(
+            if (loadedInfo == null) {
+                // Same reasoning as the store path: the new JAR will not load and
+                // `cleanupOldVersionJars` never ran, so the previous version is still on disk.
+                // Two JARs declaring one pluginId means the startup scan can pick either, which
+                // is how a restart silently comes back on the old version. Drop the one that does
+                // not work - unless they are the same file, which would leave no JAR at all.
+                val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
+                if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
+                    runCatching { destFile.delete() }
+                    deleteSignatureSidecar(destFile)
+                }
+                return InstallResult.LoadFailed(
                     if (loaderDelegate == null) "No plugin loader available"
                     else "Failed to load plugin from ${destFile.name} (see app logs for details)"
                 )
+            }
 
             val pluginInfo = loadedInfo.toPluginInfo().copy(
                 jarPath = destFile.absolutePath,
@@ -1117,13 +1177,11 @@ class PluginManagerAPIImpl(
                 url = githubUrl
             )
 
-            // Remove the old version's JAR (and any stale duplicates) — the
-            // pluginId is only known after the load, and the installed list
-            // still reflects the pre-install state at this point.
+            // Remove the old version's JAR (and any stale duplicates).
             cleanupOldVersionJars(
                 pluginId = pluginInfo.pluginId,
                 newJar = destFile,
-                previousJarPath = getInstalledPlugin(pluginInfo.pluginId)?.jarPath
+                previousJarPath = previousJarPath
             )
 
             // Refresh installed plugins
@@ -1249,20 +1307,33 @@ class PluginManagerAPIImpl(
             return result
         }
 
-        // Regular plugins: uninstall then reinstall
-        val uninstallResult = uninstallPlugin(pluginId)
-        if (uninstallResult is UninstallResult.CannotUnload) {
-            return InstallResult.LoadFailed("Cannot update: ${uninstallResult.reason}")
-        }
-        if (uninstallResult is UninstallResult.Failed) {
-            return InstallResult.LoadFailed("could not replace the installed version - ${uninstallResult.error}")
-        }
-
-        // Install latest version
-        val result = if (existing.url.isNotBlank()) {
-            installFromGitHubInternal(existing.url, progressKey)
-        } else {
-            installPluginInternal(pluginId, progressKey)
+        // Regular plugins: swapped in place, with NOTHING uninstalled up front.
+        //
+        // This used to call `uninstallPlugin` first, which unloads the plugin and deletes its JAR.
+        // Both install paths below already download and verify before they touch the installed
+        // copy, so the pre-emptive uninstall bought nothing and cost everything: any failure after
+        // it - a 404 being the common one - left the plugin deleted AND unloaded. At that point it
+        // was gone from `refreshInstalledPlugins`, which reads the host's LOADED plugins, so the
+        // `getInstalledPlugin` guard in `updatePlugin` rejected every retry with "Plugin not
+        // installed" and the only route back was reinstalling from the store tab. A failed update
+        // now leaves the working version loaded and on disk.
+        // See [updateSourceFor] for why the choice is a named decision rather than an inline
+        // condition, and for what reading the manifest homepage as a download source cost.
+        //
+        // The store branch calls `downloadFromStore` rather than `installPluginInternal`: the two
+        // have the same store-then-GitHub order, but `installPluginInternal` refuses outright when
+        // the plugin is already installed, and reaching past it is what lets the uninstall above
+        // be dropped.
+        val result = when (val source = updateSourceFor(existing)) {
+            is UpdateSource.Github -> installFromGitHubInternal(source.url, progressKey)
+            is UpdateSource.Store -> {
+                val store = downloadFromStore(pluginId, null, progressKey)
+                if (store is InstallResult.Success || source.fallbackUrl == null) {
+                    store
+                } else {
+                    installFromGitHubInternal(source.fallbackUrl, progressKey)
+                }
+            }
         }
 
         // Emit update event if successful

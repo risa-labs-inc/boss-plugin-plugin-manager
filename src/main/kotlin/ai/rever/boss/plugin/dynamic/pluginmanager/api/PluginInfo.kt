@@ -13,7 +13,21 @@ data class PluginInfo(
     val version: String,
     val description: String = "",
     val author: String = "",
+    /**
+     * The plugin's homepage, from its manifest. Display metadata only.
+     *
+     * NOT where to fetch it from, however much it looks like one. Every plugin declares a homepage
+     * and it is nearly always the repo the plugin is developed in, which for our plugins is usually
+     * private - so reading this as a download source produces a GitHub API call that 404s. Use
+     * [sourceUrl] for that question.
+     */
     val url: String = "",
+    /**
+     * Where this copy was installed FROM, as recorded by the host, or "" for a store install.
+     *
+     * "" also covers a host too old to report it, which wants the same handling: ask the store.
+     */
+    val sourceUrl: String = "",
     val type: String = "panel",
     val apiVersion: String = "",
     val minBossVersion: String = "",
