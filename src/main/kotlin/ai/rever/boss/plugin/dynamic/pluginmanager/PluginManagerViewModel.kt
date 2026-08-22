@@ -5,7 +5,7 @@ import ai.rever.boss.plugin.api.CustomPluginEvent
 import ai.rever.boss.plugin.api.InaccessiblePluginInfo
 import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.SupabaseDataProvider
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrgAccess
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.canPublishAnywhereWith
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgPublishTargets
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
@@ -17,7 +17,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelHostTabInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.panelLaunchRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.resolveLaunchSurface
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.supportsOpenPanelAsTab
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.parsePublishTargets
@@ -108,10 +108,11 @@ data class PluginManagerState(
     /**
      * The signed-in user's organisation membership.
      *
-     * NULL while the lookup is in flight, or when there is no Supabase provider
-     * to ask. Null renders no call to action at all -- see [organisationCta].
-     * A Boolean defaulting to false would show "Request an organisation" to
-     * every existing member for the length of a round trip.
+     * NULL while the lookup is in flight, or when there is no Supabase provider to ask -- the
+     * two are told apart by `organisationServiceAvailable`. Null renders the section's "checking"
+     * state, never an assertion about what they belong to: see [orgRequestState]. A Boolean
+     * defaulting to false would tell every existing member they are in no organisation for the
+     * length of a round trip.
      */
     val membership: Membership? = null,
     /**
@@ -119,7 +120,7 @@ data class PluginManagerState(
      *
      * A SEPARATE read from membership: submit_organisation_request writes to
      * organisation_requests and creates no membership row, so refreshing membership alone could
-     * never move the call to action off CREATE.
+     * never move the request control off "Request an organisation".
      */
     val hasPendingOrgRequest: Boolean = false,
     /** True while the "request an organisation" dialog is open. */
@@ -243,12 +244,24 @@ class PluginManagerViewModel(
     /** Opens a tab in the main area, for the tab-type branch of [openPlugin]. */
     private val splitViewOperations: SplitViewOperations? = null,
     /**
-     * Read-only Supabase access, for the one question the Toolbox asks about
-     * organisations: does this user belong to any. Null when Supabase is
-     * unavailable, which leaves the call to action hidden rather than wrong.
+     * Read-only Supabase access, for the two questions the Toolbox asks about organisations: does
+     * this user belong to any, and do they have a request in the queue. Null when Supabase is
+     * unavailable, which is reported as [organisationServiceAvailable] rather than left to look
+     * like a read that has not come back yet.
      */
     private val supabaseDataProvider: SupabaseDataProvider? = null
 ) {
+    /**
+     * Whether organisation reads and the request submission can happen at all in this host.
+     *
+     * Constant for the life of the ViewModel, so it is a plain val rather than a state field: a
+     * default in the state class would be a lie for one frame in whichever direction it defaulted.
+     * Without it, "no provider" and "the read has not answered yet" are the same nullable
+     * membership, and the second resolves while the first never does - so the section would say
+     * "Checking your organisations..." forever.
+     */
+    val organisationServiceAvailable: Boolean = supabaseDataProvider != null
+
     // Child scope of the plugin scope: cancelled in dispose() so collectors of a
     // closed panel don't leak, while plugin unload still cancels everything.
     private val scope = CoroutineScope(
@@ -284,7 +297,12 @@ class PluginManagerViewModel(
                         isIncompatible = plugin.isIncompatible
                     )
                 }
-                _state.value = _state.value.copy(installedPlugins = installedStates)
+                // update, NOT `_state.value = _state.value.copy(...)`: this races
+                // refreshOrganisationMembership, and a plain read-modify-write here reset
+                // `membership` to null from a stale snapshot - which took the whole organisation
+                // section, and formerly the Create tab itself, off screen until the next refresh
+                // happened to interleave the other way.
+                _state.update { it.copy(installedPlugins = installedStates) }
                 recomputeOpenablePlugins(installedStates)
             }
         }
@@ -750,7 +768,9 @@ class PluginManagerViewModel(
             }
         }.getOrDefault(emptySet())
         if (openable != _state.value.openablePlugins) {
-            _state.value = _state.value.copy(openablePlugins = openable)
+            // update for the same reason as the installed-plugins write above: registry changes
+            // land concurrently with the membership read.
+            _state.update { it.copy(openablePlugins = openable) }
         }
     }
 
@@ -759,12 +779,12 @@ class PluginManagerViewModel(
         _state.value.installedPlugins.find { it.pluginId == pluginId }?.displayName ?: pluginId
 
     /**
-     * Load whether the user belongs to any organisation.
+     * Load whether the user belongs to any organisation, and whether they have a request pending.
      *
-     * Best effort and deliberately quiet: any failure leaves `hasOrganisation`
-     * null, which hides the call to action. Showing "Request an organisation"
-     * because a read failed would push somebody toward creating a duplicate of
-     * one they are already in.
+     * Best effort and deliberately quiet: any failure leaves `membership` null, which shows the
+     * section in its "checking" state rather than asserting anything. Claiming "you are not a
+     * member of any organisation" because a read failed would be a sentence the reader can see is
+     * wrong.
      */
     fun refreshOrganisationMembership() {
         val supabase = supabaseDataProvider ?: return
@@ -780,39 +800,38 @@ class PluginManagerViewModel(
             // the membership shown beside it, since both are read from one answer.
             val targets = parsePublishTargets(raw)
 
-            // Only asked when it can change the answer. A member already gets
-            // INSTALL_PLUGIN or OPEN, so the extra round trip would buy nothing.
-            val pending =
-                if (membership == Membership.NONE) {
-                    val requests =
-                        runCatching {
-                            supabase.rpc(
-                                "list_organisation_requests",
-                                """{"p_status":"pending"}""",
-                            ).getOrNull()
-                        }.getOrNull()
-                    parsePendingRequest(requests)
-                } else {
-                    // A member has no CREATE branch to reach, so the queue read is skipped -
-                    // null, not false, because we did not ask.
-                    null
-                }
+            // Asked UNCONDITIONALLY. It used to be skipped for a member, on the grounds that a
+            // member could not reach the request branch anyway - and once they can, skipping it
+            // means a member who has already submitted a request is offered the button again and
+            // gets "already in use" for their trouble.
+            val requests =
+                runCatching {
+                    supabase.rpc(
+                        "list_organisation_requests",
+                        """{"p_status":"pending"}""",
+                    ).getOrNull()
+                }.getOrNull()
+            val pending = parsePendingRequest(requests)
 
-            _state.value =
-                _state.value.copy(
+            // update, and the CAS retry is the point: everything the panel-open path writes
+            // lands concurrently with this, and a plain read-modify-write in either direction
+            // discards whatever the other one had just published. `it` inside the block is the
+            // freshly-read snapshot on every attempt, so retainPendingRequest compares against
+            // the value that actually won.
+            _state.update {
+                it.copy(
                     membership = membership,
                     publishTargets = targets,
                     // Never downgraded by a refresh - see retainPendingRequest for why a
                     // server `false` is not evidence of absence.
-                    hasPendingOrgRequest =
-                        retainPendingRequest(_state.value.hasPendingOrgRequest, pending),
+                    hasPendingOrgRequest = retainPendingRequest(it.hasPendingOrgRequest, pending),
                 )
+            }
         }
     }
 
     fun dismissOrganisationRequest() {
-        _state.value =
-            _state.value.copy(organisationRequestOpen = false, organisationRequestError = null)
+        _state.update { it.copy(organisationRequestOpen = false, organisationRequestError = null) }
     }
 
     /**
@@ -833,7 +852,7 @@ class PluginManagerViewModel(
         website: String,
     ) {
         val supabase = supabaseDataProvider ?: return
-        _state.value = _state.value.copy(organisationRequestBusy = true, organisationRequestError = null)
+        _state.update { it.copy(organisationRequestBusy = true, organisationRequestError = null) }
 
         scope.launch {
             // Wrapped, because everything that clears `busy` lives on the success and failure
@@ -856,39 +875,42 @@ class PluginManagerViewModel(
                 val error = submitRequestError(raw)
 
                 if (error != null) {
-                    _state.value =
-                        _state.value.copy(
+                    _state.update {
+                        it.copy(
                             organisationRequestBusy = false,
                             organisationRequestError = error,
                         )
+                    }
                     return@launch
                 }
 
-                _state.value =
-                    _state.value.copy(
+                _state.update {
+                    it.copy(
                         organisationRequestBusy = false,
                         organisationRequestOpen = false,
                         organisationRequestError = null,
-                        // Optimistic, and it closes a real window: without it the CTA stays
-                        // CREATE and enabled for the length of the refresh below, so the user
+                        // Optimistic, and it closes a real window: without it the request stays
+                        // AVAILABLE and enabled for the length of the refresh below, so the user
                         // can reopen the dialog and submit again - and the second attempt
                         // returns the "already exists" refusal this state exists to prevent.
                         hasPendingOrgRequest = true,
                     )
-                // The request is pending, not approved. Refreshing is what turns the call to
-                // action into "Request pending review"; without it the button is byte-for-byte
-                // unchanged after a submission and the natural response is to submit again.
+                }
+                // The request is pending, not approved. Refreshing is what turns the control into
+                // "Request pending review"; without it the button is byte-for-byte unchanged
+                // after a submission and the natural response is to submit again.
                 refreshOrganisationMembership()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Must propagate, or a cancelled scope leaks this coroutine.
-                _state.value = _state.value.copy(organisationRequestBusy = false)
+                _state.update { it.copy(organisationRequestBusy = false) }
                 throw e
             } catch (_: Throwable) {
-                _state.value =
-                    _state.value.copy(
+                _state.update {
+                    it.copy(
                         organisationRequestBusy = false,
                         organisationRequestError = "Could not send the request. Please try again.",
                     )
+                }
             }
         }
     }
@@ -898,32 +920,36 @@ class PluginManagerViewModel(
         _state.value.installedPlugins.any { it.pluginId == OrganisationPlugin.PLUGIN_ID }
 
     /**
-     * The Toolbox call to action: request one, install the plugin, or open it.
+     * Open the request-an-organisation form.
      *
-     * Mirrors openToolCreator, including the install branch -- there is no point
-     * opening a panel that does not exist yet.
+     * In-app, NOT a web page. `submit_organisation_request` is authenticated-only, and the
+     * handoff-token mechanism that authenticates the other organisation web pages is org-scoped -
+     * a user with no organisation has nothing to hand off for, so a web form could not
+     * authenticate at all.
+     *
+     * Gated on nothing but the provider. The button that calls this is already disabled in every
+     * state that has nothing to do ([orgRequestEnabled]), and re-deriving that here would be a
+     * second copy of the rule for a control the user cannot press.
      */
-    fun onOrganisationCta() {
-        when (organisationCta(
-                _state.value.membership,
-                isOrganisationPluginInstalled(),
-                _state.value.hasPendingOrgRequest,
-            )) {
-            OrganisationCta.CREATE ->
-                // In-app, NOT a web page. submit_organisation_request is
-                // authenticated-only, and the handoff-token mechanism that
-                // authenticates the other web pages is org-scoped - a user with
-                // no organisation has nothing to hand off for, so a web form
-                // could not authenticate at all.
-                _state.value = _state.value.copy(
-                    organisationRequestOpen = true,
-                    organisationRequestError = null,
-                )
+    fun onRequestOrganisation() {
+        if (!organisationServiceAvailable) return
+        _state.update {
+            it.copy(organisationRequestOpen = true, organisationRequestError = null)
+        }
+    }
 
-            OrganisationCta.INSTALL_PLUGIN ->
+    /**
+     * Take the member route into the Organisation plugin: install it, or open its panel.
+     *
+     * Mirrors openToolCreator, including the install branch -- there is no point opening a panel
+     * that does not exist yet.
+     */
+    fun onOrganisationAccess() {
+        when (orgAccessRoute(_state.value.membership, isOrganisationPluginInstalled())) {
+            OrgAccess.INSTALL_PLUGIN ->
                 installFromRemote(OrganisationPlugin.PLUGIN_ID)
 
-            OrganisationCta.OPEN -> {
+            OrgAccess.OPEN -> {
                 val wid = windowId
                 // openPanel is suspend, so it needs a scope -- same shape as
                 // openToolCreator.
@@ -946,8 +972,8 @@ class PluginManagerViewModel(
                 }
             }
 
-            // A pending request has nothing to act on; the button is disabled anyway.
-            OrganisationCta.REQUEST_PENDING, null -> Unit
+            // Not a member, or not known yet: no access button was rendered to reach this.
+            null -> Unit
         }
     }
 

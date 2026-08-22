@@ -29,14 +29,17 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCta
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaDescription
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaLabel
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationCta
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessRoute
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessDescription
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestState
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestDescription
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrgAccess
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrgRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaEnabled
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestEnabled
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.defaultPublishTarget
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationCtaNeedsCreateTab
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationDomainError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationNameError
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.organisationSlugError
@@ -111,18 +114,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * The organisation call to action.
+ * The organisation section of the Create tab.
  *
- * On the CREATE tab: creating an organisation belongs beside the other "make something new"
- * actions, not in the list of what is already installed.
+ * On the Create tab: creating an organisation belongs beside the other "make something new"
+ * actions, not in the list of what is already installed. For a user who cannot publish this is the
+ * ONLY thing the tab contains - see [PublishTab]'s early return.
  *
- * The Create tab is normally gated on `canPublish` (store admin or plugins.create), while the
- * CREATE branch here targets users who belong to no organisation - by definition the least likely
- * to hold plugins.create. So the tab is ALSO revealed for the two branches that have nowhere else
- * to live ([organisationCtaNeedsCreateTab]); without that, the people who most need the request
- * form are exactly the ones who cannot reach it.
- *
- * Renders nothing while membership is unknown: see organisationCta.
+ * Renders in every state, including "we do not know yet". The section being absent is what made
+ * the Create tab unreachable for a non-publisher: the tab was revealed only when this had
+ * something to say, so a slow or failed membership read removed the tab itself.
  */
 // Every dialog in this file uses BossDialog, not Dialog. Under JxBrowser HARDWARE_ACCELERATED - the
 // host default on every platform since BossConsole 9.4.1 - Chromium composites its own native window
@@ -133,28 +133,58 @@ import androidx.compose.ui.unit.sp
 // off-screen.
 
 @Composable
-private fun OrganisationCtaCard(
-    cta: OrganisationCta?,
-    onAction: () -> Unit
+private fun OrganisationSection(
+    /** The member route, or null when they belong to none / it is not known yet. */
+    access: OrgAccess?,
+    /** Whether the request form is on offer, and why not when it is not. */
+    request: OrgRequest,
+    onAccess: () -> Unit,
+    onRequest: () -> Unit
 ) {
-    if (cta == null) return
-
     BossSection(
         title = "Organisation",
         description = "Organisations own plugins, roles and shared secrets"
     ) {
+        // The member route first when there is one: opening the organisation you are already in is
+        // the far more common intent, and requesting another is the afterthought below it.
+        if (access != null) {
+            Text(
+                text = orgAccessDescription(access),
+                fontSize = 13.sp,
+                color = BossThemeColors.TextSecondary,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+            BossPrimaryButton(
+                text = orgAccessLabel(access),
+                onClick = onAccess,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(16.dp))
+        }
+
         Text(
-            text = organisationCtaDescription(cta),
+            text = orgRequestDescription(request, isMember = access != null),
             fontSize = 13.sp,
             color = BossThemeColors.TextSecondary,
             modifier = Modifier.padding(bottom = 12.dp)
         )
-        BossPrimaryButton(
-            text = organisationCtaLabel(cta),
-            onClick = onAction,
-            enabled = organisationCtaEnabled(cta),
-            modifier = Modifier.fillMaxWidth()
-        )
+        // Secondary once there is already a primary above it, so a member is not offered two
+        // equally-weighted buttons for two quite different acts.
+        if (access != null) {
+            BossSecondaryButton(
+                text = orgRequestLabel(request),
+                onClick = onRequest,
+                enabled = orgRequestEnabled(request),
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            BossPrimaryButton(
+                text = orgRequestLabel(request),
+                onClick = onRequest,
+                enabled = orgRequestEnabled(request),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
     Spacer(Modifier.height(16.dp))
 }
@@ -1320,22 +1350,14 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
     }
     // Read from the COLLECTED state, not viewModel._state: everything else here observes
     // `state`, and reading the flow's value directly from composition only recomposes
-    // correctly by accident.
-    val organisationCta = organisationCta(
+    // correctly by accident. `organisationServiceAvailable` is the one exception and is safe -
+    // it is a constant val on the ViewModel, not state, so there is nothing to recompose on.
+    val orgAccess = orgAccessRoute(state.membership, organisationPluginInstalled)
+    val orgRequest = orgRequestState(
         state.membership,
-        organisationPluginInstalled,
-        state.hasPendingOrgRequest
+        state.hasPendingOrgRequest,
+        viewModel.organisationServiceAvailable,
     )
-    val createTabVisible = state.canPublish || organisationCtaNeedsCreateTab(organisationCta)
-
-    // The tab BUTTON is derived state; currentTab is not. A non-publisher sitting on the Create
-    // tab they reached only for the call to action would otherwise be stranded there the moment
-    // an approval lands and the branch moves to OPEN - button gone, header showing no selection.
-    LaunchedEffect(createTabVisible) {
-        if (!createTabVisible && state.currentTab == PluginManagerTab.PUBLISH) {
-            viewModel.selectTab(PluginManagerTab.INSTALLED)
-        }
-    }
 
     BossTheme {
         Column(
@@ -1372,9 +1394,6 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 onTabSelected = { viewModel.selectTab(it) },
                 onRefresh = { viewModel.refresh() },
                 isLoading = state.isLoading,
-                // The Create tab also hosts the organisation call to action, so it is revealed
-                // for the branches a non-publisher could otherwise never reach.
-                canPublish = createTabVisible,
                 realtimeConnected = state.realtimeConnected
             )
 
@@ -1480,8 +1499,10 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         canPublish = state.canPublish,
                         canPublishGlobally = state.canPublishGlobally,
                         publishTargets = state.offeredPublishTargets,
-                        organisationCta = organisationCta,
-                        onOrganisationAction = { viewModel.onOrganisationCta() },
+                        orgAccess = orgAccess,
+                        orgRequest = orgRequest,
+                        onOrganisationAccess = { viewModel.onOrganisationAccess() },
+                        onOrganisationRequest = { viewModel.onRequestOrganisation() },
                         toolCreatorInstalled = state.installedPlugins.any {
                             it.pluginId == PluginManagerViewModel.TOOL_CREATOR_PLUGIN_ID
                         },
@@ -1591,7 +1612,6 @@ private fun PluginManagerHeader(
     onTabSelected: (PluginManagerTab) -> Unit,
     onRefresh: () -> Unit,
     isLoading: Boolean,
-    canPublish: Boolean,
     realtimeConnected: Boolean = false,
     /** Organisations present in the catalogue. Fewer than two renders no control. */
     orgSlugs: List<String> = emptyList(),
@@ -1633,15 +1653,16 @@ private fun PluginManagerHeader(
             selected = currentTab == PluginManagerTab.MCP,
             onClick = { onTabSelected(PluginManagerTab.MCP) }
         )
-        // Show Create tab to store admins and users with plugins.create.
-        // Hosts creating (Tool Creator) + publishing to the store.
-        if (canPublish) {
-            TabButton(
-                text = "Create",
-                selected = currentTab == PluginManagerTab.PUBLISH,
-                onClick = { onTabSelected(PluginManagerTab.PUBLISH) }
-            )
-        }
+        // UNCONDITIONAL. It used to be gated on `canPublish`, which hid the only surface that can
+        // request an organisation from everybody who is not a publisher - and the fallback that
+        // was supposed to cover them only fired for a user who belonged to no organisation at all.
+        // The tab always has something in it: publishers get the publish form, everybody else gets
+        // the organisation section.
+        TabButton(
+            text = "Create",
+            selected = currentTab == PluginManagerTab.PUBLISH,
+            onClick = { onTabSelected(PluginManagerTab.PUBLISH) }
+        )
 
         Spacer(Modifier.width(8.dp))
 
@@ -3084,9 +3105,9 @@ private enum class JarSource {
 @Composable
 private fun PublishTab(
     /**
-     * False for a user who reached this tab only for the organisation call to action - the
-     * tab is revealed for them (see [organisationCtaNeedsCreateTab]), the publishing surfaces
-     * are not.
+     * False for a user who cannot publish anywhere. The TAB is theirs regardless - it is the only
+     * place an organisation can be requested from - but the publishing surfaces are not, so for
+     * them this tab is the organisation section and nothing else.
      */
     canPublish: Boolean,
     /**
@@ -3108,8 +3129,10 @@ private fun PublishTab(
      * with no target cannot publish at all, and never gets this far.
      */
     publishTargets: List<PublishTarget>,
-    organisationCta: OrganisationCta?,
-    onOrganisationAction: () -> Unit,
+    orgAccess: OrgAccess?,
+    orgRequest: OrgRequest,
+    onOrganisationAccess: () -> Unit,
+    onOrganisationRequest: () -> Unit,
     toolCreatorInstalled: Boolean,
     onOpenToolCreator: () -> Unit,
     onFetchFromGitHub: (
@@ -3142,8 +3165,9 @@ private fun PublishTab(
     ) -> Unit,
     isLoading: Boolean
 ) {
-    // Nothing to publish with, so the tab is nothing but the organisation card. Returning
-    // early keeps the publishing state below out of composition entirely.
+    // Nothing to publish with, so the tab is the organisation section and nothing else - no
+    // publish form, and no Tool Creator either, since scaffolding a plugin they cannot publish
+    // leads nowhere. Returning early keeps the publishing state below out of composition entirely.
     if (!canPublish) {
         Column(
             modifier = Modifier
@@ -3151,7 +3175,12 @@ private fun PublishTab(
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            OrganisationCtaCard(cta = organisationCta, onAction = onOrganisationAction)
+            OrganisationSection(
+                access = orgAccess,
+                request = orgRequest,
+                onAccess = onOrganisationAccess,
+                onRequest = onOrganisationRequest
+            )
         }
         return
     }
@@ -3208,7 +3237,12 @@ private fun PublishTab(
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
-        OrganisationCtaCard(cta = organisationCta, onAction = onOrganisationAction)
+        OrganisationSection(
+            access = orgAccess,
+            request = orgRequest,
+            onAccess = onOrganisationAccess,
+            onRequest = onOrganisationRequest
+        )
 
         BossSection(
             title = "Create a new plugin",

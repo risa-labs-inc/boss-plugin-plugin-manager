@@ -3,130 +3,180 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The Toolbox organisation call to action.
+ * The Toolbox organisation section: the member route, and whether requesting is on offer.
  *
- * Tested here rather than through the view because the decision is the part
- * that can be wrong in a way nobody notices: every outcome renders a
- * plausible-looking button, so a mistake shows up as the wrong offer rather
- * than as a broken panel.
+ * Tested here rather than through the view because the decision is the part that can be wrong in a
+ * way nobody notices: every outcome renders a plausible-looking button, so a mistake shows up as
+ * the wrong offer rather than as a broken panel.
+ *
+ * TWO axes, deliberately. They were one four-outcome enum, and collapsing them is what made the
+ * request form unreachable for anybody who already belonged to an organisation - see
+ * `a member can still request another organisation`, which is the regression these tests exist for.
  */
 class OrganisationGateTest {
     @Test
-    fun `an unknown membership renders nothing at all`() {
-        // The case that matters. Treating "not asked yet" as "has none" would
-        // show "Request an organisation" to every existing member for the
-        // length of a round trip, every time the panel opens.
-        assertNull(organisationCta(membership = null, pluginInstalled = false))
-        assertNull(organisationCta(membership = null, pluginInstalled = true))
+    fun `an unknown membership offers no member route`() {
+        // Treating "not asked yet" as "has none" would be an assertion we cannot back. It renders
+        // no access button either way - the difference is expressed by orgRequestState.
+        assertNull(orgAccessRoute(membership = null, pluginInstalled = false))
+        assertNull(orgAccessRoute(membership = null, pluginInstalled = true))
     }
 
     @Test
-    fun `no organisation offers to request one`() {
-        assertEquals(
-            OrganisationCta.CREATE,
-            organisationCta(Membership.NONE, pluginInstalled = false),
-        )
-    }
-
-    @Test
-    fun `no organisation still offers to request, even if the plugin is installed`() {
-        // Installing the plugin does not make you a member of anything, so the
-        // offer is unchanged.
-        assertEquals(
-            OrganisationCta.CREATE,
-            organisationCta(Membership.NONE, pluginInstalled = true),
-        )
+    fun `belonging to nothing offers no member route, plugin or not`() {
+        // Installing the plugin does not make you a member of anything.
+        assertNull(orgAccessRoute(Membership.NONE, pluginInstalled = false))
+        assertNull(orgAccessRoute(Membership.NONE, pluginInstalled = true))
     }
 
     @Test
     fun `a member without the plugin is offered the install`() {
         assertEquals(
-            OrganisationCta.INSTALL_PLUGIN,
-            organisationCta(Membership.ACTIVE, pluginInstalled = false),
+            OrgAccess.INSTALL_PLUGIN,
+            orgAccessRoute(Membership.ACTIVE, pluginInstalled = false),
         )
     }
 
     @Test
     fun `a member with the plugin is offered the panel`() {
         assertEquals(
-            OrganisationCta.OPEN,
-            organisationCta(Membership.ACTIVE, pluginInstalled = true),
+            OrgAccess.OPEN,
+            orgAccessRoute(Membership.ACTIVE, pluginInstalled = true),
         )
     }
 
     @Test
-    fun `a pending creation request offers no action`() {
+    fun `belonging to nothing offers the request`() {
         assertEquals(
-            OrganisationCta.REQUEST_PENDING,
-            organisationCta(Membership.NONE, pluginInstalled = false, hasPendingRequest = true),
+            OrgRequest.AVAILABLE,
+            orgRequestState(
+                Membership.NONE,
+                hasPendingRequest = false,
+                providerAvailable = true,
+            ),
         )
-        // Membership wins: someone since added to an organisation should be pointed at it,
-        // not at a request that is now moot.
-        assertEquals(
-            OrganisationCta.OPEN,
-            organisationCta(Membership.ACTIVE, pluginInstalled = true, hasPendingRequest = true),
-        )
-        // Rendered, but not clickable: there is nothing to do but wait, and a live button would
-        // submit a duplicate that returns "a pending request already exists" and reads as a
-        // failure.
-        assertEquals(false, organisationCtaEnabled(OrganisationCta.REQUEST_PENDING))
-        assertEquals(true, organisationCtaEnabled(OrganisationCta.CREATE))
     }
 
     @Test
-    fun `every outcome has a label and a description`() {
+    fun `a member can still request another organisation`() {
+        // THE REGRESSION. ACTIVE membership used to collapse to OPEN / INSTALL_PLUGIN, which meant
+        // the request form did not exist for a member - and since the Create tab was revealed only
+        // for the request branches, a member got no Create tab at all. Every user is seeded into
+        // an organisation of some size, so that was nearly everybody.
+        assertEquals(
+            OrgRequest.AVAILABLE,
+            orgRequestState(
+                Membership.ACTIVE,
+                hasPendingRequest = false,
+                providerAvailable = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `a pending request suppresses the offer in every membership state`() {
+        // Including ACTIVE. A member who has already asked must not be handed the button again:
+        // resubmitting returns "a pending request already exists", which reads as a failure.
+        listOf(null, Membership.NONE, Membership.ACTIVE).forEach { m ->
+            assertEquals(
+                OrgRequest.PENDING,
+                orgRequestState(m, hasPendingRequest = true, providerAvailable = true),
+                "membership=$m",
+            )
+        }
+        // Rendered, but not clickable: there is nothing to do but wait.
+        assertFalse(orgRequestEnabled(OrgRequest.PENDING))
+        assertTrue(orgRequestEnabled(OrgRequest.AVAILABLE))
+    }
+
+    @Test
+    fun `an unresolved membership is UNKNOWN, not an offer`() {
+        // Distinct from AVAILABLE on purpose: the button is disabled and the label is neutral, so
+        // a member is never flashed "Request an organisation" as if we had established they are in
+        // none. Distinct from UNAVAILABLE too - this one resolves on the next refresh.
+        assertEquals(
+            OrgRequest.UNKNOWN,
+            orgRequestState(null, hasPendingRequest = false, providerAvailable = true),
+        )
+        assertFalse(orgRequestEnabled(OrgRequest.UNKNOWN))
+    }
+
+    @Test
+    fun `no provider is UNAVAILABLE, whatever else is known`() {
+        // The state that used to be indistinguishable from UNKNOWN, and the reason it needed its
+        // own name: waiting never helps, so "Checking your organisations..." would sit there
+        // forever. It outranks a pending request too - nothing can be submitted from here either
+        // way, and there is no point implying a queue we cannot read.
+        listOf(null, Membership.NONE, Membership.ACTIVE).forEach { m ->
+            listOf(false, true).forEach { pending ->
+                assertEquals(
+                    OrgRequest.UNAVAILABLE,
+                    orgRequestState(m, hasPendingRequest = pending, providerAvailable = false),
+                    "membership=$m pending=$pending",
+                )
+            }
+        }
+        assertFalse(orgRequestEnabled(OrgRequest.UNAVAILABLE))
+    }
+
+    @Test
+    fun `only AVAILABLE is clickable`() {
+        // entries-driven so a new OrgRequest member has to be classified here rather than
+        // silently inheriting "clickable" and offering an action that cannot work.
+        assertEquals(
+            setOf(OrgRequest.AVAILABLE),
+            OrgRequest.entries.filter { orgRequestEnabled(it) }.toSet(),
+        )
+    }
+
+    @Test
+    fun `every outcome on both axes has a label and a description`() {
         // A missing branch here would render an empty button.
-        OrganisationCta.entries.forEach { cta ->
-            assertTrue(organisationCtaLabel(cta).isNotBlank(), "$cta has no label")
-            assertTrue(organisationCtaDescription(cta).isNotBlank(), "$cta has no description")
+        OrgAccess.entries.forEach { access ->
+            assertTrue(orgAccessLabel(access).isNotBlank(), "$access has no label")
+            assertTrue(orgAccessDescription(access).isNotBlank(), "$access has no description")
+        }
+        OrgRequest.entries.forEach { state ->
+            assertTrue(orgRequestLabel(state).isNotBlank(), "$state has no label")
+            // Both variants: the member wording and the non-member wording.
+            assertTrue(
+                orgRequestDescription(state, isMember = false).isNotBlank(),
+                "$state has no description for a non-member",
+            )
+            assertTrue(
+                orgRequestDescription(state, isMember = true).isNotBlank(),
+                "$state has no description for a member",
+            )
         }
     }
 
     @Test
     fun `labels name the action, and are distinct from each other`() {
-        val labels = OrganisationCta.entries.map { organisationCtaLabel(it) }
+        val labels = OrgAccess.entries.map { orgAccessLabel(it) } +
+            OrgRequest.entries.map { orgRequestLabel(it) }
         assertEquals(labels.size, labels.toSet().size, "two outcomes share a label: $labels")
         // Each says what will happen rather than naming the noun.
-        assertTrue(organisationCtaLabel(OrganisationCta.CREATE).startsWith("Request"))
-        assertTrue(organisationCtaLabel(OrganisationCta.INSTALL_PLUGIN).startsWith("Install"))
-        assertTrue(organisationCtaLabel(OrganisationCta.OPEN).startsWith("Open"))
+        assertTrue(orgRequestLabel(OrgRequest.AVAILABLE).startsWith("Request"))
+        assertTrue(orgAccessLabel(OrgAccess.INSTALL_PLUGIN).startsWith("Install"))
+        assertTrue(orgAccessLabel(OrgAccess.OPEN).startsWith("Open"))
     }
 
     @Test
-    fun `only the branches with nowhere else to live reveal the Create tab`() {
-        // These two are the whole reason the gate exists: the Create tab is otherwise behind
-        // canPublish, and the user with no organisation is the least likely to hold
-        // plugins.create - so without this the request form is unreachable by the people it
-        // is for.
-        assertTrue(organisationCtaNeedsCreateTab(OrganisationCta.CREATE))
-        assertTrue(organisationCtaNeedsCreateTab(OrganisationCta.REQUEST_PENDING))
-
-        // A member reaches the Organisation plugin through the store and its own sidebar
-        // panel. Revealing an otherwise-empty Create tab for them would show it to nearly
-        // everybody and buy nothing.
-        assertFalse(organisationCtaNeedsCreateTab(OrganisationCta.INSTALL_PLUGIN))
-        assertFalse(organisationCtaNeedsCreateTab(OrganisationCta.OPEN))
-    }
-
-    @Test
-    fun `no call to action reveals no tab`() {
-        // Membership unknown renders nothing, so there is nothing to reveal a tab for.
-        assertFalse(organisationCtaNeedsCreateTab(null))
-    }
-
-    @Test
-    fun `every outcome is classified deliberately`() {
-        // entries-driven, like the label and description tests: a new OrganisationCta member
-        // must be considered here rather than silently defaulting to hidden - which is the
-        // failure this function's own KDoc worries about.
-        assertEquals(
-            setOf(OrganisationCta.CREATE, OrganisationCta.REQUEST_PENDING),
-            OrganisationCta.entries.filter { organisationCtaNeedsCreateTab(it) }.toSet(),
+    fun `the member and non-member wordings differ where they must`() {
+        // "You are not a member of any organisation" is plainly false for the member who can now
+        // also request one, and a sentence the reader can see is wrong costs more than the branch.
+        assertNotEquals(
+            orgRequestDescription(OrgRequest.AVAILABLE, isMember = false),
+            orgRequestDescription(OrgRequest.AVAILABLE, isMember = true),
+        )
+        assertFalse(
+            orgRequestDescription(OrgRequest.AVAILABLE, isMember = true).contains("not a member"),
         )
     }
 
@@ -140,15 +190,27 @@ class OrganisationGateTest {
     }
 
     @Test
-    fun `the decision is total over its inputs`() {
-        // Three states for membership, two for the plugin: no combination may
-        // throw, and only the null-membership pair may be absent.
+    fun `both decisions are total over their inputs`() {
+        // Three states for membership, two for the plugin, two for pending, two for the provider:
+        // no combination may throw, only ACTIVE may yield a member route, and the request state is
+        // never absent - a section that renders nothing is the failure this change is about.
         val memberships = listOf(null, Membership.NONE, Membership.ACTIVE)
-        val installed = listOf(false, true)
         for (m in memberships) {
-            for (i in installed) {
-                val result = organisationCta(m, i)
-                if (m == null) assertNull(result) else assertNotNull(result, "m=$m i=$i")
+            for (installed in listOf(false, true)) {
+                val access = orgAccessRoute(m, installed)
+                if (m == Membership.ACTIVE) {
+                    assertNotNull(access, "m=$m installed=$installed")
+                } else {
+                    assertNull(access, "m=$m installed=$installed")
+                }
+            }
+            for (pending in listOf(false, true)) {
+                for (provider in listOf(false, true)) {
+                    assertNotNull(
+                        orgRequestState(m, pending, provider),
+                        "m=$m pending=$pending provider=$provider",
+                    )
+                }
             }
         }
     }
@@ -157,8 +219,8 @@ class OrganisationGateTest {
 /**
  * Parsing the `get_my_organisations` body.
  *
- * The parse decides which of three offers the Toolbox makes, and every wrong
- * answer still renders a plausible button, so the failure modes are quiet.
+ * The parse decides which member route the Toolbox offers and how the request is worded, and
+ * every wrong answer still renders a plausible button, so the failure modes are quiet.
  */
 class ParseMembershipTest {
     /** What every real response contains: the seeded boss organisation, active. */
@@ -262,7 +324,7 @@ class ParseMembershipTest {
  *
  * Separate from membership because submit_organisation_request writes to
  * organisation_requests and creates no membership row - refreshing membership alone could never
- * move the call to action off CREATE.
+ * move the request control off "Request an organisation".
  */
 class ParsePendingRequestTest {
     @Test
