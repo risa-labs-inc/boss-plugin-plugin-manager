@@ -853,11 +853,6 @@ class PluginManagerViewModel(
                 orgs.await() to pendingQueue.await()
             }
 
-            // A newer read was started while this one was in flight, so this answer is already
-            // out of date. Dropping it entirely is right: publishing any of its three fields
-            // would be publishing a stale read.
-            if (organisationReadGeneration.get() != generation) return@launch
-
             val membership = parseMembership(raw)
             // Same response, second question. get_my_organisations already projects can_publish
             // per row, so the publish picker costs no extra round trip - and cannot disagree with
@@ -871,8 +866,18 @@ class PluginManagerViewModel(
             // freshly-read snapshot on every attempt, so retainPendingRequest compares against
             // the value that actually won.
             _state.update {
+                // The staleness check lives INSIDE the CAS. Outside it, a submission landing
+                // between the check and the write bumped the generation too late to be seen, and
+                // this older read still published - clearing the optimistic hasPendingOrgRequest
+                // and re-offering the button. Here the window is the CAS itself.
+                if (organisationReadGeneration.get() != generation) return@update it
                 it.copy(
-                    membership = membership,
+                    // Retained on an inconclusive read rather than written over. parseMembership
+                    // returns null for a transport failure the same as for a refusal, so writing
+                    // it unconditionally let one blip take a member from ACTIVE to "we don't
+                    // know" - dropping their Open Organisation button. Same "unknown is not no"
+                    // rule as retainPendingRequest.
+                    membership = membership ?: it.membership,
                     publishTargets = targets,
                     organisationReadCompleted = true,
                     // Retained only when the read was INCONCLUSIVE. A confident `false` DOES

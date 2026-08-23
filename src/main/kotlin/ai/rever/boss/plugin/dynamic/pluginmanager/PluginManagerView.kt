@@ -29,6 +29,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.StoreProvenance
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.storeProvenanceByPluginId
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginPageUrl
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PublishTarget
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.createTabVisible
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessRoute
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessLabel
@@ -1374,7 +1375,8 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
     // on membership, which was the bug: a member could reach neither the request form nor the tab
     // that carries it. It is still gated on the service existing, because a tab whose only content
     // is "Requesting is unavailable here" is an apology, not a feature.
-    val createTabVisible = state.canPublish || viewModel.organisationServiceAvailable
+    val createTabVisible =
+        createTabVisible(state.canPublish, viewModel.organisationServiceAvailable)
 
     // Kept because the gate above can retract: `canPublish` is derived from an async permission
     // read AND from publishTargets, so losing an organisation can take it from true back to false.

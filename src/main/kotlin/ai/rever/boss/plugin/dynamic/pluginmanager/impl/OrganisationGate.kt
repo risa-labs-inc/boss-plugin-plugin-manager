@@ -139,6 +139,18 @@ enum class Membership {
     NONE,
 }
 
+/**
+ * Should the Create tab be shown?
+ *
+ * A named function rather than an expression in the composable, because the PREVIOUS version of
+ * this expression was the bug and an inline one cannot be tested. It is deliberately NOT a
+ * function of membership - that gate is what made the request form unreachable for a member - and
+ * it is still a function of the service existing, because a tab whose only content is
+ * "Requesting is unavailable here" is an apology rather than a feature.
+ */
+fun createTabVisible(canPublish: Boolean, organisationServiceAvailable: Boolean): Boolean =
+    canPublish || organisationServiceAvailable
+
 /** True when the request control should be clickable. Only AVAILABLE has anything to do. */
 fun orgRequestEnabled(state: OrgRequest): Boolean = state == OrgRequest.AVAILABLE
 
@@ -227,20 +239,22 @@ object OrganisationPlugin {
  * Read this user's membership state out of a `get_my_organisations` response body.
  *
  * Returns null for anything that is not a confident answer - a transport failure, a refusal
- * envelope, malformed JSON. Null hides the call to action, which is the right failure: offering
- * "Request an organisation" because a read failed pushes somebody toward duplicating one they are
- * already in.
+ * envelope, malformed JSON. Null means UNKNOWN, never "belongs to none": the caller keeps the
+ * last known value rather than writing this over it, and what null changes is only the WORDING,
+ * never whether the request is offered. This paragraph used to argue the opposite - that a failed
+ * read must hide the offer - which was right while requesting was gated on membership and became
+ * wrong the moment the two were decoupled. See [orgRequestState].
  *
- * SYSTEM ORGANISATIONS ARE IGNORED, and this is the whole correctness of the CREATE branch.
+ * SYSTEM ORGANISATIONS ARE IGNORED, and this is the whole correctness of the not-a-member answer.
  * The seed makes every user an active member of the `boss` organisation and `handle_new_user`
  * keeps every future signup there, so `get_my_organisations` returns at least one active row for
- * literally everybody. Counting it made ACTIVE the only reachable answer and CREATE dead code in
- * production - the unit tests passed only because they fed `Membership.NONE` directly, which no
- * real response can produce.
+ * literally everybody. Counting it made ACTIVE the only reachable answer and `Membership.NONE`
+ * dead in production - the unit tests passed only because they fed it directly, which no real
+ * response can produce.
  *
  * Only an ACTIVE membership of a NON-system organisation counts. A `pending` or `invited` row is
  * about joining an existing organisation and is deliberately not membership here - see
- * [parsePendingRequest] for the state that actually drives REQUEST_PENDING.
+ * [parsePendingRequest] for the state that actually drives [OrgRequest.PENDING].
  */
 fun parseMembership(raw: String?): Membership? {
     if (raw.isNullOrBlank()) return null
@@ -269,8 +283,8 @@ fun parseMembership(raw: String?): Membership? {
  * A SEPARATE read, from `list_organisation_requests`, and it has to be:
  * `submit_organisation_request` writes to `organisation_requests` and creates no membership row
  * at all, while `get_my_organisations` reads `organisation_members`. Refreshing membership after a
- * submission therefore could never move the button off CREATE - the exact failure
- * REQUEST_PENDING was added to prevent.
+ * submission therefore could never move the button off "Request an organisation" - the exact
+ * failure [OrgRequest.PENDING] was added to prevent.
  *
  * REVIEWERS GET `null`, WHATEVER THE QUEUE HOLDS. The RPC scopes to the caller's own requests
  * only for a NON-reviewer; for a BOSS admin holding `organisation.approve` it returns the whole

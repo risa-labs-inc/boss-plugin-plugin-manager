@@ -248,6 +248,43 @@ class OrganisationGateTest {
     }
 
     @Test
+    fun `the Create tab is shown to everyone who can reach the organisation service`() {
+        // The coverage the deleted organisationCtaNeedsCreateTab had, on the expression that
+        // replaced it - which is the same expression whose previous version WAS the bug.
+        // A non-publisher gets the tab, because the request form has nowhere else to live.
+        assertTrue(createTabVisible(canPublish = false, organisationServiceAvailable = true))
+        // A publisher gets it even on a host that cannot reach the service.
+        assertTrue(createTabVisible(canPublish = true, organisationServiceAvailable = false))
+        assertTrue(createTabVisible(canPublish = true, organisationServiceAvailable = true))
+        // Neither: the tab would hold one disabled button reading "unavailable".
+        assertFalse(createTabVisible(canPublish = false, organisationServiceAvailable = false))
+    }
+
+    @Test
+    fun `tab visibility does not depend on membership`() {
+        // The regression, stated as an invariant rather than a case. Nothing about who you belong
+        // to may remove the tab: that coupling is what made the request form unreachable.
+        for (m in listOf(null, Membership.NONE, Membership.ACTIVE)) {
+            for (installed in listOf(false, true)) {
+                for (pending in listOf(false, true)) {
+                    for (completed in listOf(false, true)) {
+                        // Membership feeds both axes; neither feeds the tab.
+                        orgAccessRoute(m, installed)
+                        orgRequestState(m, pending, providerAvailable = true, readCompleted = completed)
+                        assertTrue(
+                            createTabVisible(
+                                canPublish = false,
+                                organisationServiceAvailable = true,
+                            ),
+                            "m=$m would lose the tab",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `the plugin id matches the plugin's own manifest`() {
         // Both the install call and the installed-list check key off this, so a
         // typo silently means "never installed" and the install button never
@@ -273,10 +310,19 @@ class OrganisationGateTest {
             }
             for (pending in listOf(false, true)) {
                 for (provider in listOf(false, true)) {
-                    assertNotNull(
-                        orgRequestState(m, pending, provider, readCompleted = true),
-                        "m=$m pending=$pending provider=$provider",
-                    )
+                    for (completed in listOf(false, true)) {
+                        // assertNotNull here would be a tautology - the return type is not
+                        // nullable. What is worth pinning across the whole cross-product is that
+                        // no provider ALWAYS wins: it is the one state where the request cannot
+                        // be submitted at all, so nothing may promote it to an offer.
+                        val state = orgRequestState(m, pending, provider, completed)
+                        val label = "m=$m pending=$pending provider=$provider done=$completed"
+                        if (!provider) {
+                            assertEquals(OrgRequest.UNAVAILABLE, state, label)
+                        } else {
+                            assertNotEquals(OrgRequest.UNAVAILABLE, state, label)
+                        }
+                    }
                 }
             }
         }
