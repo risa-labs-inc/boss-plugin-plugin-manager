@@ -1370,6 +1370,23 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
         viewModel.organisationServiceAvailable,
     )
 
+    // Unconditional in every host that can actually reach the organisation service - which is
+    // every shipping one, since the host provides supabaseDataProvider non-null. It is NOT gated
+    // on membership, which was the bug: a member could reach neither the request form nor the tab
+    // that carries it. It is still gated on the service existing, because a tab whose only content
+    // is "Requesting is unavailable here" is an apology, not a feature.
+    val createTabVisible = state.canPublish || viewModel.organisationServiceAvailable
+
+    // Kept because the gate above can retract: `canPublish` is derived from an async permission
+    // read AND from publishTargets, so losing an organisation can take it from true back to false.
+    // A non-publisher on a provider-less host sitting on the Create tab would otherwise be
+    // stranded there - button gone, header showing no selection.
+    LaunchedEffect(createTabVisible) {
+        if (!createTabVisible && state.currentTab == PluginManagerTab.PUBLISH) {
+            viewModel.selectTab(PluginManagerTab.INSTALLED)
+        }
+    }
+
     BossTheme {
         Column(
             modifier = Modifier
@@ -1405,6 +1422,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                 onTabSelected = { viewModel.selectTab(it) },
                 onRefresh = { viewModel.refresh() },
                 isLoading = state.isLoading,
+                createTabVisible = createTabVisible,
                 realtimeConnected = state.realtimeConnected
             )
 
@@ -1624,6 +1642,8 @@ private fun PluginManagerHeader(
     onTabSelected: (PluginManagerTab) -> Unit,
     onRefresh: () -> Unit,
     isLoading: Boolean,
+    /** See the derivation in [PluginManagerView]: everyone who can reach the org service. */
+    createTabVisible: Boolean,
     realtimeConnected: Boolean = false,
     /** Organisations present in the catalogue. Fewer than two renders no control. */
     orgSlugs: List<String> = emptyList(),
@@ -1665,16 +1685,18 @@ private fun PluginManagerHeader(
             selected = currentTab == PluginManagerTab.MCP,
             onClick = { onTabSelected(PluginManagerTab.MCP) }
         )
-        // UNCONDITIONAL. It used to be gated on `canPublish`, which hid the only surface that can
-        // request an organisation from everybody who is not a publisher - and the fallback that
-        // was supposed to cover them only fired for a user who belonged to no organisation at all.
-        // The tab always has something in it: publishers get the publish form, everybody else gets
-        // the organisation section.
-        TabButton(
-            text = "Create",
-            selected = currentTab == PluginManagerTab.PUBLISH,
-            onClick = { onTabSelected(PluginManagerTab.PUBLISH) }
-        )
+        // No longer gated on `canPublish`, which hid the only surface that can request an
+        // organisation from everybody who is not a publisher - and the fallback meant to cover
+        // them fired only for a user who belonged to no organisation at all, so a member got
+        // nothing. The tab always has something in it now: publishers get the publish form,
+        // everybody else gets the organisation section.
+        if (createTabVisible) {
+            TabButton(
+                text = "Create",
+                selected = currentTab == PluginManagerTab.PUBLISH,
+                onClick = { onTabSelected(PluginManagerTab.PUBLISH) }
+            )
+        }
 
         Spacer(Modifier.width(8.dp))
 

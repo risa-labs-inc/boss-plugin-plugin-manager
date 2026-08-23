@@ -1126,14 +1126,18 @@ class PluginManagerViewModel(
             val result = api.updatePlugin(pluginId)
             when (result) {
                 is InstallResult.Success -> {
-                    val newUpdates = _state.value.updates.filter { it.pluginId != pluginId }
                     // Hoisted: buildPostUpdatePrompt RELOADS plugins, and an update block re-runs
                     // whenever the CAS loses a race - which would reload them twice.
                     val prompt = buildPostUpdatePrompt(listOf(pluginId))
-                    _state.update {
-                        it.copy(
-                            busyPlugins = it.busyPlugins - pluginId,
-                            updates = newUpdates,
+                    // `updates` is filtered INSIDE the block, from the snapshot the CAS is about
+                    // to write against. Snapshotting it before the suspending call above and
+                    // writing that back discarded anything checkForUpdatesInternal published in
+                    // between - the same stale-write-back shape as the membership reset, on a
+                    // different field. `s` is named because `it` is taken by the inner filter.
+                    _state.update { s ->
+                        s.copy(
+                            busyPlugins = s.busyPlugins - pluginId,
+                            updates = s.updates.filter { it.pluginId != pluginId },
                             postUpdatePrompt = prompt,
                         )
                     }
@@ -1158,21 +1162,30 @@ class PluginManagerViewModel(
         _state.update {
             it.copy(
                 versionSheet = VersionSheetState(
-                pluginId = pluginId,
-                displayName = displayName,
-                installedVersion = installedVersion
+                    pluginId = pluginId,
+                    displayName = displayName,
+                    installedVersion = installedVersion,
                 ),
             )
         }
         scope.launch {
             val result = api.fetchPluginVersions(pluginId)
-            val sheet = _state.value.versionSheet ?: return@launch
-            if (sheet.pluginId != pluginId) return@launch // sheet changed while loading
-            _state.update {
-                it.copy(
+            // The staleness guard lives INSIDE the block. Reading versionSheet first and writing
+            // in a separate CAS left a check-then-act window: a closeVersions() landing between
+            // the two put the dismissed sheet back on screen, and a second openVersions for
+            // another plugin put it back pointing at the wrong one.
+            _state.update { s ->
+                val sheet = s.versionSheet
+                if (sheet?.pluginId != pluginId) return@update s
+                s.copy(
                     versionSheet = result.fold(
-                    onSuccess = { sheet.copy(isLoading = false, versions = it) },
-                    onFailure = { sheet.copy(isLoading = false, error = it.message ?: "Failed to load versions") }
+                        onSuccess = { sheet.copy(isLoading = false, versions = it) },
+                        onFailure = {
+                            sheet.copy(
+                                isLoading = false,
+                                error = it.message ?: "Failed to load versions",
+                            )
+                        },
                     ),
                 )
             }
