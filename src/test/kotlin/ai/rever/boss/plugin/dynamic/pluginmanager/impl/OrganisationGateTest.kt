@@ -181,6 +181,31 @@ class OrganisationGateTest {
     }
 
     @Test
+    fun `an offer with no member route means they really belong to nothing`() {
+        // The wording depends on this. OrganisationSection asks orgRequestDescription for the
+        // "You are not a member of any organisation" variant, and that sentence is only true when
+        // no access route AND an available request together imply Membership.NONE. The two axes
+        // are otherwise independent, so nothing else pins the one place they touch: a third
+        // Membership value yielding no access route would tell a member they belong to nothing,
+        // and only the prose would be wrong.
+        for (m in listOf(null, Membership.NONE, Membership.ACTIVE)) {
+            for (installed in listOf(false, true)) {
+                for (pending in listOf(false, true)) {
+                    val access = orgAccessRoute(m, installed)
+                    val request = orgRequestState(m, pending, providerAvailable = true)
+                    if (access == null && request == OrgRequest.AVAILABLE) {
+                        assertEquals(
+                            Membership.NONE,
+                            m,
+                            "the non-member wording would be shown to m=$m",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `the plugin id matches the plugin's own manifest`() {
         // Both the install call and the installed-list check key off this, so a
         // typo silently means "never installed" and the install button never

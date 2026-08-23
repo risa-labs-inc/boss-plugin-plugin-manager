@@ -384,9 +384,11 @@ class PluginManagerViewModel(
         scope.launch {
             runCatching {
                 roleManagementProvider?.getAllPermissions()?.getOrNull()?.let { perms ->
-                    _state.value = _state.value.copy(
-                        permissionDescriptions = perms.associate { it.name to (it.description ?: "") }
-                    )
+                    _state.update {
+                        it.copy(
+                            permissionDescriptions = perms.associate { it.name to (it.description ?: "") },
+                        )
+                    }
                 }
             }
         }
@@ -396,7 +398,7 @@ class PluginManagerViewModel(
      * Select a tab.
      */
     fun selectTab(tab: PluginManagerTab) {
-        _state.value = _state.value.copy(currentTab = tab)
+        _state.update { it.copy(currentTab = tab) }
         // Auto-refresh store when switching to Available tab
         if (tab == PluginManagerTab.AVAILABLE) {
             refreshStore()
@@ -407,7 +409,7 @@ class PluginManagerViewModel(
      * Update search query.
      */
     fun setSearchQuery(query: String) {
-        _state.value = _state.value.copy(searchQuery = query)
+        _state.update { it.copy(searchQuery = query) }
     }
 
     /**
@@ -711,10 +713,12 @@ class PluginManagerViewModel(
             return
         }
 
-        _state.value = _state.value.copy(
-            error = failure?.let { "Could not open $name: $it" }
-                ?: "$name has no panel or tab to open."
-        )
+        _state.update {
+            it.copy(
+                error = failure?.let { "Could not open $name: $it" }
+                ?: "$name has no panel or tab to open.",
+            )
+        }
     }
 
     /** The registered panel this plugin's Open action targets, or null. */
@@ -789,28 +793,47 @@ class PluginManagerViewModel(
     fun refreshOrganisationMembership() {
         val supabase = supabaseDataProvider ?: return
         scope.launch {
-            // runCatching, because rpc() can THROW rather than return a failed Result
-            // (serialization, cancellation, a transport that does not wrap). The KDoc above
-            // promises this is quiet; without the catch it takes the coroutine down instead.
-            val raw =
-                runCatching { supabase.rpc("get_my_organisations", "{}").getOrNull() }.getOrNull()
+            // CONCURRENT, not sequential. The two reads are independent, and awaiting them in
+            // turn put a second full round trip in front of `membership` and `publishTargets`
+            // for every user on every refresh - including publishers, who will never request an
+            // organisation but whose publish picker waits on `publishTargets`. Cost is now the
+            // slower of the two rather than their sum.
+            //
+            // runCatching around each, because rpc() can THROW rather than return a failed
+            // Result (serialization, cancellation, a transport that does not wrap). The KDoc
+            // above promises this is quiet; without the catch it takes the coroutine down.
+            val (raw, requests) = coroutineScope {
+                val orgs = async {
+                    runCatching {
+                        supabase.rpc("get_my_organisations", "{}").getOrNull()
+                    }.getOrNull()
+                }
+                // Asked UNCONDITIONALLY. It used to be skipped for a member, on the grounds that
+                // a member could not reach the request branch anyway - and once they can,
+                // skipping it means a member who has already submitted a request is offered the
+                // button again and gets "already in use" for their trouble.
+                //
+                // A reviewer holding organisation.approve gets the WHOLE queue here and
+                // parsePendingRequest discards it, so this is a payload that grows with the
+                // queue for them. Acceptable: the RPC is already theirs to call and the read is
+                // off the critical path now. TODO: pass a caller-scoped flag if the server ever
+                // grows one.
+                val pendingQueue = async {
+                    runCatching {
+                        supabase.rpc(
+                            "list_organisation_requests",
+                            """{"p_status":"pending"}""",
+                        ).getOrNull()
+                    }.getOrNull()
+                }
+                orgs.await() to pendingQueue.await()
+            }
+
             val membership = parseMembership(raw)
             // Same response, second question. get_my_organisations already projects can_publish
             // per row, so the publish picker costs no extra round trip - and cannot disagree with
             // the membership shown beside it, since both are read from one answer.
             val targets = parsePublishTargets(raw)
-
-            // Asked UNCONDITIONALLY. It used to be skipped for a member, on the grounds that a
-            // member could not reach the request branch anyway - and once they can, skipping it
-            // means a member who has already submitted a request is offered the button again and
-            // gets "already in use" for their trouble.
-            val requests =
-                runCatching {
-                    supabase.rpc(
-                        "list_organisation_requests",
-                        """{"p_status":"pending"}""",
-                    ).getOrNull()
-                }.getOrNull()
             val pending = parsePendingRequest(requests)
 
             // update, and the CAS retry is the point: everything the panel-open path writes
@@ -979,7 +1002,7 @@ class PluginManagerViewModel(
 
     fun installFromRemote(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
 
             // Friendly name for the status-bar progress item (the API only gets the id).
             _state.value.availablePlugins.find { it.pluginId == pluginId }?.displayName
@@ -990,17 +1013,19 @@ class PluginManagerViewModel(
                 is InstallResult.Success -> {
                     apiImpl.refreshInstalledPlugins()
                     refreshStoreInternal()
-                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
+                    _state.update { it.copy(busyPlugins = it.busyPlugins - pluginId) }
                 }
                 // The four failure-ish variants share one decision with every other button.
                 // They used to be spelled out here with their own wording, which is how the
                 // busiest Install button in the app came to disagree with the canonical
                 // answer about what AlreadyInstalled means.
                 else -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = outcomeErrorFor(result, PluginAction.INSTALL)
-                    )
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            error = outcomeErrorFor(result, PluginAction.INSTALL),
+                        )
+                    }
                 }
             }
         }
@@ -1013,9 +1038,11 @@ class PluginManagerViewModel(
      */
     fun installFromFilePicker() {
         // File picker not available in dynamic plugin context
-        _state.value = _state.value.copy(
-            error = "File picker not available. Use GitHub URL instead."
-        )
+        _state.update {
+            it.copy(
+                error = "File picker not available. Use GitHub URL instead.",
+            )
+        }
     }
 
     /**
@@ -1023,14 +1050,14 @@ class PluginManagerViewModel(
      */
     fun installFromGitHub(githubUrl: String) {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.update { it.copy(isLoading = true, error = null) }
 
             val result = api.installFromGitHub(githubUrl)
             when (result) {
                 is InstallResult.Success -> {
                     // Refresh installed plugins after successful install
                     apiImpl.refreshInstalledPlugins()
-                    _state.value = _state.value.copy(isLoading = false)
+                    _state.update { it.copy(isLoading = false) }
                 }
                 // One decision point for every non-Success outcome. The bespoke "Download
                 // failed" / "Load failed" prefixes that used to sit here lost nothing worth
@@ -1038,10 +1065,12 @@ class PluginManagerViewModel(
                 // this `when` had its own idea of which variants matter, which is how
                 // VersionConflict came to say nothing at all.
                 else -> {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        error = outcomeErrorFor(result, PluginAction.INSTALL)
-                    )
+                    _state.update {
+                        it.copy(
+                            isLoading = false,
+                            error = outcomeErrorFor(result, PluginAction.INSTALL),
+                        )
+                    }
                 }
             }
         }
@@ -1052,30 +1081,36 @@ class PluginManagerViewModel(
      */
     fun uninstallPlugin(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
 
             val result = api.uninstallPlugin(pluginId)
             when (result) {
                 is UninstallResult.Success -> {
-                    _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
+                    _state.update { it.copy(busyPlugins = it.busyPlugins - pluginId) }
                 }
                 is UninstallResult.NotFound -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Plugin not found: ${result.pluginId}"
-                    )
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            error = "Plugin not found: ${result.pluginId}",
+                        )
+                    }
                 }
                 is UninstallResult.CannotUnload -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Cannot uninstall: ${result.reason}"
-                    )
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            error = "Cannot uninstall: ${result.reason}",
+                        )
+                    }
                 }
                 is UninstallResult.Failed -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = "Uninstall failed: ${result.error}"
-                    )
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            error = "Uninstall failed: ${result.error}",
+                        )
+                    }
                 }
             }
         }
@@ -1086,23 +1121,30 @@ class PluginManagerViewModel(
      */
     fun updatePlugin(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
 
             val result = api.updatePlugin(pluginId)
             when (result) {
                 is InstallResult.Success -> {
                     val newUpdates = _state.value.updates.filter { it.pluginId != pluginId }
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        updates = newUpdates,
-                        postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
-                    )
+                    // Hoisted: buildPostUpdatePrompt RELOADS plugins, and an update block re-runs
+                    // whenever the CAS loses a race - which would reload them twice.
+                    val prompt = buildPostUpdatePrompt(listOf(pluginId))
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            updates = newUpdates,
+                            postUpdatePrompt = prompt,
+                        )
+                    }
                 }
                 else -> {
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = outcomeErrorFor(result, PluginAction.UPDATE)
-                    )
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            error = outcomeErrorFor(result, PluginAction.UPDATE),
+                        )
+                    }
                 }
             }
         }
@@ -1113,28 +1155,32 @@ class PluginManagerViewModel(
      * published versions (each tagged with IPC compatibility).
      */
     fun openVersions(pluginId: String, displayName: String, installedVersion: String?) {
-        _state.value = _state.value.copy(
-            versionSheet = VersionSheetState(
+        _state.update {
+            it.copy(
+                versionSheet = VersionSheetState(
                 pluginId = pluginId,
                 displayName = displayName,
                 installedVersion = installedVersion
+                ),
             )
-        )
+        }
         scope.launch {
             val result = api.fetchPluginVersions(pluginId)
             val sheet = _state.value.versionSheet ?: return@launch
             if (sheet.pluginId != pluginId) return@launch // sheet changed while loading
-            _state.value = _state.value.copy(
-                versionSheet = result.fold(
+            _state.update {
+                it.copy(
+                    versionSheet = result.fold(
                     onSuccess = { sheet.copy(isLoading = false, versions = it) },
                     onFailure = { sheet.copy(isLoading = false, error = it.message ?: "Failed to load versions") }
+                    ),
                 )
-            )
+            }
         }
     }
 
     fun closeVersions() {
-        _state.value = _state.value.copy(versionSheet = null)
+        _state.update { it.copy(versionSheet = null) }
     }
 
     /**
@@ -1143,19 +1189,27 @@ class PluginManagerViewModel(
      */
     fun installVersion(pluginId: String, version: String) {
         scope.launch {
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
             val result = api.installVersion(pluginId, version)
-            val base = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
-            _state.value = when (result) {
-                is InstallResult.Success -> base.copy(
-                    versionSheet = null,
-                    // Version changes of system/locked plugins land on disk only;
-                    // hot-reload (or prompt) so the chosen version actually runs.
-                    postUpdatePrompt = buildPostUpdatePrompt(listOf(pluginId))
-                )
-                // Covers VersionConflict too, which used to fall into an `else` and say nothing:
-                // the version sheet is the one surface where a conflict is most likely.
-                else -> base.copy(error = outcomeErrorFor(result, PluginAction.INSTALL))
+            // Hoisted out of the update block below: buildPostUpdatePrompt suspends and has
+            // side effects, and an update block can run more than once when the CAS retries.
+            // Version changes of system/locked plugins land on disk only; hot-reload (or
+            // prompt) so the chosen version actually runs.
+            val prompt =
+                if (result is InstallResult.Success) buildPostUpdatePrompt(listOf(pluginId))
+                else null
+            _state.update {
+                val base = it.copy(busyPlugins = it.busyPlugins - pluginId)
+                when (result) {
+                    is InstallResult.Success -> base.copy(
+                        versionSheet = null,
+                        postUpdatePrompt = prompt
+                    )
+                    // Covers VersionConflict too, which used to fall into an `else` and say
+                    // nothing: the version sheet is the one surface where a conflict is most
+                    // likely.
+                    else -> base.copy(error = outcomeErrorFor(result, PluginAction.INSTALL))
+                }
             }
         }
     }
@@ -1165,7 +1219,7 @@ class PluginManagerViewModel(
      */
     fun updateAllPlugins() {
         scope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
+            _state.update { it.copy(isLoading = true, error = null) }
 
             val updates = _state.value.updates.toList()
             // Display name to reason, so the banner can say why and not only which. One list
@@ -1186,14 +1240,20 @@ class PluginManagerViewModel(
                 }
             }
 
-            _state.value = _state.value.copy(
-                isLoading = false,
-                error = updateAllError(failed),
-                // Clearing this outright named a plugin in the banner and took its Update button
-                // away in the same breath, leaving no action for the one thing it had reported.
-                updates = remainingUpdates(_state.value.updates, succeeded.toSet()),
-                postUpdatePrompt = buildPostUpdatePrompt(succeeded)
-            )
+            // Hoisted out of the update block: buildPostUpdatePrompt RELOADS plugins, and an
+            // update block re-runs whenever the CAS loses a race - which would reload them twice.
+            val prompt = buildPostUpdatePrompt(succeeded)
+            _state.update {
+                it.copy(
+                    isLoading = false,
+                    error = updateAllError(failed),
+                    // Clearing this outright named a plugin in the banner and took its Update
+                    // button away in the same breath, leaving no action for the one thing it
+                    // had reported.
+                    updates = remainingUpdates(it.updates, succeeded.toSet()),
+                    postUpdatePrompt = prompt,
+                )
+            }
         }
     }
 
@@ -1249,7 +1309,7 @@ class PluginManagerViewModel(
     /** Confirm the post-update prompt: reset the affected plugins' running instances. */
     fun confirmResetInstances() {
         val prompt = _state.value.postUpdatePrompt ?: return
-        _state.value = _state.value.copy(postUpdatePrompt = null)
+        _state.update { it.copy(postUpdatePrompt = null) }
         scope.launch {
             // Toolbox last: resetting it disposes this plugin and cancels this coroutine, so any
             // id after it would never be reset. See `selfLast`.
@@ -1263,14 +1323,14 @@ class PluginManagerViewModel(
 
     /** Confirm the post-update prompt: restart the BOSS application. */
     fun confirmRestartApplication() {
-        _state.value = _state.value.copy(postUpdatePrompt = null)
+        _state.update { it.copy(postUpdatePrompt = null) }
         loaderDelegate?.restartApplication()
     }
 
     /** Confirm the post-update prompt: hot-swap the API layer (reloads every plugin). */
     fun confirmApiSwap() {
         val prompt = _state.value.postUpdatePrompt ?: return
-        _state.value = _state.value.copy(postUpdatePrompt = null)
+        _state.update { it.copy(postUpdatePrompt = null) }
         val jarPath = prompt.apiJarPath ?: return
         scope.launch {
             // Loading the newer api jar triggers the host's detached API-layer
@@ -1282,7 +1342,7 @@ class PluginManagerViewModel(
 
     /** Dismiss the post-update prompt without resetting/restarting. */
     fun dismissPostUpdatePrompt() {
-        _state.value = _state.value.copy(postUpdatePrompt = null)
+        _state.update { it.copy(postUpdatePrompt = null) }
     }
 
     /**
@@ -1290,7 +1350,7 @@ class PluginManagerViewModel(
      */
     fun togglePluginEnabled(pluginId: String, enabled: Boolean) {
         scope.launch {
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
 
             if (enabled) {
                 api.enablePlugin(pluginId)
@@ -1298,7 +1358,7 @@ class PluginManagerViewModel(
                 api.disablePlugin(pluginId)
             }
 
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
+            _state.update { it.copy(busyPlugins = it.busyPlugins - pluginId) }
         }
     }
 
@@ -1370,28 +1430,32 @@ class PluginManagerViewModel(
      */
     fun deleteFromStore(pluginId: String) {
         scope.launch {
-            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins + pluginId, error = null)
+            _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
             val result = api.deleteFromStore(pluginId)
             result.fold(
                 onSuccess = {
                     val storeResult = api.fetchStorePlugins()
                     storeResult.fold(
                         onSuccess = { plugins ->
-                            _state.value = _state.value.copy(
-                                availablePlugins = plugins,
-                                busyPlugins = _state.value.busyPlugins - pluginId
-                            )
+                            _state.update {
+                                it.copy(
+                                    availablePlugins = plugins,
+                                    busyPlugins = it.busyPlugins - pluginId,
+                                )
+                            }
                         },
                         onFailure = {
-                            _state.value = _state.value.copy(busyPlugins = _state.value.busyPlugins - pluginId)
+                            _state.update { it.copy(busyPlugins = it.busyPlugins - pluginId) }
                         }
                     )
                 },
                 onFailure = { e ->
-                    _state.value = _state.value.copy(
-                        busyPlugins = _state.value.busyPlugins - pluginId,
-                        error = e.message ?: "Failed to delete plugin"
-                    )
+                    _state.update {
+                        it.copy(
+                            busyPlugins = it.busyPlugins - pluginId,
+                            error = e.message ?: "Failed to delete plugin",
+                        )
+                    }
                 }
             )
         }
@@ -1479,7 +1543,7 @@ class PluginManagerViewModel(
      * Clear error message.
      */
     fun clearError() {
-        _state.value = _state.value.copy(error = null)
+        _state.update { it.copy(error = null) }
     }
 
     /**

@@ -35,6 +35,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgAccessLabel
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestState
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestDescription
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.orgRequestLabel
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.Membership
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrgAccess
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrgRequest
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.OrganisationPlugin
@@ -138,6 +139,16 @@ private fun OrganisationSection(
     access: OrgAccess?,
     /** Whether the request form is on offer, and why not when it is not. */
     request: OrgRequest,
+    /**
+     * Whether they belong to an organisation, passed rather than inferred from `access != null`.
+     *
+     * Inferring it worked only because orgAccessRoute happens to return non-null for exactly
+     * ACTIVE - a coupling between two axes this file otherwise treats as independent. A third
+     * Membership value with no access route would have silently told a member they belong to
+     * nothing, and only the wording would have been wrong, which is the kind of defect nobody
+     * reports.
+     */
+    isMember: Boolean,
     onAccess: () -> Unit,
     onRequest: () -> Unit
 ) {
@@ -163,7 +174,7 @@ private fun OrganisationSection(
         }
 
         Text(
-            text = orgRequestDescription(request, isMember = access != null),
+            text = orgRequestDescription(request, isMember = isMember),
             fontSize = 13.sp,
             color = BossThemeColors.TextSecondary,
             modifier = Modifier.padding(bottom = 12.dp)
@@ -1501,6 +1512,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         publishTargets = state.offeredPublishTargets,
                         orgAccess = orgAccess,
                         orgRequest = orgRequest,
+                        orgIsMember = state.membership == Membership.ACTIVE,
                         onOrganisationAccess = { viewModel.onOrganisationAccess() },
                         onOrganisationRequest = { viewModel.onRequestOrganisation() },
                         toolCreatorInstalled = state.installedPlugins.any {
@@ -3131,6 +3143,8 @@ private fun PublishTab(
     publishTargets: List<PublishTarget>,
     orgAccess: OrgAccess?,
     orgRequest: OrgRequest,
+    /** Whether they belong to an organisation - see [OrganisationSection]'s `isMember`. */
+    orgIsMember: Boolean,
     onOrganisationAccess: () -> Unit,
     onOrganisationRequest: () -> Unit,
     toolCreatorInstalled: Boolean,
@@ -3178,6 +3192,7 @@ private fun PublishTab(
             OrganisationSection(
                 access = orgAccess,
                 request = orgRequest,
+                isMember = orgIsMember,
                 onAccess = onOrganisationAccess,
                 onRequest = onOrganisationRequest
             )
@@ -3240,6 +3255,7 @@ private fun PublishTab(
         OrganisationSection(
             access = orgAccess,
             request = orgRequest,
+            isMember = orgIsMember,
             onAccess = onOrganisationAccess,
             onRequest = onOrganisationRequest
         )
