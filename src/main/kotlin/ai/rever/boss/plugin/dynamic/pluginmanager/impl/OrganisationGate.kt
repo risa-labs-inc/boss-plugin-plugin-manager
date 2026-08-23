@@ -104,6 +104,7 @@ fun orgRequestState(
     membership: Membership?,
     hasPendingRequest: Boolean,
     providerAvailable: Boolean,
+    readCompleted: Boolean,
 ): OrgRequest =
     when {
         !providerAvailable -> OrgRequest.UNAVAILABLE
@@ -111,7 +112,16 @@ fun orgRequestState(
         // Deliberately AFTER the pending check: a submitted request is known locally the moment it
         // succeeds, and it should not revert to "Request an organisation" while the membership
         // re-read is in flight.
-        membership == null -> OrgRequest.UNKNOWN
+        //
+        // UNKNOWN only while a read is genuinely outstanding. A read that CAME BACK and told us
+        // nothing - transport failure, refusal envelope, malformed body - offers the request
+        // anyway. Being conservative there was right while requesting was gated on membership,
+        // because guessing wrong denied it; now that the two are decoupled a failed read affects
+        // only the WORDING, and orgRequestDescription has a membership-neutral variant for
+        // exactly this. Refusing to offer it instead leaves a permanent "Checking your
+        // organisations..." with no way forward, which is the failure this whole change is about.
+        // The server validates the submission regardless.
+        membership == null && !readCompleted -> OrgRequest.UNKNOWN
         else -> OrgRequest.AVAILABLE
     }
 
@@ -168,19 +178,27 @@ fun orgAccessDescription(access: OrgAccess): String =
 /**
  * Explanatory line for the request control.
  *
- * Two variants for AVAILABLE, because "you are not a member of any organisation" is plainly false
- * for the member who can now also request one, and a sentence the reader can see is wrong costs
- * more than the branch does.
+ * Takes [membership] rather than a derived Boolean, and three AVAILABLE variants rather than two.
+ * "You are not a member of any organisation" is plainly false for the member who can now also
+ * request one, and it is UNVERIFIED when the membership read failed - which is a state AVAILABLE
+ * is now reachable from. A sentence the reader can see is wrong costs more than the branch does.
  */
-fun orgRequestDescription(state: OrgRequest, isMember: Boolean): String =
+fun orgRequestDescription(state: OrgRequest, membership: Membership?): String =
     when (state) {
         OrgRequest.AVAILABLE ->
-            if (isMember) {
-                "Need another organisation? Requesting one opens a form; a BOSS administrator " +
-                    "reviews it before the organisation is created."
-            } else {
-                "You are not a member of any organisation. Requesting one opens a form; a BOSS " +
-                    "administrator reviews it before the organisation is created."
+            when (membership) {
+                Membership.ACTIVE ->
+                    "Need another organisation? Requesting one opens a form; a BOSS " +
+                        "administrator reviews it before the organisation is created."
+
+                Membership.NONE ->
+                    "You are not a member of any organisation. Requesting one opens a form; a " +
+                        "BOSS administrator reviews it before the organisation is created."
+
+                // Says nothing about what they belong to, because we could not find out.
+                null ->
+                    "Requesting an organisation opens a form; a BOSS administrator reviews it " +
+                        "before the organisation is created."
             }
 
         OrgRequest.PENDING ->

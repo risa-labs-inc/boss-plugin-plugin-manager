@@ -123,6 +123,14 @@ data class PluginManagerState(
      * never move the request control off "Request an organisation".
      */
     val hasPendingOrgRequest: Boolean = false,
+    /**
+     * Whether an organisation read has completed at least once, whatever it said.
+     *
+     * Separates "still waiting" from "asked and learned nothing": both leave [membership] null,
+     * and only the first is worth showing a spinner for. Without it a failed read renders
+     * "Checking your organisations..." with a disabled button forever - see [orgRequestState].
+     */
+    val organisationReadCompleted: Boolean = false,
     /** True while the "request an organisation" dialog is open. */
     val organisationRequestOpen: Boolean = false,
     /** True while a request is in flight, so the dialog can disable its submit. */
@@ -261,6 +269,21 @@ class PluginManagerViewModel(
      * "Checking your organisations..." forever.
      */
     val organisationServiceAvailable: Boolean = supabaseDataProvider != null
+
+    /**
+     * Which organisation read is the current one.
+     *
+     * `_state.update` stops a stale snapshot clobbering a field; it does NOT stop an older
+     * RESPONSE landing after a newer one and writing what it read. Three call sites can have
+     * reads in flight at once (`refresh`, the header button, the tail of
+     * `submitOrganisationRequest`), and the damaging order is reachable: a manual refresh whose
+     * empty request-queue answer lands AFTER a submission would clear the optimistic
+     * `hasPendingOrgRequest` and re-offer the button, which is the duplicate submission that
+     * PENDING exists to prevent.
+     *
+     * Atomic because the three call sites are not on one thread.
+     */
+    private val organisationReadGeneration = java.util.concurrent.atomic.AtomicInteger(0)
 
     // Child scope of the plugin scope: cancelled in dispose() so collectors of a
     // closed panel don't leak, while plugin unload still cancels everything.
@@ -792,6 +815,7 @@ class PluginManagerViewModel(
      */
     fun refreshOrganisationMembership() {
         val supabase = supabaseDataProvider ?: return
+        val generation = organisationReadGeneration.incrementAndGet()
         scope.launch {
             // CONCURRENT, not sequential. The two reads are independent, and awaiting them in
             // turn put a second full round trip in front of `membership` and `publishTargets`
@@ -829,6 +853,11 @@ class PluginManagerViewModel(
                 orgs.await() to pendingQueue.await()
             }
 
+            // A newer read was started while this one was in flight, so this answer is already
+            // out of date. Dropping it entirely is right: publishing any of its three fields
+            // would be publishing a stale read.
+            if (organisationReadGeneration.get() != generation) return@launch
+
             val membership = parseMembership(raw)
             // Same response, second question. get_my_organisations already projects can_publish
             // per row, so the publish picker costs no extra round trip - and cannot disagree with
@@ -845,8 +874,10 @@ class PluginManagerViewModel(
                 it.copy(
                     membership = membership,
                     publishTargets = targets,
-                    // Never downgraded by a refresh - see retainPendingRequest for why a
-                    // server `false` is not evidence of absence.
+                    organisationReadCompleted = true,
+                    // Retained only when the read was INCONCLUSIVE. A confident `false` DOES
+                    // clear it, deliberately - see retainPendingRequest, which explains why the
+                    // monotonic version of this locked a user out after a rejection.
                     hasPendingOrgRequest = retainPendingRequest(it.hasPendingOrgRequest, pending),
                 )
             }

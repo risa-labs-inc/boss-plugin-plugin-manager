@@ -59,6 +59,7 @@ class OrganisationGateTest {
                 Membership.NONE,
                 hasPendingRequest = false,
                 providerAvailable = true,
+                readCompleted = true,
             ),
         )
     }
@@ -75,6 +76,7 @@ class OrganisationGateTest {
                 Membership.ACTIVE,
                 hasPendingRequest = false,
                 providerAvailable = true,
+                readCompleted = true,
             ),
         )
     }
@@ -86,7 +88,7 @@ class OrganisationGateTest {
         listOf(null, Membership.NONE, Membership.ACTIVE).forEach { m ->
             assertEquals(
                 OrgRequest.PENDING,
-                orgRequestState(m, hasPendingRequest = true, providerAvailable = true),
+                orgRequestState(m, hasPendingRequest = true, providerAvailable = true, readCompleted = true),
                 "membership=$m",
             )
         }
@@ -96,13 +98,43 @@ class OrganisationGateTest {
     }
 
     @Test
-    fun `an unresolved membership is UNKNOWN, not an offer`() {
+    fun `a read that answered nothing still offers the request`() {
+        // A transport failure, a refusal envelope and malformed JSON all leave membership null,
+        // and none of them resolve by waiting. Refusing to offer the request there left a
+        // permanent "Checking your organisations..." with no way forward - the exact shape of the
+        // bug this change is about, reintroduced one level down. The server validates the
+        // submission regardless, so offering it costs nothing.
+        assertEquals(
+            OrgRequest.AVAILABLE,
+            orgRequestState(
+                null,
+                hasPendingRequest = false,
+                providerAvailable = true,
+                readCompleted = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `wording never asserts a membership we could not read`() {
+        // AVAILABLE is now reachable with membership unknown, and the non-member sentence would
+        // be an assertion we cannot back. Three variants, all distinct.
+        val unknown = orgRequestDescription(OrgRequest.AVAILABLE, null)
+        assertFalse(unknown.contains("not a member"))
+        assertFalse(unknown.contains("another organisation"))
+        val all = listOf(null, Membership.NONE, Membership.ACTIVE)
+            .map { orgRequestDescription(OrgRequest.AVAILABLE, it) }
+        assertEquals(all.size, all.toSet().size, "two membership states share wording: $all")
+    }
+
+    @Test
+    fun `an unresolved membership is UNKNOWN only while the read is outstanding`() {
         // Distinct from AVAILABLE on purpose: the button is disabled and the label is neutral, so
         // a member is never flashed "Request an organisation" as if we had established they are in
         // none. Distinct from UNAVAILABLE too - this one resolves on the next refresh.
         assertEquals(
             OrgRequest.UNKNOWN,
-            orgRequestState(null, hasPendingRequest = false, providerAvailable = true),
+            orgRequestState(null, hasPendingRequest = false, providerAvailable = true, readCompleted = false),
         )
         assertFalse(orgRequestEnabled(OrgRequest.UNKNOWN))
     }
@@ -117,7 +149,7 @@ class OrganisationGateTest {
             listOf(false, true).forEach { pending ->
                 assertEquals(
                     OrgRequest.UNAVAILABLE,
-                    orgRequestState(m, hasPendingRequest = pending, providerAvailable = false),
+                    orgRequestState(m, hasPendingRequest = pending, providerAvailable = false, readCompleted = true),
                     "membership=$m pending=$pending",
                 )
             }
@@ -146,11 +178,11 @@ class OrganisationGateTest {
             assertTrue(orgRequestLabel(state).isNotBlank(), "$state has no label")
             // Both variants: the member wording and the non-member wording.
             assertTrue(
-                orgRequestDescription(state, isMember = false).isNotBlank(),
+                orgRequestDescription(state, Membership.NONE).isNotBlank(),
                 "$state has no description for a non-member",
             )
             assertTrue(
-                orgRequestDescription(state, isMember = true).isNotBlank(),
+                orgRequestDescription(state, Membership.ACTIVE).isNotBlank(),
                 "$state has no description for a member",
             )
         }
@@ -172,11 +204,11 @@ class OrganisationGateTest {
         // "You are not a member of any organisation" is plainly false for the member who can now
         // also request one, and a sentence the reader can see is wrong costs more than the branch.
         assertNotEquals(
-            orgRequestDescription(OrgRequest.AVAILABLE, isMember = false),
-            orgRequestDescription(OrgRequest.AVAILABLE, isMember = true),
+            orgRequestDescription(OrgRequest.AVAILABLE, Membership.NONE),
+            orgRequestDescription(OrgRequest.AVAILABLE, Membership.ACTIVE),
         )
         assertFalse(
-            orgRequestDescription(OrgRequest.AVAILABLE, isMember = true).contains("not a member"),
+            orgRequestDescription(OrgRequest.AVAILABLE, Membership.ACTIVE).contains("not a member"),
         )
     }
 
@@ -191,14 +223,24 @@ class OrganisationGateTest {
         for (m in listOf(null, Membership.NONE, Membership.ACTIVE)) {
             for (installed in listOf(false, true)) {
                 for (pending in listOf(false, true)) {
-                    val access = orgAccessRoute(m, installed)
-                    val request = orgRequestState(m, pending, providerAvailable = true)
-                    if (access == null && request == OrgRequest.AVAILABLE) {
-                        assertEquals(
-                            Membership.NONE,
+                    for (completed in listOf(false, true)) {
+                        val access = orgAccessRoute(m, installed)
+                        val request = orgRequestState(
                             m,
-                            "the non-member wording would be shown to m=$m",
+                            pending,
+                            providerAvailable = true,
+                            readCompleted = completed,
                         )
+                        if (access == null && request == OrgRequest.AVAILABLE) {
+                            // Never ACTIVE: that is the case where "you are not a member of any
+                            // organisation" would be shown to somebody who is one. NONE and null
+                            // are both fine - null gets the neutral wording.
+                            assertNotEquals(
+                                Membership.ACTIVE,
+                                m,
+                                "the non-member wording would be shown to m=$m",
+                            )
+                        }
                     }
                 }
             }
@@ -232,7 +274,7 @@ class OrganisationGateTest {
             for (pending in listOf(false, true)) {
                 for (provider in listOf(false, true)) {
                     assertNotNull(
-                        orgRequestState(m, pending, provider),
+                        orgRequestState(m, pending, provider, readCompleted = true),
                         "m=$m pending=$pending provider=$provider",
                     )
                 }
