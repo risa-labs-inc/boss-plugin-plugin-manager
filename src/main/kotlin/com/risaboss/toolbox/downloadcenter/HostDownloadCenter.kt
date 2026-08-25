@@ -84,14 +84,23 @@ private class HostCenterReporter(
         isUpdate: Boolean,
         onCancel: () -> Unit,
     ): Boolean {
-        val handle =
+        var created = false
+        // Ownership decided BEFORE the host is called, and by one thread. Calling
+        // begin() first and deciding afterwards had two concurrent callers each get a
+        // handle, and whichever won putIfAbsent kept ITS handle - which may be the
+        // non-owning one, whose done() is a no-op by contract. The row then never
+        // closed, and because busyIds is derived from the host's transfers, that
+        // plugin's buttons read busy for the rest of the session.
+        handles.computeIfAbsent(key) {
+            created = true
             provider.begin(
                 id = key,
                 title = title,
                 kind = if (isUpdate) TransferKind.PLUGIN_UPDATE else TransferKind.PLUGIN_INSTALL,
                 onCancel = onCancel,
             )
-        return handles.putIfAbsent(key, handle) == null
+        }
+        return created
     }
 
     override fun progress(

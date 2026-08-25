@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 // Fully qualifying this inline does not work: `java` resolves to Gradle's JavaPluginExtension
 // in the script scope and shadows the package.
 import java.util.concurrent.Callable
@@ -156,6 +158,79 @@ tasks.register<Jar>("buildPluginJar") {
     // Include plugin manifest
     from("src/main/resources")
 }
+
+// ============================================================================
+// The backward-compatibility invariant, as a build failure rather than a rule in
+// AGENTS.md nobody re-runs by hand.
+//
+// The host's BinaryCompatibilityValidator walks the constant pool of every
+// `ai.rever.boss.plugin.*` class in this jar and REJECTS THE WHOLE PLUGIN when a
+// referenced api class or member cannot be resolved. This build declares
+// minApiVersion 1.0.73 / minBossVersion 9.4.2, so it runs on hosts that have none
+// of the 1.0.85 download-center types - which is only true while every reference to
+// them stays in `com.risaboss.toolbox.downloadcenter`, a package the validator
+// skips. One import in the wrong file turns "degrades to its own status-bar widget"
+// into "refuses to load", silently, on every older host.
+//
+// javap over the built jar, because that is what the validator reads. Source-level
+// greps miss a reference the compiler synthesises (a lambda's captured type, a
+// property's descriptor) and flag a comment that mentions the name.
+// ============================================================================
+val gatedApiTypes =
+    listOf(
+        "ai/rever/boss/plugin/api/DownloadCenterProvider",
+        "ai/rever/boss/plugin/api/TransferHandle",
+        "ai/rever/boss/plugin/api/TransferKind",
+        "ai/rever/boss/plugin/api/TransferPhase",
+        "ai/rever/boss/plugin/api/TransferInfo",
+        "getDownloadCenterProvider",
+    )
+
+val verifyNoApiLeak =
+    tasks.register("verifyNoApiLeak") {
+        group = "verification"
+        description = "Fails if a contract class names a gated api declaration (see HostDownloadCenter)"
+        dependsOn("buildPluginJar")
+        // The default `jar` task writes the SAME path as buildPluginJar in this project,
+        // so Gradle refuses an undeclared read of a file two tasks produce. Ordering
+        // rather than a dependency: what this must scan is the plugin jar, and if `jar`
+        // ever lands a different artifact there the `checked > 0` assertion below fails
+        // loudly instead of passing over the wrong file.
+        mustRunAfter("jar")
+        val jarFile = tasks.named<Jar>("buildPluginJar").flatMap { it.archiveFile }
+        inputs.file(jarFile)
+        outputs.upToDateWhen { false }
+        doLast {
+            // Class names and member names live in the constant pool as UTF-8 constants,
+            // so scanning the raw bytes finds every reference the validator would resolve -
+            // including ones the compiler synthesised, which a source grep misses. It can
+            // also flag a matching string LITERAL, which is a conservative failure: there
+            // are none today, and a name like this in a literal wants moving anyway.
+            var checked = 0
+            val offenders = mutableListOf<String>()
+            ZipFile(jarFile.get().asFile).use { jar ->
+                jar
+                    .entries()
+                    .asSequence()
+                    .filter { it.name.startsWith("ai/rever/boss/plugin/") && it.name.endsWith(".class") }
+                    .forEach { entry ->
+                        checked++
+                        val bytes = jar.getInputStream(entry).use { it.readBytes() }
+                        val text = String(bytes, Charsets.ISO_8859_1)
+                        if (gatedApiTypes.any { text.contains(it) }) offenders += entry.name
+                    }
+            }
+            check(checked > 0) { "No contract classes found in the jar - this check would pass vacuously" }
+            check(offenders.isEmpty()) {
+                "These contract classes name a gated api declaration, so this plugin would be REJECTED " +
+                    "on any host without api 1.0.85 / BOSS 9.4.34. Move the reference into " +
+                    "com.risaboss.toolbox.downloadcenter:\n" + offenders.joinToString("\n") { "  $it" }
+            }
+            logger.lifecycle("verifyNoApiLeak: $checked contract classes, none naming a gated api declaration")
+        }
+    }
+
+tasks.named("check") { dependsOn(verifyNoApiLeak) }
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth)
 tasks.processResources {

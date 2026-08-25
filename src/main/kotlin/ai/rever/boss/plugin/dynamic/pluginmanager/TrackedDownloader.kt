@@ -32,6 +32,17 @@ class TrackedDownloader(
     private val cancelledTransfers = ConcurrentHashMap.newKeySet<String>()
 
     /**
+     * How many operations are reporting each key, so the flag is cleared on the
+     * 0 -> 1 transition only.
+     *
+     * The panel and the update toast can both call `updatePlugin(id)` before the
+     * button goes busy. Clearing unconditionally at entry meant the second start wiped
+     * a Cancel the user had just pressed on the first, and the original download ran to
+     * completion with the row gone.
+     */
+    private val active = ConcurrentHashMap<String, Int>()
+
+    /**
      * Report [key] while [block] runs, and let the user abandon it.
      *
      * The Cancel handed to the reporter raises a flag the read loop checks, which is
@@ -49,12 +60,12 @@ class TrackedDownloader(
         isUpdate: Boolean,
         block: suspend () -> T
     ): T {
-        // Cleared BEFORE the report opens, not only after it closes. onCancel is a
-        // host callback and nothing orders it against the `finally` below, so a
-        // Cancel landing in that window used to leave the key set for good - and the
-        // next install of this plugin died on its first chunk with a cancel nobody
-        // asked for. Starting from a known-clean flag costs one map operation.
-        cancelledTransfers.remove(key)
+        // Cleared BEFORE the report opens, not only after it closes: onCancel is a host
+        // callback and nothing orders it against the `finally` below, so a Cancel
+        // landing in that window used to leave the key set for good and the next
+        // install of this plugin died on its first chunk. Only on the first entry
+        // though - a second concurrent start must not wipe a live cancel.
+        if (active.merge(key, 1, Int::plus) == 1) cancelledTransfers.remove(key)
         val owned = reporter.begin(
             key = key,
             title = displayNames.take(key, displayName),
@@ -69,6 +80,7 @@ class TrackedDownloader(
             // before the button goes busy - and the loser clearing the flag would
             // discard a cancel the user just asked of the download still running,
             // while its `end` would close the report the winner is still filling.
+            active.merge(key, -1) { current, delta -> (current + delta).takeIf { it > 0 } }
             if (owned) {
                 cancelledTransfers.remove(key)
                 reporter.end(key)
@@ -110,8 +122,10 @@ class TrackedDownloader(
                             // has none.
                             //
                             // The half-written file goes with it, here rather than in each
-                            // caller's catch: every path downloads into a `.part` sibling,
-                            // which is inert but accumulates one per cancelled attempt.
+                            // caller's catch. Every path downloads into a sibling the
+                            // directory scan ignores - `.part`, or `.jar.update` for a
+                            // locked plugin - which is inert but accumulates one per
+                            // cancelled attempt.
                             cancelledDest = dest
                             throw DownloadCancelledException()
                         }

@@ -15,6 +15,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Background service that proactively prompts the user (via host toasts) when
@@ -54,6 +55,8 @@ class UpdatePromptService(
     /** Written by [checkAndPrompt] and by the [watchForApplied] collector. */
     @Volatile
     private var activePromptId: String? = null
+
+    private val watching = AtomicBoolean(false)
 
     /**
      * What the prompt on screen is offering: pluginId to the version it named.
@@ -124,6 +127,14 @@ class UpdatePromptService(
         // id and cleared the map - leaving an INDEFINITE toast nothing could retire.
         activePromptId = shown
         promptedVersions = fresh.associate { it.pluginId to it.newVersion }
+
+        // The collector cannot cover the window between showToast returning and the
+        // line above: it saw an empty map, returned, and observeInstalledPlugins has no
+        // reason to emit again - so an update landing in that gap left an INDEFINITE
+        // toast offering a version already installed until the next refresh. Asked once
+        // more here, where the map is finally set.
+        val installedNow = apiImpl.getInstalledPlugins().associate { it.pluginId to it.version }
+        if (promptSatisfied(promptedVersions, installedNow)) dismissPrompt()
     }
 
     /**
@@ -144,6 +155,9 @@ class UpdatePromptService(
      * long as the plugin does.
      */
     fun watchForApplied() {
+        // Once. PluginManagerCore.start() is called once today, so this is a guard
+        // against a future second caller stacking collectors rather than a live bug.
+        if (!watching.compareAndSet(false, true)) return
         scope.launch {
             apiImpl.observeInstalledPlugins().collect { installed ->
                 val offered = promptedVersions

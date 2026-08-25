@@ -1190,6 +1190,11 @@ class PluginManagerAPIImpl(
             return InstallResult.Success(pluginInfo)
 
         } catch (e: Exception) {
+            // Explicit rather than relying on e.message happening to BE the constant:
+            // it does, because DownloadCancelledException carries it, but a future
+            // "Download failed: ${'$'}{e.message}" prefix here would silently turn a
+            // cancel back into an error the buttons report.
+            if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
             return InstallResult.DownloadFailed(e.message ?: "Unknown error")
         }
     }
@@ -1446,6 +1451,10 @@ class PluginManagerAPIImpl(
             // The caller supplies the verb, so naming it here produced "Update failed: Update
             // failed: <msg>". The other DownloadFailed sites in this file still self-prefix;
             // this one was the only outright duplication.
+            //
+            // The cancel is named explicitly rather than left to e.message happening to
+            // BE the constant - which it is, but only by coincidence.
+            if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
             return InstallResult.DownloadFailed(e.message ?: "Unknown error")
         }
     }

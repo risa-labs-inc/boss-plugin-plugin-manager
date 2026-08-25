@@ -24,21 +24,17 @@ data class ActiveDownload(
 
 /**
  * Tracks in-flight plugin downloads (install/update) so UI surfaces — the
- * bottom status-bar item — can show live progress. Owned by the shared
- * PluginManagerAPIImpl, so it covers panel-triggered installs and background
- * update prompts alike.
+ * bottom status-bar item — can show live progress.
+ *
+ * The FALLBACK path only: on a host with a download center, reports go there and
+ * this is never constructed. Names arrive already resolved (see
+ * [DownloadDisplayNames], which is the one hint mechanism) - this used to carry a
+ * second, unreachable copy of that, and two hint maps where one is dead is what
+ * gets "fixed" later by wiring the wrong one.
  */
 class DownloadProgressTracker {
     private val _downloads = MutableStateFlow<Map<String, ActiveDownload>>(emptyMap())
     val downloads: StateFlow<Map<String, ActiveDownload>> = _downloads.asStateFlow()
-
-    /** Friendly names for keys whose operations only know the pluginId. */
-    private val nameHints = MutableStateFlow<Map<String, String>>(emptyMap())
-
-    /** Pre-seed a friendly display name for [key] before its operation starts. */
-    fun hintDisplayName(key: String, displayName: String) {
-        if (displayName.isNotBlank()) nameHints.update { it + (key to displayName) }
-    }
 
     /**
      * Begin tracking [key]. Returns true when this call created the entry —
@@ -52,7 +48,7 @@ class DownloadProgressTracker {
                 m
             } else {
                 created = true
-                m + (key to ActiveDownload(key, nameHints.value[key] ?: displayName, kind))
+                m + (key to ActiveDownload(key, displayName, kind))
             }
         }
         return created
@@ -67,6 +63,5 @@ class DownloadProgressTracker {
 
     fun end(key: String) {
         _downloads.update { it - key }
-        nameHints.update { it - key }
     }
 }

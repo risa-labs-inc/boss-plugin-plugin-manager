@@ -37,9 +37,10 @@ already had, with no dialog and no Cancel, because there is no host surface for 
 
 **Three rules if you touch this:**
 
-1. Never name a 1.0.85 type from `ai.rever.boss.plugin.*`. Verify against the built jar, not
-   by reading: `javap -p -c` every `ai/rever/boss/plugin/**.class` and grep for those five
-   names - the count must be zero.
+1. Never name a 1.0.85 type from `ai.rever.boss.plugin.*`. **`./gradlew verifyNoApiLeak`
+   enforces this** and runs as part of `check`: it scans the constant pool of every contract
+   class in the built jar, so it catches references the compiler synthesised, which a source
+   grep misses. Verified by introducing a leak and watching it fail.
 2. The call into `HostDownloadCenter` is guarded at **both** ends. The inner catch covers the
    property read; the outer `runCatching` in `PluginManagerCore` covers resolving and
    verifying the method itself, whose descriptor names the api types - that error is thrown at

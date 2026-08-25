@@ -162,8 +162,13 @@ data class PluginManagerState(
      * One property rather than a union at each call site - there are five of them,
      * and the one that was missed is exactly how a button comes to offer Install
      * for something already installing.
+     *
+     * `by lazy`, not a `get()`: five call sites read it per recomposition, and a getter
+     * allocated a fresh set for each. One per state instance instead, which is what a
+     * data class recreated on every change wants. Not part of equals, which is correct -
+     * it is derived from two fields that are.
      */
-    val activePlugins: Set<String> get() = busyPlugins + transferringPlugins
+    val activePlugins: Set<String> by lazy { busyPlugins + transferringPlugins }
 
     /**
      * The organisations to offer in the publish picker.
