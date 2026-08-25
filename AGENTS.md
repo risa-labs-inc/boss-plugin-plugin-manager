@@ -13,8 +13,9 @@ Toolbox - self-contained plugin store with install, uninstall, and update capabi
   at 1.0.73). 1.0.85 is `DownloadCenterProvider`: this plugin no longer draws a status-bar
   progress widget of its own, it reports every download to the host's one download center,
   so a host without it would show no progress at all. `minBossVersion` moved with it to
-  9.4.33, the release that renders the center - the api jar alone is not enough, since the
-  bar and its dialog are host UI.
+  9.4.34, the first release that renders the center - the api jar alone is not enough, since
+  the bar and its dialog are host UI. It said 9.4.33 until v9.4.33 was cut without the host
+  half: a floor naming a release that shipped without the feature is the same as no floor.
 
 ## Essential Commands
 
