@@ -8,13 +8,13 @@ Toolbox - self-contained plugin store with install, uninstall, and update capabi
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.pluginmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin`
-- **API Version**: 1.0.73 — `apiVersion` and `minApiVersion` in plugin.json, which is the
-  authority; this line had drifted to 1.0.57 and is now reconciled with it. Verified rather
-  than assumed: `PluginContext.panelRegistry` / `.tabRegistry` (read to resolve "open this
-  plugin" to a real panel or tab) are abstract members of `PluginContext`, and
-  `SupabaseDataProvider` / `PluginContext.supabaseDataProvider` (read by the organisation
-  call to action) go back to the 1.0.36 jar — so a host meeting the declared floor provides
-  all of them.
+- **API Version**: 1.0.85 — `apiVersion` and `minApiVersion` in plugin.json, which is the
+  authority; keep this line reconciled with it (it had drifted to 1.0.57 once, and then sat
+  at 1.0.73). 1.0.85 is `DownloadCenterProvider`: this plugin no longer draws a status-bar
+  progress widget of its own, it reports every download to the host's one download center,
+  so a host without it would show no progress at all. `minBossVersion` moved with it to
+  9.4.33, the release that renders the center - the api jar alone is not enough, since the
+  bar and its dialog are host UI.
 
 ## Essential Commands
 
