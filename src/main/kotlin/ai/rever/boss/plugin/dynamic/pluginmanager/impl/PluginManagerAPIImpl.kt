@@ -5,6 +5,8 @@ import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.api.TransferHandle
 import ai.rever.boss.plugin.api.TransferPhase
+import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
+import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
 import ai.rever.boss.plugin.dynamic.pluginmanager.transferKindFor
@@ -122,6 +124,15 @@ class PluginManagerAPIImpl(
      * fallback cannot close the row its caller is still filling.
      */
     private val activeTransfers = ConcurrentHashMap<String, TransferHandle>()
+
+    /**
+     * Keys the user has asked to abandon, checked by [downloadWithProgress].
+     *
+     * A flag rather than a coroutine cancellation - see [DownloadCancelledException]
+     * for why cancelling the job neither stops the blocking read nor leaves the
+     * buttons in a sane state.
+     */
+    private val cancelledTransfers = ConcurrentHashMap.newKeySet<String>()
 
     fun connectRealtime() = realtimeClient.connect()
 
@@ -730,12 +741,11 @@ class PluginManagerAPIImpl(
         block: suspend () -> T
     ): T {
         val center = downloadCenter ?: return block()
-        val job = currentCoroutineContext()[Job]
         val handle = center.begin(
             id = key,
             title = downloadNames.take(key, displayName),
             kind = transferKindFor(isUpdate),
-            onCancel = { job?.cancel() }
+            onCancel = { cancelledTransfers.add(key) }
         )
         // putIfAbsent, and remove only our own handle: a nested begin must not take
         // the progress channel away from the operation that owns the row.
@@ -744,9 +754,14 @@ class PluginManagerAPIImpl(
             return block()
         } finally {
             activeTransfers.remove(key, handle)
+            cancelledTransfers.remove(key)
             handle.done()
         }
     }
+
+    /** Whether [result] is a transfer the user stopped, rather than one that failed. */
+    private fun isCancelled(result: InstallResult): Boolean =
+        result is InstallResult.DownloadFailed && result.error == DOWNLOAD_CANCELLED
 
     /** Best-effort friendly name when only a pluginId is known. */
     private fun fallbackDisplayName(pluginId: String): String =
@@ -764,29 +779,47 @@ class PluginManagerAPIImpl(
         expectedSize: Long = 0L
     ) {
         val total = connection.contentLengthLong.takeIf { it > 0 } ?: expectedSize
-        dest.outputStream().use { output ->
-            connection.inputStream.use { input ->
-                val buffer = ByteArray(64 * 1024)
-                var copied = 0L
-                var lastPercent = -1
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    copied += read
-                    if (total > 0) {
-                        // Throttle state updates to whole-percent steps
-                        val percent = ((copied * 100) / total).toInt()
-                        if (percent != lastPercent) {
-                            lastPercent = percent
-                            activeTransfers[progressKey]?.progress(copied.toFloat() / total)
+        // Deleted after the streams are closed, never while the output stream is still
+        // open: on Windows the delete would simply fail.
+        var cancelledDest: File? = null
+        try {
+            dest.outputStream().use { output ->
+                connection.inputStream.use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    var copied = 0L
+                    var lastPercent = -1
+                    while (true) {
+                        if (progressKey in cancelledTransfers) {
+                            // Checked per chunk, so Cancel takes effect within one buffer
+                            // rather than at the next suspension point - a blocking read
+                            // has none.
+                            //
+                            // The half-written file goes with it, here rather than in each
+                            // caller's catch: every path downloads into a `.part` sibling,
+                            // which is inert but accumulates one per cancelled attempt.
+                            cancelledDest = dest
+                            throw DownloadCancelledException()
+                        }
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        copied += read
+                        if (total > 0) {
+                            // Throttle state updates to whole-percent steps
+                            val percent = ((copied * 100) / total).toInt()
+                            if (percent != lastPercent) {
+                                lastPercent = percent
+                                activeTransfers[progressKey]?.progress(copied.toFloat() / total)
+                            }
                         }
                     }
                 }
             }
+        } finally {
+            cancelledDest?.let { runCatching { it.delete() } }
         }
-        // The bytes are in; what follows is verifying and loading them. Saying so
-        // is what withdraws the row's Cancel, which from here on could only leave a
+        // The bytes are in; what follows is verifying and loading them. Saying so is
+        // what withdraws the row's Cancel, which from here on could only leave a
         // half-swapped plugin.
         activeTransfers[progressKey]?.phase(TransferPhase.INSTALLING)
     }
@@ -810,7 +843,7 @@ class PluginManagerAPIImpl(
 
         // Try to download directly from plugin store first
         val downloadResult = downloadFromStore(pluginId, null, progressKey)
-        if (downloadResult is InstallResult.Success) {
+        if (downloadResult is InstallResult.Success || isCancelled(downloadResult)) {
             return downloadResult
         }
 
@@ -995,6 +1028,9 @@ class PluginManagerAPIImpl(
             pluginsDir.listFiles { f ->
                 f.isFile && f.name.startsWith(pluginId.replace(".", "_")) && f.name.endsWith(".jar.part")
             }?.forEach { runCatching { it.delete() } }
+            // Unprefixed, so the buttons can tell a cancel from a failure. The cleanup
+            // above is exactly what a cancelled download needs too.
+            if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
             return InstallResult.DownloadFailed("Store download error: ${e.message}")
         }
     }
@@ -1382,7 +1418,9 @@ class PluginManagerAPIImpl(
             is UpdateSource.Github -> installFromGitHubInternal(source.url, progressKey)
             is UpdateSource.Store -> {
                 val store = downloadFromStore(pluginId, null, progressKey)
-                if (store is InstallResult.Success || source.fallbackUrl == null) {
+                // A cancel is not a source that failed: falling through would open a
+                // second connection to fetch the same jar the user just stopped.
+                if (store is InstallResult.Success || isCancelled(store) || source.fallbackUrl == null) {
                     store
                 } else {
                     installFromGitHubInternal(source.fallbackUrl, progressKey)
@@ -1563,6 +1601,7 @@ class PluginManagerAPIImpl(
                 version = "latest"
             ))
         } catch (e: Exception) {
+            if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
             return InstallResult.DownloadFailed("GitHub update failed: ${e.message}")
         }
     }

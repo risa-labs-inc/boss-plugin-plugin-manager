@@ -1,9 +1,11 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.api.TransferKind
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -72,6 +74,25 @@ class DownloadCenterHandoffTest {
         // Every plugin is briefly unloaded during an api hot swap; reading that as
         // "done" would retire a prompt that is still true.
         assertFalse(promptSatisfied(mapOf("a" to "2.0.0"), emptyMap()))
+    }
+
+    @Test
+    fun `a cancelled download is not reported as a failure`() {
+        val cancelled = InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
+
+        // The user pressed Cancel in the download dialog. Reporting "Install failed"
+        // for an answer they gave is the same mistake as reporting a declined
+        // dependent-restart prompt as a fault.
+        assertNull(outcomeErrorFor(cancelled, PluginAction.INSTALL))
+        assertNull(outcomeErrorFor(cancelled, PluginAction.UPDATE))
+        // And it must not count towards the Update All banner either.
+        assertNull(failureReasonFor(cancelled, PluginAction.UPDATE))
+    }
+
+    @Test
+    fun `a download that actually failed still says so`() {
+        val failed = InstallResult.DownloadFailed("HTTP 503")
+        assertEquals("Install failed: HTTP 503", outcomeErrorFor(failed, PluginAction.INSTALL))
     }
 
     @Test

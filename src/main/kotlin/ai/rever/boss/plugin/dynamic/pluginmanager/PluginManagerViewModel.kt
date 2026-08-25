@@ -1706,7 +1706,10 @@ internal fun failureReasonFor(
                 // not happen, which is the exact symptom this change exists to stop hiding.
                 PluginAction.UPDATE -> "version ${result.currentVersion} is still installed"
             }
-        is InstallResult.DownloadFailed -> result.error
+        // A cancel is an answer, not a fault: the user pressed Cancel in the download
+        // dialog. Answered here rather than at each button so the Update All banner
+        // does not count it as a failure either.
+        is InstallResult.DownloadFailed -> result.error.takeIf { it != DOWNLOAD_CANCELLED }
         is InstallResult.LoadFailed -> result.error
         // Not currently produced anywhere - nothing in PluginManagerAPIImpl constructs it, and
         // the IPC gate reports DownloadFailed instead. Handled because the sealed class allows
