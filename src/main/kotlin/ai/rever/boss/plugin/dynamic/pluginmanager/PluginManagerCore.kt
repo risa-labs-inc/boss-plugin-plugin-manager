@@ -26,7 +26,13 @@ class PluginManagerCore(
 ) {
     private val scope = context.pluginScope
 
-    val apiImpl = PluginManagerAPIImpl(scope, loaderDelegate)
+    // Progress for anything this plugin downloads goes to the host's one download
+    // center, which every window's bottom bar renders. Read defensively: this is
+    // the only call that would fail on a host older than the api that introduced
+    // it, and a missing bar must not stop the Toolbox loading.
+    val downloadCenter = runCatching { context.downloadCenterProvider }.getOrNull()
+
+    val apiImpl = PluginManagerAPIImpl(scope, loaderDelegate, downloadCenter)
     val api: PluginManagerAPI get() = apiImpl
 
     private val promptService = UpdatePromptService(
@@ -48,6 +54,10 @@ class PluginManagerCore(
     /** Start realtime + background update detection. Called once from `register()`. */
     fun start() {
         apiImpl.connectRealtime()
+
+        // Retire an update prompt whose update has happened by some other route -
+        // the Toolbox panel, another window, or the host's own prompt.
+        promptService.watchForApplied()
 
         // Startup check
         scope.launch {

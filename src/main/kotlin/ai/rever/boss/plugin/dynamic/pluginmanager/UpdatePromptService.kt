@@ -51,6 +51,18 @@ class UpdatePromptService(
     private var busy = false
     private var activePromptId: String? = null
 
+    /**
+     * What the prompt on screen is offering: pluginId to the version it named.
+     *
+     * The host toast has no dismiss callback and no way to be asked what it is
+     * showing, so the prompt outlived the thing it was about: updating the plugin
+     * from the Toolbox panel, from another window, or from the host's own prompt
+     * left an "update available" toast on screen offering a version that was
+     * already installed. [watchForApplied] retires it.
+     */
+    @Volatile
+    private var promptedVersions: Map<String, String> = emptyMap()
+
     companion object {
         private const val STORAGE_KEY = "updatePrompts"
     }
@@ -82,6 +94,7 @@ class UpdatePromptService(
 
         // Replace any prior prompt still on screen
         activePromptId?.let { notifications.dismiss(it) }
+        promptedVersions = fresh.associate { it.pluginId to it.newVersion }
         activePromptId = if (fresh.size == 1) {
             val u = fresh[0]
             notifications.showToast(
@@ -104,12 +117,41 @@ class UpdatePromptService(
         }
     }
 
+    /**
+     * Retire the prompt once every plugin it named has reached the version it
+     * offered, whoever installed it.
+     *
+     * Watches the installed list rather than this plugin's own update path: the
+     * update can equally come from the Toolbox panel, from the host's "Update
+     * Available" prompt, or from another window, and in all of those the toast
+     * used to stay on screen offering an update that had already happened.
+     *
+     * Started once, from [PluginManagerCore.start]; the collector lives for as
+     * long as the plugin does.
+     */
+    fun watchForApplied() {
+        scope.launch {
+            apiImpl.observeInstalledPlugins().collect { installed ->
+                val offered = promptedVersions
+                if (offered.isEmpty()) return@collect
+                val versions = installed.associate { it.pluginId to it.version }
+                if (promptSatisfied(offered, versions)) dismissPrompt()
+            }
+        }
+    }
+
+    /** Take the current prompt off screen and forget what it was offering. */
+    private fun dismissPrompt() {
+        activePromptId?.let { notifications?.dismiss(it) }
+        activePromptId = null
+        promptedVersions = emptyMap()
+    }
+
     /** Apply the prompted updates; invoked from the toast's action button. */
     private fun performUpdate(targets: List<UpdateInfo>) {
         if (busy) return
         busy = true
-        activePromptId?.let { notifications?.dismiss(it) }
-        activePromptId = null
+        dismissPrompt()
 
         scope.launch {
             try {
@@ -252,3 +294,20 @@ class UpdatePromptService(
         }
     }
 }
+
+/**
+ * Whether a prompt offering [offered] has nothing left to offer, given the
+ * [installed] versions.
+ *
+ * Every plugin it named, not any: an "Update All" toast still has something to
+ * say while one of its plugins is behind, and dismissing on the first one to
+ * land would drop the rest silently.
+ *
+ * An offered plugin that is absent from [installed] counts as not applied -
+ * during an api hot swap every plugin is briefly unloaded, and taking that as
+ * "done" would retire a prompt that is still true.
+ */
+internal fun promptSatisfied(
+    offered: Map<String, String>,
+    installed: Map<String, String>
+): Boolean = offered.isNotEmpty() && offered.all { (pluginId, version) -> installed[pluginId] == version }

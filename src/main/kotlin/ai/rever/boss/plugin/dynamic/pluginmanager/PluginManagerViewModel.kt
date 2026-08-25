@@ -32,6 +32,7 @@ import ai.rever.boss.plugin.api.McpToolRegistry
 import ai.rever.boss.plugin.api.NewTabContext
 import ai.rever.boss.plugin.api.PanelEventProvider
 import ai.rever.boss.plugin.api.PanelId
+import ai.rever.boss.plugin.api.TransferKind
 import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.RoleManagementProvider
 import ai.rever.boss.plugin.api.SplitViewOperations
@@ -67,6 +68,15 @@ data class PluginManagerState(
     val isLoading: Boolean = false,
     /** Per-plugin loading state — tracks which plugins are currently being installed/updated/uninstalled. */
     val busyPlugins: Set<String> = emptySet(),
+    /**
+     * Plugins the HOST reports a transfer for, whoever started it.
+     *
+     * [busyPlugins] only knows what this panel did, so an update started from the
+     * update toast, from another window's Toolbox, or from the host's own
+     * "Update Available" prompt left this panel's button looking idle - and
+     * pressing it then raced the install already running.
+     */
+    val transferringPlugins: Set<String> = emptySet(),
     val searchQuery: String = "",
     /**
      * Organisation slug to narrow every tab to, or null for all of them.
@@ -146,6 +156,16 @@ data class PluginManagerState(
      */
     val openablePlugins: Set<String> = emptySet()
 ) {
+    /**
+     * Every plugin whose buttons should read as busy: what this panel started,
+     * plus what the host reports anyone else is transferring.
+     *
+     * One property rather than a union at each call site - there are five of them,
+     * and the one that was missed is exactly how a button comes to offer Install
+     * for something already installing.
+     */
+    val activePlugins: Set<String> get() = busyPlugins + transferringPlugins
+
     /**
      * The organisations to offer in the publish picker.
      *
@@ -294,6 +314,7 @@ class PluginManagerViewModel(
     private val apiImpl = core.apiImpl
     private val api: PluginManagerAPI = core.api
     private val loaderDelegate = core.loaderDelegate
+    private val downloadCenter = core.downloadCenter
 
     private val _state = MutableStateFlow(PluginManagerState())
     val state: StateFlow<PluginManagerState> = _state.asStateFlow()
@@ -327,6 +348,21 @@ class PluginManagerViewModel(
                 // happened to interleave the other way.
                 _state.update { it.copy(installedPlugins = installedStates) }
                 recomputeOpenablePlugins(installedStates)
+            }
+        }
+
+        // Every transfer the host knows about, so a button is busy for work this panel
+        // did not start. The center is the only place that sees all of them.
+        downloadCenter?.let { center ->
+            scope.launch {
+                center.transfers.collect { transfers ->
+                    val ids =
+                        transfers
+                            .filter { it.kind == TransferKind.PLUGIN_INSTALL || it.kind == TransferKind.PLUGIN_UPDATE }
+                            .map { it.id }
+                            .toSet()
+                    _state.update { it.copy(transferringPlugins = ids) }
+                }
             }
         }
 
@@ -1040,9 +1076,9 @@ class PluginManagerViewModel(
         scope.launch {
             _state.update { it.copy(busyPlugins = it.busyPlugins + pluginId, error = null) }
 
-            // Friendly name for the status-bar progress item (the API only gets the id).
+            // Friendly name for the bottom-bar progress row (the API only gets the id).
             _state.value.availablePlugins.find { it.pluginId == pluginId }?.displayName
-                ?.let { apiImpl.downloadTracker.hintDisplayName(pluginId, it) }
+                ?.let { apiImpl.downloadNames.hint(pluginId, it) }
 
             val result = api.installPlugin(pluginId)
             when (result) {

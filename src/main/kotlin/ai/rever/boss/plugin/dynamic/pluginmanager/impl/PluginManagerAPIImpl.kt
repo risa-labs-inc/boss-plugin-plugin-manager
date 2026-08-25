@@ -1,10 +1,13 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
+import ai.rever.boss.plugin.api.DownloadCenterProvider
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
-import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadKind
-import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadProgressTracker
+import ai.rever.boss.plugin.api.TransferHandle
+import ai.rever.boss.plugin.api.TransferPhase
+import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
+import ai.rever.boss.plugin.dynamic.pluginmanager.transferKindFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.updateSourceFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
@@ -25,6 +28,7 @@ import kotlinx.serialization.json.contentOrNull
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Implementation of PluginManagerAPI.
@@ -46,7 +50,13 @@ import java.net.URL
  */
 class PluginManagerAPIImpl(
     private val scope: CoroutineScope,
-    private val loaderDelegate: PluginLoaderDelegate?
+    private val loaderDelegate: PluginLoaderDelegate?,
+    /**
+     * The host's download center, where every in-flight transfer in the app is
+     * reported so one bottom-bar item can show them all. Null on a host without
+     * one, in which case installs simply run without visible progress.
+     */
+    private val downloadCenter: DownloadCenterProvider? = null
 ) : PluginManagerAPI {
 
     private val json = Json {
@@ -102,7 +112,16 @@ class PluginManagerAPIImpl(
     val storeChanges: SharedFlow<StoreChangeEvent> = realtimeClient.storeChanges
 
     /** Live install/update download progress, surfaced in the host status bar. */
-    val downloadTracker = DownloadProgressTracker()
+    /** Display names for transfers the API only receives an id for. */
+    val downloadNames = DownloadDisplayNames()
+
+    /**
+     * The host transfer for each in-flight key, so [downloadWithProgress] can report
+     * into the row [withDownloadTracking] opened without threading a handle through
+     * every install path. Only the call that created a row removes it, so a nested
+     * fallback cannot close the row its caller is still filling.
+     */
+    private val activeTransfers = ConcurrentHashMap<String, TransferHandle>()
 
     fun connectRealtime() = realtimeClient.connect()
 
@@ -535,8 +554,8 @@ class PluginManagerAPIImpl(
 
     override suspend fun installVersion(pluginId: String, version: String): InstallResult = withContext(Dispatchers.IO) {
         val existing = getInstalledPlugin(pluginId)
-        val kind = if (existing != null) DownloadKind.UPDATE else DownloadKind.INSTALL
-        withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), kind) {
+        val isUpdate = existing != null
+        withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), isUpdate) {
             installVersionInternal(pluginId, version, existing, progressKey = pluginId)
         }
     }
@@ -694,21 +713,38 @@ class PluginManagerAPIImpl(
     // ========================================
 
     /**
-     * Track a download operation for [key] in [downloadTracker] while [block]
-     * runs. Nested operations on the same key reuse the outer entry (begin
-     * returns false), so a fallback path never shows a second status-bar item.
+     * Report [key]'s transfer to the host's download center while [block] runs.
+     *
+     * The row carries a Cancel that cancels this coroutine, which is what abandons
+     * the download - the center withdraws it by itself once the transfer reaches
+     * the installing phase, since a jar swap cannot be stopped safely.
+     *
+     * Nested operations on the same key reuse the outer row (the host's `begin`
+     * hands back a handle whose `done` is a no-op), so a fallback path inside an
+     * install never removes the row its caller is still using.
      */
     private suspend fun <T> withDownloadTracking(
         key: String,
         displayName: String,
-        kind: DownloadKind,
+        isUpdate: Boolean,
         block: suspend () -> T
     ): T {
-        val owned = downloadTracker.begin(key, displayName, kind)
+        val center = downloadCenter ?: return block()
+        val job = currentCoroutineContext()[Job]
+        val handle = center.begin(
+            id = key,
+            title = downloadNames.take(key, displayName),
+            kind = transferKindFor(isUpdate),
+            onCancel = { job?.cancel() }
+        )
+        // putIfAbsent, and remove only our own handle: a nested begin must not take
+        // the progress channel away from the operation that owns the row.
+        activeTransfers.putIfAbsent(key, handle)
         try {
             return block()
         } finally {
-            if (owned) downloadTracker.end(key)
+            activeTransfers.remove(key, handle)
+            handle.done()
         }
     }
 
@@ -717,9 +753,9 @@ class PluginManagerAPIImpl(
         getInstalledPlugin(pluginId)?.displayName ?: pluginId.substringAfterLast('.')
 
     /**
-     * Stream [connection]'s body into [dest], reporting download progress to
-     * [downloadTracker] under [progressKey]. [expectedSize] (from the store's
-     * download info) is the fallback when the response lacks a Content-Length.
+     * Stream [connection]'s body into [dest], reporting progress to the host row
+     * opened for [progressKey]. [expectedSize] (from the store's download info) is
+     * the fallback when the response lacks a Content-Length.
      */
     private fun downloadWithProgress(
         connection: HttpURLConnection,
@@ -743,12 +779,16 @@ class PluginManagerAPIImpl(
                         val percent = ((copied * 100) / total).toInt()
                         if (percent != lastPercent) {
                             lastPercent = percent
-                            downloadTracker.progress(progressKey, copied.toFloat() / total)
+                            activeTransfers[progressKey]?.progress(copied.toFloat() / total)
                         }
                     }
                 }
             }
         }
+        // The bytes are in; what follows is verifying and loading them. Saying so
+        // is what withdraws the row's Cancel, which from here on could only leave a
+        // half-swapped plugin.
+        activeTransfers[progressKey]?.phase(TransferPhase.INSTALLING)
     }
 
     override suspend fun installPlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
@@ -756,7 +796,7 @@ class PluginManagerAPIImpl(
         getInstalledPlugin(pluginId)?.let {
             return@withContext InstallResult.AlreadyInstalled(it.version)
         }
-        withDownloadTracking(pluginId, fallbackDisplayName(pluginId), DownloadKind.INSTALL) {
+        withDownloadTracking(pluginId, fallbackDisplayName(pluginId), isUpdate = false) {
             installPluginInternal(pluginId, progressKey = pluginId)
         }
     }
@@ -1078,7 +1118,7 @@ class PluginManagerAPIImpl(
     override suspend fun installFromGitHub(githubUrl: String): InstallResult = withContext(Dispatchers.IO) {
         val repoName = Regex("""github\.com/[^/]+/([^/]+)""").find(githubUrl)
             ?.groupValues?.get(1)?.removeSuffix(".git")
-        withDownloadTracking(githubUrl, repoName ?: "plugin", DownloadKind.INSTALL) {
+        withDownloadTracking(githubUrl, repoName ?: "plugin", isUpdate = false) {
             installFromGitHubInternal(githubUrl, progressKey = githubUrl)
         }
     }
@@ -1298,7 +1338,7 @@ class PluginManagerAPIImpl(
     override suspend fun updatePlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
         val existing = getInstalledPlugin(pluginId)
             ?: return@withContext InstallResult.DownloadFailed("Plugin not installed: $pluginId")
-        withDownloadTracking(pluginId, existing.displayName, DownloadKind.UPDATE) {
+        withDownloadTracking(pluginId, existing.displayName, isUpdate = true) {
             updatePluginInternal(pluginId, existing, progressKey = pluginId)
         }
     }

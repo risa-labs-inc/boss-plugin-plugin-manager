@@ -1,0 +1,82 @@
+package ai.rever.boss.plugin.dynamic.pluginmanager
+
+import ai.rever.boss.plugin.api.TransferKind
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * What this plugin kept when its own progress widget moved into the host: the
+ * display names it alone knows, the kind mapping, and the two facts about a
+ * button that made the hand-off worth doing.
+ */
+class DownloadCenterHandoffTest {
+    @Test
+    fun `a hinted name is used once and then forgotten`() {
+        val names = DownloadDisplayNames()
+        names.hint("ai.rever.boss.plugin.dynamic.docker", "Docker")
+
+        assertEquals("Docker", names.take("ai.rever.boss.plugin.dynamic.docker", "docker"))
+        // Consumed: the next install of the same id gets whatever that operation
+        // knows, not a name left over from a store row the user has moved on from.
+        assertEquals("docker", names.take("ai.rever.boss.plugin.dynamic.docker", "docker"))
+    }
+
+    @Test
+    fun `an unhinted key falls back to what the caller knows`() {
+        assertEquals("fallback", DownloadDisplayNames().take("nobody", "fallback"))
+    }
+
+    @Test
+    fun `a blank hint is not a name`() {
+        val names = DownloadDisplayNames()
+        names.hint("id", "  ")
+        assertEquals("fallback", names.take("id", "fallback"))
+    }
+
+    @Test
+    fun `an update and an install are different kinds of transfer`() {
+        // The host says "Updating X" or "Installing X" from this alone.
+        assertEquals(TransferKind.PLUGIN_UPDATE, transferKindFor(isUpdate = true))
+        assertEquals(TransferKind.PLUGIN_INSTALL, transferKindFor(isUpdate = false))
+    }
+
+    @Test
+    fun `a button is busy for work this panel did not start`() {
+        val state =
+            PluginManagerState(
+                busyPlugins = setOf("mine"),
+                transferringPlugins = setOf("theirs"),
+            )
+
+        // The bug this fixes: an update started from the toast, from another
+        // window, or from the host's own prompt left this panel's button idle -
+        // and pressing it raced the install already running.
+        assertEquals(setOf("mine", "theirs"), state.activePlugins)
+    }
+
+    @Test
+    fun `a prompt is retired only when every plugin it named has landed`() {
+        val offered = mapOf("a" to "2.0.0", "b" to "3.0.0")
+
+        assertFalse(
+            promptSatisfied(offered, mapOf("a" to "2.0.0", "b" to "2.9.0")),
+            "an Update All toast still has something to offer while one is behind",
+        )
+        assertTrue(promptSatisfied(offered, mapOf("a" to "2.0.0", "b" to "3.0.0")))
+    }
+
+    @Test
+    fun `a plugin that is not loaded right now has not been updated`() {
+        // Every plugin is briefly unloaded during an api hot swap; reading that as
+        // "done" would retire a prompt that is still true.
+        assertFalse(promptSatisfied(mapOf("a" to "2.0.0"), emptyMap()))
+    }
+
+    @Test
+    fun `an empty prompt satisfies nothing`() {
+        // Guards the collector: with no prompt on screen there is nothing to dismiss.
+        assertFalse(promptSatisfied(emptyMap(), mapOf("a" to "2.0.0")))
+    }
+}

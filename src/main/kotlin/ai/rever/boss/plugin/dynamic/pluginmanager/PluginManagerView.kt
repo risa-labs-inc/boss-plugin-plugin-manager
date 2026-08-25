@@ -1462,7 +1462,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onOpenPlugin = { p -> viewModel.openPlugin(p.pluginId, p.url) },
                         openablePlugins = state.openablePlugins,
                         isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins,
+                        busyPlugins = state.activePlugins,
                         // Non-null: reaching this row means the plugin IS installed, whatever
                         // its version string says.
                         onShowVersions = { p -> viewModel.openVersions(p.pluginId, p.displayName, p.version) },
@@ -1503,7 +1503,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         openablePlugins = state.openablePlugins,
                         isStoreAdmin = state.isStoreAdmin,
                         isLoading = state.isLoading,
-                        busyPlugins = state.busyPlugins,
+                        busyPlugins = state.activePlugins,
                         permissionDescriptions = state.permissionDescriptions
                     )
                     PluginManagerTab.UPDATES -> UpdatesTab(
@@ -1521,7 +1521,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                         onOpenPage = { id, slug, orgId, installed ->
                             viewModel.openPluginPage(id, slug, orgId, installed)
                         },
-                        busyPlugins = state.busyPlugins,
+                        busyPlugins = state.activePlugins,
                         provenanceByPluginId = provenanceByPluginId
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
@@ -1576,7 +1576,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
         state.versionSheet?.let { sheet ->
             VersionSheetDialog(
                 sheet = sheet,
-                busy = sheet.pluginId in state.busyPlugins,
+                busy = sheet.pluginId in state.activePlugins,
                 onInstall = { version -> viewModel.installVersion(sheet.pluginId, version) },
                 onDismiss = { viewModel.closeVersions() }
             )
