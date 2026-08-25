@@ -51,6 +51,11 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
         // Start realtime + background update prompts
         core.start()
 
+        // The bar this plugin used to always draw, now only where the host has none
+        // of its own. Guarded: a host old enough to lack the status-bar registry
+        // throws here, and the widget is simply skipped.
+        core.statusBarItem?.let { item -> runCatching { context.registerStatusBarItem(item) } }
+
         // Register the Plugin Manager panel
         context.panelRegistry.registerPanel(PluginManagerPanelInfo) { ctx, panelInfo ->
             PluginManagerComponent(ctx, panelInfo, context, core)
@@ -118,8 +123,14 @@ class PluginManagerDynamicPlugin : DynamicPlugin {
         }.getOrDefault(false)
 
     override fun dispose() {
+        val statusBarItem = core?.statusBarItem
         core?.dispose()
         core = null
+        // Only if we registered one. The host also unregisters on unload; same guard
+        // as registration for a host without the registry.
+        if (statusBarItem != null) {
+            runCatching { pluginContext?.unregisterStatusBarItem(DownloadStatusBarItem.ITEM_ID) }
+        }
         // Unregister panel when plugin is unloaded
         pluginContext?.panelRegistry?.unregisterPanel(PluginManagerPanelInfo.id)
         pluginContext = null

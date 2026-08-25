@@ -1,20 +1,18 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
-import ai.rever.boss.plugin.api.DownloadCenterProvider
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
-import ai.rever.boss.plugin.api.TransferHandle
-import ai.rever.boss.plugin.api.TransferPhase
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
+import ai.rever.boss.plugin.dynamic.pluginmanager.TrackedDownloader
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
-import ai.rever.boss.plugin.dynamic.pluginmanager.transferKindFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.updateSourceFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.StoreChangeEvent
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.withHostClassLoader
+import com.risaboss.toolbox.downloadcenter.TransferReporter
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.postgrest.Postgrest
@@ -54,11 +52,12 @@ class PluginManagerAPIImpl(
     private val scope: CoroutineScope,
     private val loaderDelegate: PluginLoaderDelegate?,
     /**
-     * The host's download center, where every in-flight transfer in the app is
-     * reported so one bottom-bar item can show them all. Null on a host without
-     * one, in which case installs simply run without visible progress.
+     * Where downloads are reported. The host's download center where there is one,
+     * this plugin's own status-bar tracker where there is not; either way this
+     * class only ever sees [TransferReporter], which names no api type - see
+     * `HostDownloadCenter` for why that matters on an older host.
      */
-    private val downloadCenter: DownloadCenterProvider? = null
+    private val reporter: TransferReporter
 ) : PluginManagerAPI {
 
     private val json = Json {
@@ -112,27 +111,6 @@ class PluginManagerAPIImpl(
     // Realtime client for live updates
     val realtimeClient = PluginStoreRealtimeClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     val storeChanges: SharedFlow<StoreChangeEvent> = realtimeClient.storeChanges
-
-    /** Live install/update download progress, surfaced in the host status bar. */
-    /** Display names for transfers the API only receives an id for. */
-    val downloadNames = DownloadDisplayNames()
-
-    /**
-     * The host transfer for each in-flight key, so [downloadWithProgress] can report
-     * into the row [withDownloadTracking] opened without threading a handle through
-     * every install path. Only the call that created a row removes it, so a nested
-     * fallback cannot close the row its caller is still filling.
-     */
-    private val activeTransfers = ConcurrentHashMap<String, TransferHandle>()
-
-    /**
-     * Keys the user has asked to abandon, checked by [downloadWithProgress].
-     *
-     * A flag rather than a coroutine cancellation - see [DownloadCancelledException]
-     * for why cancelling the job neither stops the blocking read nor leaves the
-     * buttons in a sane state.
-     */
-    private val cancelledTransfers = ConcurrentHashMap.newKeySet<String>()
 
     fun connectRealtime() = realtimeClient.connect()
 
@@ -724,40 +702,21 @@ class PluginManagerAPIImpl(
     // ========================================
 
     /**
-     * Report [key]'s transfer to the host's download center while [block] runs.
-     *
-     * The row carries a Cancel that cancels this coroutine, which is what abandons
-     * the download - the center withdraws it by itself once the transfer reaches
-     * the installing phase, since a jar swap cannot be stopped safely.
-     *
-     * Nested operations on the same key reuse the outer row (the host's `begin`
-     * hands back a handle whose `done` is a no-op), so a fallback path inside an
-     * install never removes the row its caller is still using.
+     * Reporting, cancellation and the read loop, in one place that needs no store
+     * client - which is what makes them testable: constructing this class pulls in
+     * Supabase, and the download loop has nothing to do with it.
      */
+    private val downloads = TrackedDownloader(reporter)
+
+    /** Display names for transfers the API only receives an id for. */
+    val downloadNames: DownloadDisplayNames get() = downloads.displayNames
+
     private suspend fun <T> withDownloadTracking(
         key: String,
         displayName: String,
         isUpdate: Boolean,
         block: suspend () -> T
-    ): T {
-        val center = downloadCenter ?: return block()
-        val handle = center.begin(
-            id = key,
-            title = downloadNames.take(key, displayName),
-            kind = transferKindFor(isUpdate),
-            onCancel = { cancelledTransfers.add(key) }
-        )
-        // putIfAbsent, and remove only our own handle: a nested begin must not take
-        // the progress channel away from the operation that owns the row.
-        activeTransfers.putIfAbsent(key, handle)
-        try {
-            return block()
-        } finally {
-            activeTransfers.remove(key, handle)
-            cancelledTransfers.remove(key)
-            handle.done()
-        }
-    }
+    ): T = downloads.tracked(key, displayName, isUpdate, block)
 
     /** Whether [result] is a transfer the user stopped, rather than one that failed. */
     private fun isCancelled(result: InstallResult): Boolean =
@@ -767,62 +726,12 @@ class PluginManagerAPIImpl(
     private fun fallbackDisplayName(pluginId: String): String =
         getInstalledPlugin(pluginId)?.displayName ?: pluginId.substringAfterLast('.')
 
-    /**
-     * Stream [connection]'s body into [dest], reporting progress to the host row
-     * opened for [progressKey]. [expectedSize] (from the store's download info) is
-     * the fallback when the response lacks a Content-Length.
-     */
     private fun downloadWithProgress(
         connection: HttpURLConnection,
         dest: File,
         progressKey: String,
         expectedSize: Long = 0L
-    ) {
-        val total = connection.contentLengthLong.takeIf { it > 0 } ?: expectedSize
-        // Deleted after the streams are closed, never while the output stream is still
-        // open: on Windows the delete would simply fail.
-        var cancelledDest: File? = null
-        try {
-            dest.outputStream().use { output ->
-                connection.inputStream.use { input ->
-                    val buffer = ByteArray(64 * 1024)
-                    var copied = 0L
-                    var lastPercent = -1
-                    while (true) {
-                        if (progressKey in cancelledTransfers) {
-                            // Checked per chunk, so Cancel takes effect within one buffer
-                            // rather than at the next suspension point - a blocking read
-                            // has none.
-                            //
-                            // The half-written file goes with it, here rather than in each
-                            // caller's catch: every path downloads into a `.part` sibling,
-                            // which is inert but accumulates one per cancelled attempt.
-                            cancelledDest = dest
-                            throw DownloadCancelledException()
-                        }
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        output.write(buffer, 0, read)
-                        copied += read
-                        if (total > 0) {
-                            // Throttle state updates to whole-percent steps
-                            val percent = ((copied * 100) / total).toInt()
-                            if (percent != lastPercent) {
-                                lastPercent = percent
-                                activeTransfers[progressKey]?.progress(copied.toFloat() / total)
-                            }
-                        }
-                    }
-                }
-            }
-        } finally {
-            cancelledDest?.let { runCatching { it.delete() } }
-        }
-        // The bytes are in; what follows is verifying and loading them. Saying so is
-        // what withdraws the row's Cancel, which from here on could only leave a
-        // half-swapped plugin.
-        activeTransfers[progressKey]?.phase(TransferPhase.INSTALLING)
-    }
+    ) = downloads.download(connection, dest, progressKey, expectedSize)
 
     override suspend fun installPlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
         // Check if already installed
@@ -2161,16 +2070,32 @@ class PluginManagerAPIImpl(
     // HELPERS
     // ========================================
 
-    private fun isNewerVersion(newVersion: String, currentVersion: String): Boolean {
-        val newParts = newVersion.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
-        val currentParts = currentVersion.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
+    private fun isNewerVersion(newVersion: String, currentVersion: String): Boolean =
+        isVersionNewer(newVersion, currentVersion)
+}
 
-        for (i in 0 until maxOf(newParts.size, currentParts.size)) {
-            val newPart = newParts.getOrElse(i) { 0 }
-            val currentPart = currentParts.getOrElse(i) { 0 }
-            if (newPart > currentPart) return true
-            if (newPart < currentPart) return false
-        }
-        return false
+/**
+ * Whether [newVersion] is strictly newer than [currentVersion], comparing numeric
+ * parts and ignoring a leading `v`.
+ *
+ * Top-level rather than private because the update prompt asks the same question -
+ * "has this plugin reached at least the version the toast offered?" - and two
+ * copies of "newer" would eventually disagree. Non-numeric parts are dropped, so
+ * a prerelease suffix compares equal to its release; that is the behaviour the
+ * store's own update check has always had.
+ */
+internal fun isVersionNewer(
+    newVersion: String,
+    currentVersion: String
+): Boolean {
+    val newParts = newVersion.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
+    val currentParts = currentVersion.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
+
+    for (i in 0 until maxOf(newParts.size, currentParts.size)) {
+        val newPart = newParts.getOrElse(i) { 0 }
+        val currentPart = currentParts.getOrElse(i) { 0 }
+        if (newPart > currentPart) return true
+        if (newPart < currentPart) return false
     }
+    return false
 }

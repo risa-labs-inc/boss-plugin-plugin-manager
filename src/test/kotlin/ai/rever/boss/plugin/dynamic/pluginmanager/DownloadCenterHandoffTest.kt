@@ -1,7 +1,9 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
-import ai.rever.boss.plugin.api.TransferKind
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -38,10 +40,31 @@ class DownloadCenterHandoffTest {
     }
 
     @Test
-    fun `an update and an install are different kinds of transfer`() {
-        // The host says "Updating X" or "Installing X" from this alone.
-        assertEquals(TransferKind.PLUGIN_UPDATE, transferKindFor(isUpdate = true))
-        assertEquals(TransferKind.PLUGIN_INSTALL, transferKindFor(isUpdate = false))
+    fun `the fallback reporter tracks this plugin's own work`() {
+        val tracker = DownloadProgressTracker()
+        val scope = CoroutineScope(Dispatchers.Unconfined)
+        val reporter = LocalTransferReporter(tracker, scope)
+
+        // What a host with no download center gets: the bar this plugin has always
+        // drawn. No Cancel, because there is no click target to put one on.
+        assertTrue(reporter.begin("docker", "Docker", isUpdate = false, onCancel = {}))
+        assertFalse(reporter.begin("docker", "Docker", isUpdate = false, onCancel = {}), "nested begin owns nothing")
+        reporter.progress("docker", 0.5f)
+        assertEquals(0.5f, tracker.downloads.value["docker"]?.progress)
+        assertEquals(setOf("docker"), reporter.busyIds.value)
+
+        reporter.end("docker")
+        assertTrue(reporter.busyIds.value.isEmpty())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a prompt is also satisfied by a newer version than it offered`() {
+        // A toast offering 2.0.0 is just as stale once 2.0.1 is installed from the
+        // panel. Demanding equality left it on screen for the whole session.
+        assertTrue(promptSatisfied(mapOf("a" to "2.0.0"), mapOf("a" to "2.0.1")))
+        assertTrue(promptSatisfied(mapOf("a" to "2.0.0"), mapOf("a" to "2.0.0")))
+        assertFalse(promptSatisfied(mapOf("a" to "2.0.0"), mapOf("a" to "1.9.9")))
     }
 
     @Test

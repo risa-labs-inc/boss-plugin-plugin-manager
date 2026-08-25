@@ -8,6 +8,7 @@ import ai.rever.boss.plugin.api.PluginStorageProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -49,6 +50,9 @@ class UpdatePromptService(
 
     @Volatile
     private var busy = false
+
+    /** Written by [checkAndPrompt] and by the [watchForApplied] collector. */
+    @Volatile
     private var activePromptId: String? = null
 
     /**
@@ -94,8 +98,7 @@ class UpdatePromptService(
 
         // Replace any prior prompt still on screen
         activePromptId?.let { notifications.dismiss(it) }
-        promptedVersions = fresh.associate { it.pluginId to it.newVersion }
-        activePromptId = if (fresh.size == 1) {
+        val shown = if (fresh.size == 1) {
             val u = fresh[0]
             notifications.showToast(
                 message = "${u.displayName} ${u.currentVersion} → ${u.newVersion}",
@@ -115,16 +118,27 @@ class UpdatePromptService(
                 onAction = { performUpdate(fresh) }
             )
         }
+        // Both assigned only once the toast exists, and the id BEFORE what it offers:
+        // the collector reads `promptedVersions` from another coroutine, and seeing a
+        // satisfied map for a prompt that was not on screen yet dismissed the previous
+        // id and cleared the map - leaving an INDEFINITE toast nothing could retire.
+        activePromptId = shown
+        promptedVersions = fresh.associate { it.pluginId to it.newVersion }
     }
 
     /**
      * Retire the prompt once every plugin it named has reached the version it
      * offered, whoever installed it.
      *
-     * Watches the installed list rather than this plugin's own update path: the
-     * update can equally come from the Toolbox panel, from the host's "Update
-     * Available" prompt, or from another window, and in all of those the toast
-     * used to stay on screen offering an update that had already happened.
+     * Watches the installed list rather than this plugin's own update path, so an
+     * update applied from the Toolbox panel or another window retires the toast
+     * too - not only one applied from the toast itself.
+     *
+     * What it does NOT guarantee: the list is this plugin's own view, refreshed by
+     * its install paths and by the startup and store-change hooks in
+     * `PluginManagerCore.start()`. An update performed entirely host-side (the
+     * host's own "Update Available" prompt) is picked up at the next refresh rather
+     * than immediately, so the toast can outlive it briefly.
      *
      * Started once, from [PluginManagerCore.start]; the collector lives for as
      * long as the plugin does.
@@ -310,4 +324,13 @@ class UpdatePromptService(
 internal fun promptSatisfied(
     offered: Map<String, String>,
     installed: Map<String, String>
-): Boolean = offered.isNotEmpty() && offered.all { (pluginId, version) -> installed[pluginId] == version }
+): Boolean =
+    offered.isNotEmpty() &&
+        offered.all { (pluginId, version) ->
+            val current = installed[pluginId] ?: return@all false
+            // At least, not exactly. A toast offering 2.0.0 is just as stale once the
+            // user installs 2.0.1 from the panel, and demanding equality left it on
+            // screen for the session offering a version already passed - the same bug
+            // class this whole path exists to close.
+            current == version || isVersionNewer(current, version)
+        }

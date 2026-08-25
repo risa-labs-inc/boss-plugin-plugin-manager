@@ -8,14 +8,44 @@ Toolbox - self-contained plugin store with install, uninstall, and update capabi
 
 - **Plugin ID**: `ai.rever.boss.plugin.dynamic.pluginmanager`
 - **Main Class**: `ai.rever.boss.plugin.dynamic.pluginmanager.PluginManagerDynamicPlugin`
-- **API Version**: 1.0.85 — `apiVersion` and `minApiVersion` in plugin.json, which is the
-  authority; keep this line reconciled with it (it had drifted to 1.0.57 once, and then sat
-  at 1.0.73). 1.0.85 is `DownloadCenterProvider`: this plugin no longer draws a status-bar
-  progress widget of its own, it reports every download to the host's one download center,
-  so a host without it would show no progress at all. `minBossVersion` moved with it to
-  9.4.34, the first release that renders the center - the api jar alone is not enough, since
-  the bar and its dialog are host UI. It said 9.4.33 until v9.4.33 was cut without the host
-  half: a floor naming a release that shipped without the feature is the same as no floor.
+- **API Version**: built against 1.0.85, but `minApiVersion` is **1.0.73** and
+  `minBossVersion` **9.4.2** - deliberately, so one build runs on every host. `plugin.json`
+  is the authority; keep this line reconciled with it (it had drifted to 1.0.57 once, and
+  then sat at 1.0.73).
+
+## Reporting downloads on a host that may not have a download center
+
+Progress used to be a status-bar widget this plugin owned, which is why a download the
+**host** started showed nothing. api 1.0.85 added `DownloadCenterProvider`, and this plugin
+reports into it - but it must also load on hosts that predate it, so the adoption is shaped
+by two host mechanisms rather than by taste:
+
+- **`BinaryCompatibilityValidator` rejects the WHOLE plugin** if any class under
+  `ai.rever.boss.plugin.*` in the jar names an api class or member the host cannot resolve.
+  Not degrade - refuse. It skips classes outside that package, which is what makes an
+  optional adapter possible at all.
+- **`PluginContext` is host-compiled and served parent-first**, so on an older host
+  `downloadCenterProvider` does not exist and reading it raises `NoSuchMethodError`. A `?:`
+  cannot help; a `catch (LinkageError)` can.
+
+So every reference to `DownloadCenterProvider`, `TransferHandle`, `TransferKind`,
+`TransferPhase` and `TransferInfo` lives in **`com.risaboss.toolbox.downloadcenter`**, outside
+the contract package, and everything in `ai.rever.boss.plugin.dynamic.pluginmanager` talks to
+`TransferReporter`, which names no api type. Two implementations sit behind it: the host
+center, and `LocalTransferReporter` feeding `DownloadStatusBarItem` - the bar older hosts
+already had, with no dialog and no Cancel, because there is no host surface for them.
+
+**Three rules if you touch this:**
+
+1. Never name a 1.0.85 type from `ai.rever.boss.plugin.*`. Verify against the built jar, not
+   by reading: `javap -p -c` every `ai/rever/boss/plugin/**.class` and grep for those five
+   names - the count must be zero.
+2. The call into `HostDownloadCenter` is guarded at **both** ends. The inner catch covers the
+   property read; the outer `runCatching` in `PluginManagerCore` covers resolving and
+   verifying the method itself, whose descriptor names the api types - that error is thrown at
+   the call site, where a catch inside the method can never see it.
+3. Register `DownloadStatusBarItem` only when `HostDownloadCenter` returned null. Two bars for
+   one download is the alternative.
 
 ## Essential Commands
 

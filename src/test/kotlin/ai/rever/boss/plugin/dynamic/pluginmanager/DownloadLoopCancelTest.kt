@@ -1,0 +1,153 @@
+package ai.rever.boss.plugin.dynamic.pluginmanager
+
+import com.risaboss.toolbox.downloadcenter.TransferReporter
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import org.junit.jupiter.api.io.TempDir
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * The read loop, which is where cancelling actually happens.
+ *
+ * Cancel could not be a coroutine cancellation here: `InputStream.read` does not
+ * observe one, so the file kept downloading, and when the cancellation did surface
+ * it surfaced through call sites that clear their busy flag AFTER the call. So the
+ * loop checks a flag per chunk - and everything about that is worth pinning,
+ * because none of it is visible from the outcome types alone.
+ */
+class DownloadLoopCancelTest {
+    @TempDir
+    lateinit var dir: File
+
+    /** Records what the loop reported, and can cancel from inside it. */
+    private class FakeReporter : TransferReporter {
+        override val busyIds: StateFlow<Set<String>> = MutableStateFlow(emptySet())
+
+        val phases = mutableListOf<String>()
+        var progressCalls = 0
+
+        /** Invoked on every progress report, so a test can cancel mid-stream. */
+        var onProgress: (() -> Unit)? = null
+        var cancelAction: (() -> Unit)? = null
+
+        override fun begin(
+            key: String,
+            title: String,
+            isUpdate: Boolean,
+            onCancel: () -> Unit,
+        ): Boolean {
+            cancelAction = onCancel
+            return true
+        }
+
+        override fun progress(
+            key: String,
+            fraction: Float,
+        ) {
+            progressCalls++
+            onProgress?.invoke()
+        }
+
+        override fun downloading(key: String) {
+            phases += "downloading"
+        }
+
+        override fun installing(key: String) {
+            phases += "installing"
+        }
+
+        override fun end(key: String) {
+            phases += "end"
+        }
+    }
+
+    /** A connection that serves [bytes] and reports their length, nothing more. */
+    private class FakeConnection(
+        private val bytes: ByteArray,
+    ) : HttpURLConnection(URL("https://example.invalid/plugin.jar")) {
+        override fun connect() = Unit
+
+        override fun disconnect() = Unit
+
+        override fun usingProxy() = false
+
+        override fun getContentLengthLong(): Long = bytes.size.toLong()
+
+        override fun getInputStream(): InputStream = ByteArrayInputStream(bytes)
+    }
+
+    private fun downloader(reporter: TransferReporter) = TrackedDownloader(reporter)
+
+    /** Big enough to span several 64 KiB chunks, so a mid-stream cancel is reachable. */
+    private fun payload(chunks: Int) = ByteArray(64 * 1024 * chunks) { it.toByte() }
+
+    @Test
+    fun `a completed download announces downloading then installing`() {
+        val reporter = FakeReporter()
+        val dest = File(dir, "plugin.jar.part")
+
+        downloader(reporter).download(FakeConnection(payload(2)), dest, "docker")
+        assertTrue(reporter.progressCalls > 0, "a sized download reports a fraction")
+
+        // Downloading is announced for EVERY attempt, so a fallback source after a
+        // failed one is not streamed into a report still marked installing.
+        assertEquals(listOf("downloading", "installing"), reporter.phases)
+        assertTrue(dest.exists())
+        assertEquals(64 * 1024 * 2, dest.length().toInt())
+    }
+
+    @Test
+    fun `a cancel mid-stream stops the loop and deletes the part file`() =
+        runBlocking {
+            val reporter = FakeReporter()
+            val dest = File(dir, "plugin.jar.part")
+            // Raise the flag from inside the loop, which is what the host's Cancel does.
+            reporter.onProgress = { reporter.cancelAction?.invoke() }
+            val downloader = downloader(reporter)
+
+            var thrown: Throwable? = null
+            try {
+                downloader.tracked("docker", "Docker", isUpdate = false) {
+                    downloader.download(FakeConnection(payload(4)), dest, "docker")
+                }
+            } catch (e: DownloadCancelledException) {
+                thrown = e
+            }
+
+            assertTrue(thrown != null, "the loop must stop rather than finish the file")
+            assertEquals(DOWNLOAD_CANCELLED, thrown?.message, "the message is what silences the error banner")
+            assertFalse(dest.exists(), "a part file per cancelled attempt would accumulate silently")
+            assertFalse(reporter.phases.contains("installing"), "nothing was installed")
+            // The report is closed even on the way out, or the row would never leave.
+            assertTrue(reporter.phases.contains("end"))
+        }
+
+    @Test
+    fun `a flag left over from a previous transfer does not kill the next one`() =
+        runBlocking {
+            val reporter = FakeReporter()
+            val downloader = downloader(reporter)
+
+            // A Cancel landing after the previous transfer's finally had run used to
+            // leave the key set for good, and the next install of that plugin died on
+            // its first chunk with a cancel nobody asked for.
+            downloader.tracked("docker", "Docker", isUpdate = false) { }
+            reporter.cancelAction?.invoke()
+
+            val dest = File(dir, "plugin.jar.part")
+            downloader.tracked("docker", "Docker", isUpdate = false) {
+                downloader.download(FakeConnection(payload(1)), dest, "docker")
+            }
+
+            assertTrue(dest.exists(), "the flag must be cleared when a transfer starts, not only when it ends")
+        }
+}

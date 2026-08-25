@@ -32,7 +32,6 @@ import ai.rever.boss.plugin.api.McpToolRegistry
 import ai.rever.boss.plugin.api.NewTabContext
 import ai.rever.boss.plugin.api.PanelEventProvider
 import ai.rever.boss.plugin.api.PanelId
-import ai.rever.boss.plugin.api.TransferKind
 import ai.rever.boss.plugin.api.PanelRegistry
 import ai.rever.boss.plugin.api.RoleManagementProvider
 import ai.rever.boss.plugin.api.SplitViewOperations
@@ -314,7 +313,7 @@ class PluginManagerViewModel(
     private val apiImpl = core.apiImpl
     private val api: PluginManagerAPI = core.api
     private val loaderDelegate = core.loaderDelegate
-    private val downloadCenter = core.downloadCenter
+    private val transferReporter = core.reporter
 
     private val _state = MutableStateFlow(PluginManagerState())
     val state: StateFlow<PluginManagerState> = _state.asStateFlow()
@@ -351,18 +350,13 @@ class PluginManagerViewModel(
             }
         }
 
-        // Every transfer the host knows about, so a button is busy for work this panel
-        // did not start. The center is the only place that sees all of them.
-        downloadCenter?.let { center ->
-            scope.launch {
-                center.transfers.collect { transfers ->
-                    val ids =
-                        transfers
-                            .filter { it.kind == TransferKind.PLUGIN_INSTALL || it.kind == TransferKind.PLUGIN_UPDATE }
-                            .map { it.id }
-                            .toSet()
-                    _state.update { it.copy(transferringPlugins = ids) }
-                }
+        // Every transfer the reporter knows about, so a button is busy for work this
+        // panel did not start. Host-wide where the host has a download center; this
+        // plugin's own work on a host that has not got one, which is the most it can
+        // know there.
+        scope.launch {
+            transferReporter.busyIds.collect { ids ->
+                _state.update { it.copy(transferringPlugins = ids) }
             }
         }
 

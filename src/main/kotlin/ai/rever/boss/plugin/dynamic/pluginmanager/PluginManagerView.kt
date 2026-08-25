@@ -1522,6 +1522,7 @@ fun PluginManagerView(viewModel: PluginManagerViewModel) {
                             viewModel.openPluginPage(id, slug, orgId, installed)
                         },
                         busyPlugins = state.activePlugins,
+                        ownBusyPlugins = state.busyPlugins,
                         provenanceByPluginId = provenanceByPluginId
                     )
                     PluginManagerTab.MCP -> McpToolsTab(viewModel)
@@ -2703,6 +2704,15 @@ private fun UpdatesTab(
     isLoading: Boolean,
     busyPlugins: Set<String> = emptySet(),
     /**
+     * What THIS panel started, for the batch button alone.
+     *
+     * Separate from [busyPlugins], which is host-wide: a row must read busy for an
+     * update someone else is running, but greying out Update All because an
+     * unrelated plugin is installing elsewhere - or because a GitHub-URL install
+     * keyed by its URL is in flight - stops a batch that has nothing to do with it.
+     */
+    ownBusyPlugins: Set<String> = emptySet(),
+    /**
      * Owning organisation slug per plugin id, from the store catalogue.
      *
      * Passed in rather than derived here so all three tabs read ONE map built once from
@@ -2750,7 +2760,7 @@ private fun UpdatesTab(
                     BossPrimaryButton(
                         text = "Update All (${updates.size})",
                         onClick = onUpdateAll,
-                        enabled = busyPlugins.isEmpty() && !isLoading
+                        enabled = ownBusyPlugins.isEmpty() && !isLoading
                     )
                 }
             }
