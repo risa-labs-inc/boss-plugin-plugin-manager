@@ -55,6 +55,8 @@ class HostCenterReporterTest {
 
                 override fun phase(phase: TransferPhase) = Unit
 
+                override fun detail(text: String?) = Unit
+
                 override fun done() {
                     if (owns) {
                         done += id
