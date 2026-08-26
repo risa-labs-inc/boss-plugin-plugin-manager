@@ -48,6 +48,14 @@ already had, with no dialog and no Cancel, because there is no host surface for 
 3. Register `DownloadStatusBarItem` only when `HostDownloadCenter` returned null. Two bars for
    one download is the alternative.
 
+**`apiVersion` in plugin.json is compared, and the fallback survives it only by convention.**
+`DynamicPluginLoader.isApiVersionCompatible` checks the manifest's `apiVersion` against the api
+jar's frozen `PluginManifestConstants.CURRENT_API_VERSION` (`1.0.18` - a manifest SCHEMA version,
+not an api release), and it parses only (major, minor): `1.0.85` and `1.0.18` are both `(1, 0)`, so
+the patch component is ignored and the check passes on every host. Declaring `apiVersion: 1.1.x`
+would be refused everywhere - so if the api ever moves off `1.0.x`, this plugin's `apiVersion` line
+cannot follow it without giving up the older hosts this whole arrangement exists for.
+
 ## Essential Commands
 
 ```bash
