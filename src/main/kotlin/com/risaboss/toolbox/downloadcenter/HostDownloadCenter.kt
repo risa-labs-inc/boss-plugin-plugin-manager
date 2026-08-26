@@ -58,12 +58,16 @@ object HostDownloadCenter {
  * Forwards this plugin's reports to the host center, and reads back which
  * plugins the host says are busy.
  *
+ * Internal rather than private so a test can drive it with a fake provider: reaching
+ * it through [HostDownloadCenter.createOrNull] would mean standing up a whole
+ * PluginContext for a class that only wants one of its properties.
+ *
  * Ownership is decided HERE rather than taken from the host: `begin` hands back a
  * handle either way, and the plugin needs to know whether it created the row so
  * that only the owner ends it. `putIfAbsent` answers that locally, which also
  * means a nested call cannot take the progress channel from the call that owns it.
  */
-private class HostCenterReporter(
+internal class HostCenterReporter(
     private val provider: ai.rever.boss.plugin.api.DownloadCenterProvider,
     scope: CoroutineScope,
 ) : TransferReporter {
@@ -78,6 +82,14 @@ private class HostCenterReporter(
                     .toSet()
             }.stateIn(scope, SharingStarted.Eagerly, emptySet())
 
+    /**
+     * NOTE: `provider.begin` runs inside `computeIfAbsent`, so it must not re-enter
+     * this reporter for the same key on the calling thread - `ConcurrentHashMap`
+     * documents that a mapping function must not update the same map, and the failure
+     * would be a deadlock rather than something visible. It does not today (the host
+     * publishes into a StateFlow that nothing here collects synchronously); a listener
+     * added later that calls back into `begin`/`end` would.
+     */
     override fun begin(
         key: String,
         title: String,

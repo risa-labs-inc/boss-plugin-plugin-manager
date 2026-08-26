@@ -66,12 +66,18 @@ class TrackedDownloader(
         // install of this plugin died on its first chunk. Only on the first entry
         // though - a second concurrent start must not wipe a live cancel.
         if (active.merge(key, 1, Int::plus) == 1) cancelledTransfers.remove(key)
+        // The hint is consumed only by the call that opens the report. Evaluated as an
+        // argument, whichever call arrived first ate it - even when it lost ownership
+        // and its title was discarded, leaving the owner's row showing the raw
+        // fallback. `take` says "consumes"; this is what that has to mean.
         val owned = reporter.begin(
             key = key,
-            title = displayNames.take(key, displayName),
+            title = displayNames.peek(key) ?: displayName,
             isUpdate = isUpdate,
             onCancel = { cancelledTransfers.add(key) }
         )
+        // Consumed only by the call that opened the report.
+        if (owned) displayNames.take(key, displayName)
         try {
             return block()
         } finally {
@@ -80,8 +86,14 @@ class TrackedDownloader(
             // before the button goes busy - and the loser clearing the flag would
             // discard a cancel the user just asked of the download still running,
             // while its `end` would close the report the winner is still filling.
-            active.merge(key, -1) { current, delta -> (current + delta).takeIf { it > 0 } }
-            if (owned) {
+            // The LAST one out closes the report, not the owner. The owner finishing
+            // first while a joiner is still streaming used to end the row - leaving a
+            // live download with no bar and no Cancel - and clear a cancel the user may
+            // have just pressed for it. `owned` now decides only who called begin,
+            // which is all it should ever have meant; `end` is keyed and idempotent, so
+            // a non-owner calling it is fine.
+            val remaining = active.merge(key, -1) { current, delta -> (current + delta).takeIf { it > 0 } }
+            if (remaining == null) {
                 cancelledTransfers.remove(key)
                 reporter.end(key)
             }

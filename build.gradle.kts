@@ -176,6 +176,10 @@ tasks.register<Jar>("buildPluginJar") {
 // greps miss a reference the compiler synthesises (a lambda's captured type, a
 // property's descriptor) and flag a comment that mentions the name.
 // ============================================================================
+// EVERY api declaration newer than the manifest's minApiVersion / minBossVersion
+// belongs in this list. It is hand-maintained, so a missing entry fails silently -
+// which is the exact failure the task exists to prevent. Adding a use of a newer api
+// declaration means adding it here in the same change.
 val gatedApiTypes =
     listOf(
         "ai/rever/boss/plugin/api/DownloadCenterProvider",

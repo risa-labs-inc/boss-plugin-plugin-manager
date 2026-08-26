@@ -23,4 +23,7 @@ class DownloadDisplayNames {
 
     /** The hinted name for [key], or [fallback]. Consumes the hint. */
     fun take(key: String, fallback: String): String = hints.remove(key) ?: fallback
+
+    /** The hinted name for [key] without consuming it, or null. */
+    fun peek(key: String): String? = hints[key]
 }

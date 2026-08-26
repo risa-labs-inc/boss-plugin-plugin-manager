@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
+import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.TrackedDownloader
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
@@ -719,8 +720,7 @@ class PluginManagerAPIImpl(
     ): T = downloads.tracked(key, displayName, isUpdate, block)
 
     /** Whether [result] is a transfer the user stopped, rather than one that failed. */
-    private fun isCancelled(result: InstallResult): Boolean =
-        result is InstallResult.DownloadFailed && result.error == DOWNLOAD_CANCELLED
+    private fun isCancelled(result: InstallResult): Boolean = result.wasCancelled()
 
     /** Best-effort friendly name when only a pluginId is known. */
     private fun fallbackDisplayName(pluginId: String): String =

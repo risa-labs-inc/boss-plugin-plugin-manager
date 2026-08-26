@@ -132,6 +132,51 @@ class DownloadLoopCancelTest {
         }
 
     @Test
+    fun `the report outlives whichever operation finishes first`() =
+        runBlocking {
+            val reporter = FakeReporter()
+            val downloader = downloader(reporter)
+
+            // Two operations on one key are reachable - the panel and the update toast
+            // can both call updatePlugin before the button goes busy. The OWNER
+            // finishing first used to end the report under the joiner, leaving a live
+            // download with no bar and no Cancel.
+            var joinerRan = false
+            downloader.tracked("docker", "Docker", isUpdate = false) {
+                downloader.tracked("docker", "Docker", isUpdate = false) {
+                    joinerRan = true
+                }
+                assertFalse(reporter.phases.contains("end"), "the joiner leaving must not close the report")
+            }
+
+            assertTrue(joinerRan)
+            assertTrue(reporter.phases.contains("end"), "the last one out closes it")
+        }
+
+    @Test
+    fun `a cancel raised while two operations share a key survives the first exit`() =
+        runBlocking {
+            val reporter = FakeReporter()
+            val downloader = downloader(reporter)
+            val dest = File(dir, "plugin.jar.part")
+
+            downloader.tracked("docker", "Docker", isUpdate = false) {
+                // A nested attempt exits, and the user cancels. Clearing the flag on
+                // that exit discarded a cancel meant for the download still running.
+                downloader.tracked("docker", "Docker", isUpdate = false) { }
+                reporter.cancelAction?.invoke()
+
+                var thrown: Throwable? = null
+                try {
+                    downloader.download(FakeConnection(payload(4)), dest, "docker")
+                } catch (e: DownloadCancelledException) {
+                    thrown = e
+                }
+                assertTrue(thrown != null, "the cancel must still stop the download")
+            }
+        }
+
+    @Test
     fun `a flag left over from a previous transfer does not kill the next one`() =
         runBlocking {
             val reporter = FakeReporter()

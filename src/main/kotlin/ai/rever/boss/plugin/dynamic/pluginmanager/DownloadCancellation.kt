@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
+
 /**
  * What a cancelled download reports.
  *
@@ -22,3 +24,13 @@ const val DOWNLOAD_CANCELLED = "Download cancelled"
 
 /** Thrown out of the read loop when the user cancels the transfer. */
 class DownloadCancelledException : Exception(DOWNLOAD_CANCELLED)
+
+/**
+ * Whether this outcome is the user stopping the transfer rather than a fault.
+ *
+ * Next to the constant, and public to the package, because three places have to
+ * agree: the store path that must not fall through to GitHub after a cancel, the
+ * buttons' error text, and the update toast. The toast was the one that did not,
+ * and it is the path where the host dialog's Cancel is actually reachable.
+ */
+internal fun InstallResult.wasCancelled(): Boolean = this is InstallResult.DownloadFailed && error == DOWNLOAD_CANCELLED
