@@ -51,7 +51,7 @@ internal fun loadableUpdates(
         val current = installedVersions[row.pluginId] ?: return@forEach
         // Newness first: a version that is not newer is not an update whatever its floor, and
         // reporting it as "blocked" would invent a problem the user does not have.
-        if (!isNewerVersion(latest, current)) return@forEach
+        if (!isVersionNewer(latest, current)) return@forEach
         // The floor fails OPEN: a blank column or a host that does not publish its version leaves
         // the update offered, exactly as before. This narrows what is offered, it does not make
         // offering conditional on new data being present.
@@ -62,26 +62,4 @@ internal fun loadableUpdates(
         }
     }
     return UpdateCandidates(loadable = loadable, blockedByHost = blocked)
-}
-
-/**
- * Whether [newVersion] sorts above [currentVersion], comparing segment by segment as integers.
- *
- * Moved off `PluginManagerAPIImpl` unchanged, so [loadableUpdates] and its tests use the same
- * comparison the update check has always used rather than a second copy that could drift.
- */
-internal fun isNewerVersion(
-    newVersion: String,
-    currentVersion: String,
-): Boolean {
-    val newParts = newVersion.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
-    val currentParts = currentVersion.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
-
-    for (i in 0 until maxOf(newParts.size, currentParts.size)) {
-        val newPart = newParts.getOrElse(i) { 0 }
-        val currentPart = currentParts.getOrElse(i) { 0 }
-        if (newPart > currentPart) return true
-        if (newPart < currentPart) return false
-    }
-    return false
 }
