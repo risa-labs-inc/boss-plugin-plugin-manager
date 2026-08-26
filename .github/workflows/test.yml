@@ -52,8 +52,14 @@ jobs:
       # buildPluginJar is where this repo's packaged-jar assertions live (plugin.json stamped
       # with the Gradle version). Running it here rather than only in the release workflow means
       # a stamping regression is a red PR instead of a red release.
-      - name: Build the plugin jar (runs the packaged-bytecode guards)
-        run: ./gradlew buildPluginJar --no-daemon
+      #
+      # verifyNoApiLeak is named EXPLICITLY, and that is the whole point: it is wired into
+      # `check`, and nothing in this workflow runs `check` - `test` and `buildPluginJar` are
+      # both narrower. So the guard that keeps this plugin loadable on a host without api
+      # 1.0.85 was passing locally and not running here at all, which is the worst shape a
+      # guard can have. It depends on buildPluginJar, so this costs one task, not one build.
+      - name: Build the plugin jar (runs the packaged-bytecode and api-leak guards)
+        run: ./gradlew buildPluginJar verifyNoApiLeak --no-daemon
 
       - name: Upload test report on failure
         if: failure()

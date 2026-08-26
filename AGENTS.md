@@ -38,9 +38,14 @@ already had, with no dialog and no Cancel, because there is no host surface for 
 **Three rules if you touch this:**
 
 1. Never name a 1.0.85 type from `ai.rever.boss.plugin.*`. **`./gradlew verifyNoApiLeak`
-   enforces this** and runs as part of `check`: it scans the constant pool of every contract
-   class in the built jar, so it catches references the compiler synthesised, which a source
-   grep misses. Verified by introducing a leak and watching it fail.
+   enforces this**: it scans the constant pool of every contract class in the built jar, so it
+   catches references the compiler synthesised, which a source grep misses. Verified by
+   introducing a leak and watching it fail.
+
+   It is wired into `check` **and named explicitly in `test.yml`**, because nothing in CI runs
+   `check` - the workflow runs `test` and `buildPluginJar`, both narrower. Wiring it only into
+   `check` left it green locally and never executed on a pull request. If you add a guard here,
+   check which task CI actually invokes rather than which lifecycle task it hangs off.
 2. The call into `HostDownloadCenter` is guarded at **both** ends. The inner catch covers the
    property read; the outer `runCatching` in `PluginManagerCore` covers resolving and
    verifying the method itself, whose descriptor names the api types - that error is thrown at

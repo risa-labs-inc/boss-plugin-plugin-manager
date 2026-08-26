@@ -227,7 +227,7 @@ val verifyNoApiLeak =
             check(checked > 0) { "No contract classes found in the jar - this check would pass vacuously" }
             check(offenders.isEmpty()) {
                 "These contract classes name a gated api declaration, so this plugin would be REJECTED " +
-                    "on any host without api 1.0.85 / BOSS 9.4.34. Move the reference into " +
+                    "on any host without api 1.0.85 / BOSS 9.4.35. Move the reference into " +
                     "com.risaboss.toolbox.downloadcenter:\n" + offenders.joinToString("\n") { "  $it" }
             }
             logger.lifecycle("verifyNoApiLeak: $checked contract classes, none naming a gated api declaration")
