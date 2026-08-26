@@ -60,25 +60,35 @@ class TrackedDownloader(
         isUpdate: Boolean,
         block: suspend () -> T
     ): T {
-        // Cleared BEFORE the report opens, not only after it closes: onCancel is a host
-        // callback and nothing orders it against the `finally` below, so a Cancel
-        // landing in that window used to leave the key set for good and the next
-        // install of this plugin died on its first chunk. Only on the first entry
-        // though - a second concurrent start must not wipe a live cancel.
-        if (active.merge(key, 1, Int::plus) == 1) cancelledTransfers.remove(key)
-        // The hint is consumed only by the call that opens the report. Evaluated as an
-        // argument, whichever call arrived first ate it - even when it lost ownership
-        // and its title was discarded, leaving the owner's row showing the raw
-        // fallback. `take` says "consumes"; this is what that has to mean.
-        val owned = reporter.begin(
-            key = key,
-            title = displayNames.peek(key) ?: displayName,
-            isUpdate = isUpdate,
-            onCancel = { cancelledTransfers.add(key) }
-        )
-        // Consumed only by the call that opened the report.
-        if (owned) displayNames.take(key, displayName)
+        // The refcount is taken FIRST and nothing else sits outside the try, because the
+        // `finally` below is the only thing that gives it back. `reporter.begin` used to
+        // be out here, and it is host code - `HostCenterReporter` calls straight into
+        // `DownloadCenterProvider.begin` inside a `computeIfAbsent` - so a throw from it
+        // stranded this key above zero for the rest of the session. Two things then
+        // stayed broken and neither announced itself: the 0 -> 1 branch never ran again,
+        // so a stale cancel flag was never cleared and the NEXT install of this plugin
+        // died on its first chunk with a Cancel nobody pressed; and `reporter.end` never
+        // ran, so the row and the busy button outlived the download.
+        val first = active.merge(key, 1, Int::plus) == 1
         try {
+            // Cleared BEFORE the report opens, not only after it closes: onCancel is a
+            // host callback and nothing orders it against the `finally` below, so a
+            // Cancel landing in that window used to leave the key set for good and the
+            // next install of this plugin died on its first chunk. Only on the first
+            // entry though - a second concurrent start must not wipe a live cancel.
+            if (first) cancelledTransfers.remove(key)
+            // The hint is consumed only by the call that opens the report. Evaluated as
+            // an argument, whichever call arrived first ate it - even when it lost
+            // ownership and its title was discarded, leaving the owner's row showing the
+            // raw fallback. `take` says "consumes"; this is what that has to mean.
+            val owned = reporter.begin(
+                key = key,
+                title = displayNames.peek(key) ?: displayName,
+                isUpdate = isUpdate,
+                onCancel = { cancelledTransfers.add(key) }
+            )
+            // Consumed only by the call that opened the report.
+            if (owned) displayNames.take(key, displayName)
             return block()
         } finally {
             // Only the owner cleans up. Two concurrent operations on one key are

@@ -39,13 +39,27 @@ class DownloadLoopCancelTest {
         var onProgress: (() -> Unit)? = null
         var cancelAction: (() -> Unit)? = null
 
+        /**
+         * Make the next `begin` throw, standing in for the host.
+         *
+         * `HostCenterReporter.begin` calls into `DownloadCenterProvider.begin` inside a
+         * `computeIfAbsent`, so this is host code and a throw is reachable.
+         */
+        var failNextBegin = false
+
         override fun begin(
             key: String,
             title: String,
             isUpdate: Boolean,
             onCancel: () -> Unit,
         ): Boolean {
+            // Captured BEFORE the throw: a host that registered the action and then
+            // failed is the harder case, because a Cancel can already arrive.
             cancelAction = onCancel
+            if (failNextBegin) {
+                failNextBegin = false
+                error("the host failed to open the report")
+            }
             return true
         }
 
@@ -194,5 +208,34 @@ class DownloadLoopCancelTest {
             }
 
             assertTrue(dest.exists(), "the flag must be cleared when a transfer starts, not only when it ends")
+        }
+
+    @Test
+    fun `a begin that throws still gives the refcount back`() =
+        runBlocking {
+            val reporter = FakeReporter()
+            val downloader = downloader(reporter)
+
+            reporter.failNextBegin = true
+            val thrown =
+                runCatching {
+                    downloader.tracked("docker", "Docker", isUpdate = false) { }
+                }.exceptionOrNull()
+            assertTrue(thrown is IllegalStateException, "the failure must surface, not be swallowed")
+
+            // `begin` used to be called OUTSIDE the try, so a throw from it skipped the
+            // finally entirely: the report was never closed and the key never came back
+            // down. Nothing announced either - the button just stayed busy.
+            assertEquals(listOf("end"), reporter.phases, "the finally must run even when begin failed")
+
+            // And the key really is back to zero, not merely reported as such: a Cancel
+            // landing after that failed attempt has to be cleared by the next transfer,
+            // which only happens on the 0 -> 1 transition.
+            reporter.cancelAction?.invoke()
+            val dest = File(dir, "plugin.jar.part")
+            downloader.tracked("docker", "Docker", isUpdate = false) {
+                downloader.download(FakeConnection(payload(1)), dest, "docker")
+            }
+            assertTrue(dest.exists(), "a stranded refcount would leave the next install dying on its first chunk")
         }
 }
