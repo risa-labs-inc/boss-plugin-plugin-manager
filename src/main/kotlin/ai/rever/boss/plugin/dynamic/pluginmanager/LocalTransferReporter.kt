@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.stateIn
  * What this plugin reports into on a host with no download center: its own
  * tracker, rendered by [DownloadStatusBarItem].
  *
- * This is the path every host before 9.4.34 takes, and it is the behaviour those
+ * This is the path every host before 9.4.35 takes, and it is the behaviour those
  * users already have - a progress bar in the status bar, with no dialog and no
  * Cancel behind it, because there is no host surface to put them on. Keeping it
  * is the difference between "this build shows less on an older host" and "this

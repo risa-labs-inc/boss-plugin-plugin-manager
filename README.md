@@ -9,7 +9,7 @@ bootstrap keep working. Expect both names when reading the code.
 ## What it does
 
 - **Browse and install** from the plugin store, with search and a live progress bar in the
-  status bar at the bottom of the window. On BOSS 9.4.34 and later that bar is the host's,
+  status bar at the bottom of the window. On BOSS 9.4.35 and later that bar is the host's,
   shared with every other transfer in the app: clicking it opens a dialog with Cancel, and an
   install started from a toast or from the host's own prompt shows there too. On earlier
   hosts the Toolbox still draws its own bar, without the dialog.
