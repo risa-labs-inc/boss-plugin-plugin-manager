@@ -154,7 +154,13 @@ data class UpdateInfo(
 sealed class InstallResult {
     data class Success(val plugin: PluginInfo) : InstallResult()
     data class AlreadyInstalled(val currentVersion: String) : InstallResult()
-    data class DownloadFailed(val error: String) : InstallResult()
+    /**
+     * [storeRefusal] marks a definitive "no" from the store gate - a 4xx, the
+     * permission gate, or a version-floor gate - as opposed to a store outage.
+     * The installer must NOT fall back to GitHub on a refusal: doing so both masks
+     * the store's actionable message and bypasses the gate the store just enforced.
+     */
+    data class DownloadFailed(val error: String, val storeRefusal: Boolean = false) : InstallResult()
     data class LoadFailed(val error: String) : InstallResult()
     data class VersionConflict(val required: String, val available: String) : InstallResult()
 }

@@ -24,9 +24,9 @@ sealed interface UpdateSource {
     data class Github(val url: String) : UpdateSource
 
     /**
-     * Ask the store, and if it does not carry this plugin, fall back to [fallbackUrl].
+     * Ask the store, and on an outage fall back to [fallbackUrl].
      *
-     * The fallback keeps a plugin that only ever existed as a GitHub release updatable. It
+     * A store refusal, including a 404, must never invoke this fallback. It
      * is null when there is nothing usable to fall back to, in which case the store's own
      * failure is the answer to report - a store error says something useful, whereas
      * "Invalid GitHub URL" from a homepage that was never a download source does not.

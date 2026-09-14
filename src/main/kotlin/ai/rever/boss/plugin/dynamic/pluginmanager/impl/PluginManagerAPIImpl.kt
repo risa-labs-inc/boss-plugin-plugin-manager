@@ -756,29 +756,24 @@ class PluginManagerAPIImpl(
             return downloadResult
         }
 
-        // Fallback: fetch plugin details and try GitHub
-        val detailsResult = fetchPluginDetails(pluginId)
-        if (detailsResult.isFailure) {
-            // Return the store download error if we also can't get details
-            if (downloadResult is InstallResult.DownloadFailed) {
-                return downloadResult
+        // The store attempt failed. resolveStoreFallback owns the policy - never fall back on a
+        // store refusal (a 4xx / permission / version-floor gate), and if a fallback is attempted
+        // for an outage and also fails, keep the store's error rather than GitHub's. The network
+        // work stays here in the lambda; only the decision is pulled out.
+        return resolveStoreFallback(downloadResult) {
+            val detailsResult = fetchPluginDetails(pluginId)
+            if (detailsResult.isFailure) {
+                return@resolveStoreFallback InstallResult.DownloadFailed(
+                    "Plugin not found in store: ${detailsResult.exceptionOrNull()?.message}"
+                )
             }
-            return InstallResult.DownloadFailed("Plugin not found in store: ${detailsResult.exceptionOrNull()?.message}")
-        }
-
-        val storeItem = detailsResult.getOrThrow()
-        val githubUrl = storeItem.githubUrl.ifBlank { storeItem.homepageUrl }
-
-        // If no GitHub URL, return the store download error
-        if (githubUrl.isBlank() || !githubUrl.contains("github.com")) {
-            if (downloadResult is InstallResult.DownloadFailed) {
-                return downloadResult
+            val storeItem = detailsResult.getOrThrow()
+            val githubUrl = storeItem.githubUrl.ifBlank { storeItem.homepageUrl }
+            if (githubUrl.isBlank() || !githubUrl.contains("github.com")) {
+                return@resolveStoreFallback InstallResult.DownloadFailed("No download source available for plugin")
             }
-            return InstallResult.DownloadFailed("No download source available for plugin")
+            installFromGitHubInternal(githubUrl, progressKey)
         }
-
-        // Try GitHub as fallback
-        return installFromGitHubInternal(githubUrl, progressKey)
     }
 
     /**
@@ -818,10 +813,16 @@ class PluginManagerAPIImpl(
                 if (infoConnection.responseCode == 403) {
                     return InstallResult.DownloadFailed(
                         parseErrorMessage(errorBody)
-                            ?: "You don't have permission to install this plugin. Ask an admin to grant the required permissions."
+                            ?: "You don't have permission to install this plugin. Ask an admin to grant the required permissions.",
+                        storeRefusal = true
                     )
                 }
-                return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode} - $errorBody")
+                // A 4xx is the store refusing (bad request / not found / not authorised); a 5xx
+                // is the store failing. Only the latter is an outage worth a GitHub fallback.
+                return InstallResult.DownloadFailed(
+                    "Store download failed: HTTP ${infoConnection.responseCode} - $errorBody",
+                    storeRefusal = infoConnection.responseCode in 400..499
+                )
             }
 
             val infoResponse = infoConnection.inputStream.bufferedReader().readText()
@@ -830,7 +831,8 @@ class PluginManagerAPIImpl(
             // IPC-compat gate: never load a version the host can't speak.
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
                 return InstallResult.DownloadFailed(
-                    "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
+                    "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it.",
+                    storeRefusal = true
                 )
             }
 
@@ -1335,19 +1337,11 @@ class PluginManagerAPIImpl(
         // have the same store-then-GitHub order, but `installPluginInternal` refuses outright when
         // the plugin is already installed, and reaching past it is what lets the uninstall above
         // be dropped.
-        val result = when (val source = updateSourceFor(existing)) {
-            is UpdateSource.Github -> installFromGitHubInternal(source.url, progressKey)
-            is UpdateSource.Store -> {
-                val store = downloadFromStore(pluginId, null, progressKey)
-                // A cancel is not a source that failed: falling through would open a
-                // second connection to fetch the same jar the user just stopped.
-                if (store is InstallResult.Success || isCancelled(store) || source.fallbackUrl == null) {
-                    store
-                } else {
-                    installFromGitHubInternal(source.fallbackUrl, progressKey)
-                }
-            }
-        }
+        val result = resolveUpdateSource(
+            updateSourceFor(existing),
+            attemptStore = { downloadFromStore(pluginId, null, progressKey) },
+            attemptGithub = { installFromGitHubInternal(it, progressKey) }
+        )
 
         // Emit update event if successful
         if (result is InstallResult.Success) {
@@ -1381,11 +1375,9 @@ class PluginManagerAPIImpl(
             infoConnection.readTimeout = 10000
 
             if (infoConnection.responseCode != 200) {
-                // Fallback to GitHub if store download fails (latest only).
-                if (version == null && existing.url.isNotBlank()) {
-                    return installFromGitHubToPath(existing.url, existing.jarPath, progressKey)
+                return resolveLockedUpdateFallback(infoConnection.responseCode, version, existing.url) {
+                    installFromGitHubToPath(it, existing.jarPath, progressKey)
                 }
-                return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode}")
             }
 
             val infoResponse = infoConnection.inputStream.bufferedReader().readText()
@@ -2123,10 +2115,71 @@ class PluginManagerAPIImpl(
         BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
             InstallResult.DownloadFailed(
                 "Version ${downloadInfo.version} cannot be installed: " +
-                    requirement.replaceFirstChar { it.lowercaseChar() } + "."
+                    requirement.replaceFirstChar { it.lowercaseChar() } + ".",
+                storeRefusal = true
             )
         }
 
+}
+
+/** A locked update may use a latest-release fallback only when the store did not refuse it. */
+internal inline fun resolveLockedUpdateFallback(
+    statusCode: Int,
+    version: String?,
+    fallbackUrl: String,
+    attemptGithub: (String) -> InstallResult
+): InstallResult {
+    val failure = InstallResult.DownloadFailed(
+        "Store download failed: HTTP $statusCode",
+        storeRefusal = statusCode in 400..499
+    )
+    if (version != null || fallbackUrl.isBlank()) return failure
+    return resolveStoreFallback(failure) { attemptGithub(fallbackUrl) }
+}
+
+/** Apply the same store refusal policy to updates, including hosts without source provenance. */
+internal inline fun resolveUpdateSource(
+    source: UpdateSource,
+    attemptStore: () -> InstallResult,
+    attemptGithub: (String) -> InstallResult
+): InstallResult = when (source) {
+    is UpdateSource.Github -> attemptGithub(source.url)
+    is UpdateSource.Store -> {
+        val store = attemptStore()
+        if (store is InstallResult.Success || store.wasCancelled() || source.fallbackUrl == null) {
+            store
+        } else {
+            resolveStoreFallback(store) { attemptGithub(source.fallbackUrl) }
+        }
+    }
+}
+
+/**
+ * The store -> GitHub fallback policy, pulled out of `installPluginInternal` so it can be tested
+ * without the network. [storeResult] is the store attempt's outcome, reached here only after it
+ * was neither a success nor a cancellation. [attemptGithub] runs the GitHub fallback (details
+ * fetch + download) and is invoked ONLY when a fallback is warranted.
+ *
+ * - A store REFUSAL (a 4xx / permission gate / version-floor gate, flagged by
+ *   [InstallResult.DownloadFailed.storeRefusal]) is returned as-is; [attemptGithub] is never run.
+ *   Falling back on a refusal would mask the store's actionable error and bypass the gate the
+ *   store just enforced.
+ * - Otherwise (a store outage) [attemptGithub] runs. If it fails - and was not cancelled - the
+ *   store's error is returned rather than the fallback's, since the store's is the actionable one
+ *   (the unauthenticated GitHub fetch 404s for the private repos these fallbacks target).
+ */
+internal inline fun resolveStoreFallback(
+    storeResult: InstallResult,
+    attemptGithub: () -> InstallResult
+): InstallResult {
+    if (storeResult is InstallResult.DownloadFailed && storeResult.storeRefusal) {
+        return storeResult
+    }
+    val githubResult = attemptGithub()
+    if (githubResult is InstallResult.Success || githubResult.wasCancelled()) {
+        return githubResult
+    }
+    return if (storeResult is InstallResult.DownloadFailed) storeResult else githubResult
 }
 
 /**
