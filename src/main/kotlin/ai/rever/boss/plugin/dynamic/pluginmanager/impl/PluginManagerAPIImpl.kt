@@ -1,5 +1,7 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
+import ai.rever.boss.plugin.dynamic.pluginmanager.HOST_REFUSED_UNLOAD
+import ai.rever.boss.plugin.dynamic.pluginmanager.couldNotReplace
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
@@ -882,7 +884,7 @@ class PluginManagerAPIImpl(
             // leave the old plugin loaded and then load a second copy over it.
             unloadForReplacement(pluginId)?.let { reason ->
                 partFile.delete()
-                return InstallResult.LoadFailed("could not replace the installed version - $reason")
+                return InstallResult.LoadFailed(couldNotReplace(reason))
             }
 
             // Promote the verified bytes. The old JAR at this path (a same-version reinstall) is
@@ -1006,7 +1008,7 @@ class PluginManagerAPIImpl(
         val delegate = loaderDelegate ?: return null
         if (!delegate.isPluginLoaded(pluginId)) return null
         return if (delegate.unloadPlugin(pluginId)) null
-        else "the host refused to unload it (it may still be in use by another plugin; see the app log)"
+        else HOST_REFUSED_UNLOAD
     }
 
     private suspend fun unloadIfAlreadyLoaded(jarFile: File, knownPluginId: String? = null) {
@@ -1141,7 +1143,7 @@ class PluginManagerAPIImpl(
             if (incomingPluginId != null) {
                 unloadForReplacement(incomingPluginId)?.let { reason ->
                     partFile.delete()
-                    return InstallResult.LoadFailed("could not replace the installed version - $reason")
+                    return InstallResult.LoadFailed(couldNotReplace(reason))
                 }
             }
 
@@ -1267,9 +1269,7 @@ class PluginManagerAPIImpl(
                 // The delegate hands back a bare Boolean, so the host's reasons cannot reach
                 // here - say where they are instead of restating the failure. The host logs
                 // them as "Plugin unload refused".
-                return@withContext UninstallResult.Failed(
-                    "the host refused to unload it (it may still be in use by another plugin)"
-                )
+                return@withContext UninstallResult.Failed(HOST_REFUSED_UNLOAD)
             }
 
             // Delete JAR file (and its signature sidecar)
@@ -1551,7 +1551,11 @@ class PluginManagerAPIImpl(
             ))
         } catch (e: Exception) {
             if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
-            return InstallResult.DownloadFailed("GitHub update failed: ${e.message}")
+            // No verb of its own: every caller prefixes one ("Update failed: ..."), and this
+            // used to read "Update failed: GitHub update failed: ...".
+            return InstallResult.DownloadFailed(
+                "could not download it from GitHub (${e.message ?: e::class.java.simpleName})",
+            )
         }
     }
 
