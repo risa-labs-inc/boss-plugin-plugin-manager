@@ -190,7 +190,9 @@ class UpdatePromptService(
         scope.launch {
             try {
                 val succeeded = mutableListOf<String>()
-                val failed = mutableListOf<UpdateInfo>()
+                // With the reason, not just the plugin: this toast is the background path, where
+                // the user pressed nothing and has the least context for guessing why.
+                val failed = mutableListOf<Pair<UpdateInfo, String>>()
                 // Three buckets, not two. A cancel is neither: the host's download
                 // dialog offers Cancel on exactly this path, and calling it a failure
                 // told the user "Failed to update: Docker" for the thing they had just
@@ -200,10 +202,14 @@ class UpdatePromptService(
                 for (target in targets) {
                     val result = runCatching { apiImpl.updatePlugin(target.pluginId) }
                         .getOrElse { InstallResult.LoadFailed(it.message ?: "Unknown error") }
+                    // The same definition of "failed" as the panel's Update All, so a
+                    // VersionConflict or a still-installed old version is reported with its
+                    // cause here too rather than as a bare name.
+                    val reason = failureReasonFor(result, PluginAction.UPDATE)
                     when {
                         result is InstallResult.Success -> succeeded.add(target.pluginId)
                         result.wasCancelled() -> cancelled.add(target)
-                        else -> failed.add(target)
+                        reason != null -> failed.add(target to reason)
                     }
                 }
 
@@ -219,11 +225,10 @@ class UpdatePromptService(
                 if (failed.isNotEmpty()) {
                     // Allow re-prompting for failed updates on the next cycle
                     mutex.withLock {
-                        saveRecords(loadRecords() - failed.map { it.pluginId }.toSet())
+                        saveRecords(loadRecords() - failed.map { it.first.pluginId }.toSet())
                     }
-                    notifications?.showError(
-                        "Failed to update: ${failed.joinToString(", ") { it.displayName }}"
-                    )
+                    updateAllError(failed.map { (target, reason) -> target.displayName to reason })
+                        ?.let { notifications?.showError(it) }
                 }
 
                 if (succeeded.isNotEmpty()) {

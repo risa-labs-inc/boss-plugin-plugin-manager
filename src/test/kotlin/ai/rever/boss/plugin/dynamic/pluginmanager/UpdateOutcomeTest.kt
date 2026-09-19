@@ -35,16 +35,33 @@ class UpdateOutcomeTest {
 
     @Test
     fun `a refused unload is reported, not swallowed`() {
+        // Built from the same definitions PluginManagerAPIImpl uses, so this pins the sentence the
+        // user actually reads rather than a copy of it that could drift.
         val error =
             outcomeErrorFor(
-                InstallResult.LoadFailed(
-                    "could not replace the installed version - the host refused to unload it",
-                ),
+                InstallResult.LoadFailed(couldNotReplace(HOST_REFUSED_UNLOAD)),
                 PluginAction.UPDATE,
             )
 
-        assertNotNull(error, "a LoadFailed update must say something; silence reads as a dead button")
-        assertTrue(error.contains("refused to unload it"), "the reason must survive: was <$error>")
+        assertEquals(
+            "Update failed: could not replace the installed version - " +
+                "the host refused to unload it (it may still be in use by another plugin; see the app log)",
+            error,
+        )
+    }
+
+    @Test
+    fun `a version change is named as one, not as an install or an update`() {
+        assertEquals(
+            "Version change failed: HTTP 503",
+            outcomeErrorFor(InstallResult.DownloadFailed("HTTP 503"), PluginAction.CHANGE_VERSION),
+        )
+        // Replacing an installed copy that stays put is a failure here exactly as for an update:
+        // the chosen version did not arrive.
+        assertEquals(
+            "Version change failed: version 1.2.0 is still installed",
+            outcomeErrorFor(InstallResult.AlreadyInstalled("1.2.0"), PluginAction.CHANGE_VERSION),
+        )
     }
 
     @Test
@@ -143,6 +160,22 @@ class UpdateOutcomeTest {
         listOf("AI Gateway", "Flow", "refused", "HTTP 500").forEach {
             assertTrue(many.contains(it), "<$it> missing from <$many>")
         }
+    }
+
+    @Test
+    fun `several failures stay readable when a reason holds a comma`() {
+        // HOST_REFUSED_UNLOAD contains "; " and "(", and the old comma join ran it into the next
+        // plugin's name. One line per plugin keeps every name and reason separable.
+        val many = updateAllError(listOf("AI Gateway" to HOST_REFUSED_UNLOAD, "Flow" to "HTTP 500, retrying later"))
+
+        assertEquals(
+            listOf(
+                "Failed to update:",
+                "- AI Gateway: $HOST_REFUSED_UNLOAD",
+                "- Flow: HTTP 500, retrying later",
+            ),
+            many?.lines(),
+        )
     }
 
     @Test

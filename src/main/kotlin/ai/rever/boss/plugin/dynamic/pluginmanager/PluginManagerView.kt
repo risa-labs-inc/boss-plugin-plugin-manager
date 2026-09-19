@@ -976,6 +976,13 @@ private fun VersionSheetDialog(
                 }
             }
 
+            // Below the list, not in the `when` above: that slot replaces the list, and after a
+            // failed install the list is exactly what the user needs to pick another version.
+            sheet.installError?.let { message ->
+                Spacer(Modifier.height(8.dp))
+                Text(message, color = BossThemeColors.ErrorColor, fontSize = 13.sp)
+            }
+
             Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 BossSecondaryButton(text = "Close", onClick = onDismiss)
