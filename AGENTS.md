@@ -102,6 +102,24 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
 
+## Where an install may fall back to GitHub
+
+**A store refusal is an answer, not an outage.** `installOutcome` (in `StoreFallback.kt`) decides
+this and is tested as a pure function. A 4xx from `/plugin-store/:id/download` - a missing
+permission, a version this host's IPC cannot load, a plugin the store does not carry - comes
+straight back to the user. Only a 5xx, or a request that never got a status at all, may try the
+plugin's GitHub release, because only then has the store failed to answer.
+
+Getting this wrong is not a visible bug, which is why it survived: the fallback replaced the
+store's "requires permission agenthq.use, ask an admin" with an unauthenticated GitHub 404 for a
+private repo, and it installed jars the store had deliberately declined to serve (#52).
+
+If both fail, the **store's** message leads and GitHub's is kept behind it. GitHub requests carry
+`Authorization` when `GITHUB_TOKEN` or `GH_TOKEN` is set, and an authenticated download goes to
+the asset API rather than `browser_download_url`, which 404s on a private repo whatever token you
+hold. The host resolves tokens from more places (`local.properties`, the `gh` CLI) in
+`PluginStoreSetup.applyGitHubAuth`; none of that is reachable from a plugin classloader.
+
 ## The two version floors
 
 A published plugin version declares two floors, they fail differently, and until now the Toolbox

@@ -8,6 +8,11 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.TrackedDownloader
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
+import ai.rever.boss.plugin.dynamic.pluginmanager.GitHubRelease
+import ai.rever.boss.plugin.dynamic.pluginmanager.githubToken
+import ai.rever.boss.plugin.dynamic.pluginmanager.installOutcome
+import ai.rever.boss.plugin.dynamic.pluginmanager.jarAssetIn
+import ai.rever.boss.plugin.dynamic.pluginmanager.mayFallBackToGitHub
 import ai.rever.boss.plugin.dynamic.pluginmanager.updateSourceFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
@@ -80,6 +85,15 @@ class PluginManagerAPIImpl(
         private const val SUPABASE_URL = "https://api.risaboss.com"
         private const val STORE_API_URL = "https://api.risaboss.com/functions/v1/plugin-store"
         private const val GITHUB_API_URL = "https://api.github.com"
+
+        /**
+         * The status a gate the *client* applied is reported as.
+         *
+         * The IPC and app-floor checks run after the store answered 200, but they are refusals
+         * in the same sense: this host must not install that jar, so a GitHub fallback would be
+         * bypassing the decision rather than routing around an outage (#52).
+         */
+        private const val HTTP_CONFLICT = 409
 
         /**
          * Page size asked of `/list` when resolving owning organisations.
@@ -579,7 +593,7 @@ class PluginManagerAPIImpl(
         // install, and the host log shows the shape exactly - `Plugin uninstalled successfully`
         // followed by nothing at all. The download is the part that can fail, so it has to happen
         // before anything is destroyed.
-        val result = downloadFromStore(pluginId, version, progressKey)
+        val result = downloadFromStore(pluginId, version, progressKey).result
         if (result is InstallResult.Success && previousVersion != null) {
             _events.emit(PluginEvent.PluginUpdated(result.plugin, previousVersion))
         }
@@ -751,35 +765,36 @@ class PluginManagerAPIImpl(
         }
 
         // Try to download directly from plugin store first
-        val downloadResult = downloadFromStore(pluginId, null, progressKey)
-        if (downloadResult is InstallResult.Success || isCancelled(downloadResult)) {
-            return downloadResult
+        val store = downloadFromStore(pluginId, null, progressKey)
+
+        // What happens next is a decision, not a sequence of ifs: a 4xx is the store ANSWERING
+        // - a missing permission, a version this host cannot load, a plugin it does not carry -
+        // and a GitHub download would both bypass that refusal and replace a message the user
+        // can act on with an unauthenticated 404 (#52). installOutcome holds the rule; the
+        // lambda below is only reached when the store failed to answer at all.
+        return installOutcome(
+            storeResult = store.result,
+            storeStatus = store.httpStatus,
+            isCancelled = ::isCancelled,
+        ) {
+            val detailsResult = fetchPluginDetails(pluginId)
+            val githubUrl = detailsResult.getOrNull()
+                ?.let { it.githubUrl.ifBlank { it.homepageUrl } }
+                ?.takeIf { it.isNotBlank() && it.contains("github.com") }
+            // null: nothing to fall back TO, so the store's own error is the answer.
+            githubUrl?.let { installFromGitHubInternal(it, progressKey) }
         }
-
-        // Fallback: fetch plugin details and try GitHub
-        val detailsResult = fetchPluginDetails(pluginId)
-        if (detailsResult.isFailure) {
-            // Return the store download error if we also can't get details
-            if (downloadResult is InstallResult.DownloadFailed) {
-                return downloadResult
-            }
-            return InstallResult.DownloadFailed("Plugin not found in store: ${detailsResult.exceptionOrNull()?.message}")
-        }
-
-        val storeItem = detailsResult.getOrThrow()
-        val githubUrl = storeItem.githubUrl.ifBlank { storeItem.homepageUrl }
-
-        // If no GitHub URL, return the store download error
-        if (githubUrl.isBlank() || !githubUrl.contains("github.com")) {
-            if (downloadResult is InstallResult.DownloadFailed) {
-                return downloadResult
-            }
-            return InstallResult.DownloadFailed("No download source available for plugin")
-        }
-
-        // Try GitHub as fallback
-        return installFromGitHubInternal(githubUrl, progressKey)
     }
+
+    /**
+     * What a store download did, and what the store said while doing it.
+     *
+     * [httpStatus] is the store's own response code, or null when the request never got one
+     * (a connection failure, a timeout, a parse error). The install path needs that distinction
+     * to tell a refusal from an outage - see [mayFallBackToGitHub] - and the message alone
+     * cannot carry it.
+     */
+    private data class StoreDownload(val result: InstallResult, val httpStatus: Int? = null)
 
     /**
      * Download plugin directly from the plugin store.
@@ -789,7 +804,7 @@ class PluginManagerAPIImpl(
         pluginId: String,
         version: String? = null,
         progressKey: String = pluginId
-    ): InstallResult {
+    ): StoreDownload {
         // Capture the currently tracked JAR path (if any) before installing,
         // so the old version's file can be removed after a successful load.
         val previousJarPath = getInstalledPlugin(pluginId)?.jarPath
@@ -816,12 +831,19 @@ class PluginManagerAPIImpl(
                 // 403 = caller lacks the permission(s) required to install this plugin.
                 // The server's error message already names the missing permissions.
                 if (infoConnection.responseCode == 403) {
-                    return InstallResult.DownloadFailed(
-                        parseErrorMessage(errorBody)
-                            ?: "You don't have permission to install this plugin. Ask an admin to grant the required permissions."
+                    return StoreDownload(
+                        InstallResult.DownloadFailed(
+                            parseErrorMessage(errorBody)
+                                ?: "You don't have permission to install this plugin. " +
+                                "Ask an admin to grant the required permissions."
+                        ),
+                        infoConnection.responseCode,
                     )
                 }
-                return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode} - $errorBody")
+                return StoreDownload(
+                    InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode} - $errorBody"),
+                    infoConnection.responseCode,
+                )
             }
 
             val infoResponse = infoConnection.inputStream.bufferedReader().readText()
@@ -829,8 +851,15 @@ class PluginManagerAPIImpl(
 
             // IPC-compat gate: never load a version the host can't speak.
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
-                return InstallResult.DownloadFailed(
-                    "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
+                // Reported as a refusal (409), not an outage: this host cannot load this
+                // version, and fetching the same jar from GitHub would bypass the check
+                // rather than satisfy it.
+                return StoreDownload(
+                    InstallResult.DownloadFailed(
+                        "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; " +
+                            "update BOSS to install it."
+                    ),
+                    HTTP_CONFLICT,
                 )
             }
 
@@ -839,7 +868,7 @@ class PluginManagerAPIImpl(
             // and the failure this prevents is silent (the host refuses the jar at load and says
             // so only in its log). Blank resolves to UNKNOWN and installs, which is what keeps
             // this working against a store that does not send the field yet.
-            bossFloorRefusal(downloadInfo)?.let { return it }
+            bossFloorRefusal(downloadInfo)?.let { return StoreDownload(it, HTTP_CONFLICT) }
 
             // Download the JAR from the signed URL.
             //
@@ -861,7 +890,7 @@ class PluginManagerAPIImpl(
             jarConnection.readTimeout = 60000
 
             if (jarConnection.responseCode != 200) {
-                return InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}")
+                return StoreDownload(InstallResult.DownloadFailed("JAR download failed: HTTP ${jarConnection.responseCode}"))
             }
 
             downloadWithProgress(jarConnection, partFile, progressKey, downloadInfo.size)
@@ -872,7 +901,7 @@ class PluginManagerAPIImpl(
                 val actualSha256 = calculateSha256(partFile)
                 if (!actualSha256.equals(downloadInfo.sha256, ignoreCase = true)) {
                     partFile.delete()
-                    return InstallResult.DownloadFailed("SHA-256 verification failed")
+                    return StoreDownload(InstallResult.DownloadFailed("SHA-256 verification failed"))
                 }
             }
 
@@ -882,7 +911,7 @@ class PluginManagerAPIImpl(
             // leave the old plugin loaded and then load a second copy over it.
             unloadForReplacement(pluginId)?.let { reason ->
                 partFile.delete()
-                return InstallResult.LoadFailed("could not replace the installed version - $reason")
+                return StoreDownload(InstallResult.LoadFailed("could not replace the installed version - $reason"))
             }
 
             // Promote the verified bytes. The old JAR at this path (a same-version reinstall) is
@@ -891,7 +920,7 @@ class PluginManagerAPIImpl(
             if (destFile.exists()) destFile.delete()
             if (!partFile.renameTo(destFile)) {
                 partFile.delete()
-                return InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
+                return StoreDownload(InstallResult.DownloadFailed("Could not move the downloaded JAR into place"))
             }
 
             // Persist the store signature as a `<jar>.sig` sidecar so the host
@@ -918,9 +947,11 @@ class PluginManagerAPIImpl(
                     runCatching { destFile.delete() }
                     deleteSignatureSidecar(destFile)
                 }
-                return InstallResult.LoadFailed(
-                    if (loaderDelegate == null) "No plugin loader available"
-                    else "Failed to load plugin '$pluginId' (see app logs for details)"
+                return StoreDownload(
+                    InstallResult.LoadFailed(
+                        if (loaderDelegate == null) "No plugin loader available"
+                        else "Failed to load plugin '$pluginId' (see app logs for details)"
+                    )
                 )
             }
 
@@ -936,7 +967,7 @@ class PluginManagerAPIImpl(
             refreshInstalledPlugins()
 
             _events.emit(PluginEvent.PluginInstalled(pluginInfo))
-            return InstallResult.Success(pluginInfo)
+            return StoreDownload(InstallResult.Success(pluginInfo))
 
         } catch (e: Exception) {
             // A throw anywhere above can strand the part file. It is inert (the host's scan only
@@ -946,8 +977,8 @@ class PluginManagerAPIImpl(
             }?.forEach { runCatching { it.delete() } }
             // Unprefixed, so the buttons can tell a cancel from a failure. The cleanup
             // above is exactly what a cancelled download needs too.
-            if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
-            return InstallResult.DownloadFailed("Store download error: ${e.message}")
+            if (e is DownloadCancelledException) return StoreDownload(InstallResult.DownloadFailed(DOWNLOAD_CANCELLED))
+            return StoreDownload(InstallResult.DownloadFailed("Store download error: ${e.message}"))
         }
     }
 
@@ -1085,26 +1116,46 @@ class PluginManagerAPIImpl(
             val owner = match.groupValues[1]
             val repo = match.groupValues[2].removeSuffix(".git")
 
+            // A token where one is configured. Without it every private repo answers 404 -
+            // which is how a store refusal used to surface as "Could not fetch release:
+            // HTTP 404" (#52) - and anonymous callers share a 60/hr rate limit by IP.
+            val token = githubToken { System.getenv(it) }
+
             // Get latest release
             val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
             val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
             releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
             releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            token?.let { releaseConnection.setRequestProperty("Authorization", "Bearer $it") }
             releaseConnection.connectTimeout = 10000
             releaseConnection.readTimeout = 10000
 
             if (releaseConnection.responseCode != 200) {
-                return InstallResult.DownloadFailed("Could not fetch release: HTTP ${releaseConnection.responseCode}")
+                // Named, because 404 here means two very different things and the operator
+                // cannot tell them apart from the number: no release at all, or a private
+                // repo this process has no token for.
+                val hint = if (releaseConnection.responseCode == 404 && token == null) {
+                    " (a private repo needs GITHUB_TOKEN)"
+                } else {
+                    ""
+                }
+                return InstallResult.DownloadFailed(
+                    "Could not fetch release: HTTP ${releaseConnection.responseCode}$hint"
+                )
             }
 
             val releaseJson = releaseConnection.inputStream.bufferedReader().readText()
 
-            // Find JAR asset URL
-            val jarUrlMatch = Regex(""""browser_download_url"\s*:\s*"([^"]+\.jar)"""").find(releaseJson)
+            // Parsed rather than pattern-matched: the asset API url is what an authenticated
+            // caller has to use on a private repo, and a regex over browser_download_url
+            // cannot see it. See jarAssetIn.
+            val release = runCatching { json.decodeFromString<GitHubRelease>(releaseJson) }.getOrNull()
+                ?: return InstallResult.DownloadFailed("Could not read the release from GitHub")
+            val jar = jarAssetIn(release, isAuthenticated = token != null)
                 ?: return InstallResult.DownloadFailed("No JAR asset found in release")
 
-            val jarUrl = jarUrlMatch.groupValues[1]
-            val jarFileName = jarUrl.substringAfterLast("/")
+            val jarUrl = jar.url
+            val jarFileName = jar.fileName
 
             // Download JAR
             pluginsDir.mkdirs()
@@ -1119,6 +1170,12 @@ class PluginManagerAPIImpl(
             val downloadConnection = URL(jarUrl).openConnection() as HttpURLConnection
             downloadConnection.instanceFollowRedirects = true
             downloadConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            if (jar.viaAssetApi) {
+                // The asset API returns the asset's JSON unless asked for the bytes, and it is
+                // the only address that honours a token - so these two go together or not at all.
+                downloadConnection.setRequestProperty("Accept", "application/octet-stream")
+                token?.let { downloadConnection.setRequestProperty("Authorization", "Bearer $it") }
+            }
             downloadConnection.connectTimeout = 30000
             downloadConnection.readTimeout = 60000
 
@@ -1338,7 +1395,7 @@ class PluginManagerAPIImpl(
         val result = when (val source = updateSourceFor(existing)) {
             is UpdateSource.Github -> installFromGitHubInternal(source.url, progressKey)
             is UpdateSource.Store -> {
-                val store = downloadFromStore(pluginId, null, progressKey)
+                val store = downloadFromStore(pluginId, null, progressKey).result
                 // A cancel is not a source that failed: falling through would open a
                 // second connection to fetch the same jar the user just stopped.
                 if (store is InstallResult.Success || isCancelled(store) || source.fallbackUrl == null) {
