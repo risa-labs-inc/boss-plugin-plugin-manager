@@ -102,6 +102,20 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
 
+## Reaching a plugin's GitHub release
+
+The install path falls back to a plugin's GitHub release when the store cannot answer. That fetch
+carries `Authorization` when `GITHUB_TOKEN` or `GH_TOKEN` is set, and **an authenticated download
+must use the asset API url, not `browser_download_url`** - the latter answers 404 on a private repo
+whatever token is held, because the token only travels on an `api.github.com` request. The release
+JSON is parsed rather than pattern-matched for that reason: a regex over `browser_download_url`
+cannot see the asset url at all (#52).
+
+Private is the norm for internal plugins, so without a token this fallback cannot succeed for them
+and the 404 it produced pointed at the wrong thing entirely. The host resolves tokens from more
+places (`local.properties`, the `gh` CLI) in `PluginStoreSetup.applyGitHubAuth`; none of that is
+reachable from a plugin classloader.
+
 ## The two version floors
 
 A published plugin version declares two floors, they fail differently, and until now the Toolbox

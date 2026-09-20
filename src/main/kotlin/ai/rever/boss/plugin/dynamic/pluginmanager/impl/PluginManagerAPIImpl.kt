@@ -7,7 +7,10 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.TrackedDownloader
+import ai.rever.boss.plugin.dynamic.pluginmanager.GitHubRelease
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
+import ai.rever.boss.plugin.dynamic.pluginmanager.githubToken
+import ai.rever.boss.plugin.dynamic.pluginmanager.jarAssetIn
 import ai.rever.boss.plugin.dynamic.pluginmanager.updateSourceFor
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
 import ai.rever.boss.plugin.dynamic.pluginmanager.realtime.PluginStoreRealtimeClient
@@ -1085,26 +1088,47 @@ class PluginManagerAPIImpl(
             val owner = match.groupValues[1]
             val repo = match.groupValues[2].removeSuffix(".git")
 
+            // A token where one is configured. Without it every private repo answers 404 -
+            // and private is the norm for internal plugins - so this fallback could not
+            // succeed for them at all (#52). Anonymous callers also share a 60/hr rate
+            // limit by IP, which CI and a room full of BOSS instances reach together.
+            val token = githubToken { System.getenv(it) }
+
             // Get latest release
             val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
             val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
             releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
             releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            token?.let { releaseConnection.setRequestProperty("Authorization", "Bearer $it") }
             releaseConnection.connectTimeout = 10000
             releaseConnection.readTimeout = 10000
 
             if (releaseConnection.responseCode != 200) {
-                return InstallResult.DownloadFailed("Could not fetch release: HTTP ${releaseConnection.responseCode}")
+                // Named, because 404 here means two very different things and the operator
+                // cannot tell them apart from the number: no release at all, or a private
+                // repo this process has no token for.
+                val hint = if (releaseConnection.responseCode == 404 && token == null) {
+                    " (a private repo needs GITHUB_TOKEN)"
+                } else {
+                    ""
+                }
+                return InstallResult.DownloadFailed(
+                    "Could not fetch release: HTTP ${releaseConnection.responseCode}$hint"
+                )
             }
 
             val releaseJson = releaseConnection.inputStream.bufferedReader().readText()
 
-            // Find JAR asset URL
-            val jarUrlMatch = Regex(""""browser_download_url"\s*:\s*"([^"]+\.jar)"""").find(releaseJson)
+            // Parsed rather than pattern-matched: the asset API url is what an authenticated
+            // caller has to use on a private repo, and a regex over browser_download_url
+            // cannot see it. See jarAssetIn.
+            val release = runCatching { json.decodeFromString<GitHubRelease>(releaseJson) }.getOrNull()
+                ?: return InstallResult.DownloadFailed("Could not read the release from GitHub")
+            val jar = jarAssetIn(release, isAuthenticated = token != null)
                 ?: return InstallResult.DownloadFailed("No JAR asset found in release")
 
-            val jarUrl = jarUrlMatch.groupValues[1]
-            val jarFileName = jarUrl.substringAfterLast("/")
+            val jarUrl = jar.url
+            val jarFileName = jar.fileName
 
             // Download JAR
             pluginsDir.mkdirs()
@@ -1119,6 +1143,12 @@ class PluginManagerAPIImpl(
             val downloadConnection = URL(jarUrl).openConnection() as HttpURLConnection
             downloadConnection.instanceFollowRedirects = true
             downloadConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
+            if (jar.viaAssetApi) {
+                // The asset API returns the asset's JSON unless asked for the bytes, and it is
+                // the only address that honours a token - so these two go together or not at all.
+                downloadConnection.setRequestProperty("Accept", "application/octet-stream")
+                token?.let { downloadConnection.setRequestProperty("Authorization", "Bearer $it") }
+            }
             downloadConnection.connectTimeout = 30000
             downloadConnection.readTimeout = 60000
 
