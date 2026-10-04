@@ -82,14 +82,16 @@ class UpdatePromptService(
      */
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
-        // Optional host signal: older hosts do not publish it and keep manual prompts.
-        if (System.getProperty("boss.plugins.autoUpdate.enabled").toBoolean()) {
-            dismissPrompt(null)
+        if (busy) return
+        // Optional host signals: older hosts keep every manual prompt.
+        val automatic = System.getProperty("boss.plugins.autoUpdate.enabled").toBoolean()
+        val optOuts = System.getProperty("boss.plugins.autoUpdate.optOuts", "").split(",").toSet()
+        val updates = runCatching { apiImpl.checkForCompatibleUpdates() }.getOrDefault(emptyList())
+            .filter { !automatic || it.pluginId in optOuts }
+        if (updates.isEmpty()) {
+            if (automatic) dismissPrompt(null)
             return
         }
-        if (busy) return
-        val updates = runCatching { apiImpl.checkForCompatibleUpdates() }.getOrDefault(emptyList())
-        if (updates.isEmpty()) return
 
         val fresh = mutex.withLock {
             val records = loadRecords()
