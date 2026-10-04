@@ -174,3 +174,12 @@ Pushes to `main` trigger the release workflow which:
 3. Publishes to the BOSS Plugin Store
 
 The workflow is defined in `.github/workflows/build.yml` and delegates to the shared workflow in `risa-labs-inc/BossConsole-Releases`.
+
+### Automatic update prompt policy
+
+BossConsole publishes optional JVM properties `boss.plugins.autoUpdate.enabled` and
+`boss.plugins.autoUpdate.optOuts` (comma-separated plugin IDs). Missing properties
+preserve manual prompts on older hosts. Automatic mode suppresses proactive prompts
+except for explicit per-plugin opt-outs. Preferences can change during a session, so
+recheck after store requests and before a toast action updates each plugin. Explicit
+Updates-tab controls remain available. Failed checks must not erase opt-out prompts.

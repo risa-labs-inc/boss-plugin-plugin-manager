@@ -77,21 +77,20 @@ class UpdatePromptService(
 
     /**
      * Check for compatible updates and show a prompt for any not yet
-     * prompted at their current latest version. Safe to call repeatedly
+     * prompted at their current latest version. Automatic mode only prompts for
+     * explicit opt-outs; stale toast actions recheck the current preference. Safe to call repeatedly
      * (startup, realtime events) — dedupe makes extra calls harmless.
      */
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
         if (busy) return
-        // Optional host signals: older hosts keep every manual prompt.
-        val automatic = System.getProperty("boss.plugins.autoUpdate.enabled").toBoolean()
-        val optOuts = System.getProperty("boss.plugins.autoUpdate.optOuts", "").split(",").toSet()
-        val updates = runCatching { apiImpl.checkForCompatibleUpdates() }.getOrDefault(emptyList())
-            .filter { !automatic || it.pluginId in optOuts }
-        if (updates.isEmpty()) {
-            if (automatic) dismissPrompt(null)
-            return
-        }
+        retireManagedPrompt(HostAutomaticUpdatePolicy.read())
+        val result = runCatching { apiImpl.checkForCompatibleUpdates() }
+        val policy = HostAutomaticUpdatePolicy.read()
+        retireManagedPrompt(policy)
+        if (result.isFailure) return
+        val updates = result.getOrThrow().filter { policy.allowsPrompt(it.pluginId) }
+        if (updates.isEmpty()) return
 
         val fresh = mutex.withLock {
             val records = loadRecords()
@@ -188,6 +187,14 @@ class UpdatePromptService(
     }
 
     /** Apply the prompted updates; invoked from the toast's action button. */
+    private suspend fun retireManagedPrompt(policy: HostAutomaticUpdatePolicy) {
+        val current = prompt ?: return
+        if (current.offered.keys.any { !policy.allowsPrompt(it) }) {
+            mutex.withLock { saveRecords(loadRecords() - current.offered.keys) }
+            dismissPrompt(current)
+        }
+    }
+
     private fun performUpdate(targets: List<UpdateInfo>) {
         if (busy) return
         busy = true
@@ -205,6 +212,8 @@ class UpdatePromptService(
                 // failed while the rest succeeded.
                 val cancelled = mutableListOf<UpdateInfo>()
                 for (target in targets) {
+                    // A stale toast must not race the host after a preference change.
+                    if (!HostAutomaticUpdatePolicy.read().allowsPrompt(target.pluginId)) continue
                     val result = runCatching { apiImpl.updatePlugin(target.pluginId) }
                         .getOrElse { InstallResult.LoadFailed(it.message ?: "Unknown error") }
                     when {
