@@ -82,6 +82,11 @@ class UpdatePromptService(
      */
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
+        // Optional host signal: older hosts do not publish it and keep manual prompts.
+        if (System.getProperty("boss.plugins.autoUpdate.enabled").toBoolean()) {
+            dismissPrompt(null)
+            return
+        }
         if (busy) return
         val updates = runCatching { apiImpl.checkForCompatibleUpdates() }.getOrDefault(emptyList())
         if (updates.isEmpty()) return
