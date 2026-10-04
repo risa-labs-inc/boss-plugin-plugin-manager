@@ -26,6 +26,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLease
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -546,8 +547,10 @@ class PluginManagerAPIImpl(
     override suspend fun installVersion(pluginId: String, version: String): InstallResult = withContext(Dispatchers.IO) {
         val existing = getInstalledPlugin(pluginId)
         val isUpdate = existing != null
-        withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), isUpdate) {
-            installVersionInternal(pluginId, version, existing, progressKey = pluginId)
+        withUpdateLease(pluginId) {
+            withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), isUpdate) {
+                installVersionInternal(pluginId, version, existing, progressKey = pluginId)
+            }
         }
     }
 
@@ -1295,9 +1298,18 @@ class PluginManagerAPIImpl(
     override suspend fun updatePlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
         val existing = getInstalledPlugin(pluginId)
             ?: return@withContext InstallResult.DownloadFailed("Plugin not installed: $pluginId")
-        withDownloadTracking(pluginId, existing.displayName, isUpdate = true) {
-            updatePluginInternal(pluginId, existing, progressKey = pluginId)
+        withUpdateLease(pluginId) {
+            withDownloadTracking(pluginId, existing.displayName, isUpdate = true) {
+                updatePluginInternal(pluginId, existing, progressKey = pluginId)
+            }
         }
+    }
+
+    private suspend fun withUpdateLease(pluginId: String, operation: suspend () -> InstallResult): InstallResult {
+        val lease = PluginUpdateLease.acquire(pluginsDir, pluginId).getOrElse {
+            return InstallResult.DownloadFailed(it.message ?: "Plugin installation is busy")
+        }
+        return lease.use { operation() }
     }
 
     private suspend fun updatePluginInternal(

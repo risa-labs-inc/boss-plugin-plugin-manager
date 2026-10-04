@@ -1,7 +1,7 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 /** Optional host signals; absent properties preserve manual prompts on older hosts. */
-internal data class HostAutomaticUpdatePolicy(val enabled: Boolean, val optOuts: Set<String>) {
+data class HostAutomaticUpdatePolicy(val enabled: Boolean, val optOuts: Set<String>) {
     fun allowsPrompt(pluginId: String): Boolean = !enabled || pluginId in optOuts
 
     companion object {

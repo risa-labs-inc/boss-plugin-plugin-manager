@@ -182,4 +182,8 @@ BossConsole publishes optional JVM properties `boss.plugins.autoUpdate.enabled` 
 preserve manual prompts on older hosts. Automatic mode suppresses proactive prompts
 except for explicit per-plugin opt-outs. Preferences can change during a session, so
 recheck after store requests and before a toast action updates each plugin. Explicit
-Updates-tab controls remain available. Failed checks must not erase opt-out prompts.
+Updates-tab controls remain available. Failed checks preserve the current prompt; retire mixed prompts only after a successful
+check can immediately re-offer remaining opt-outs. Host and Toolbox use the same
+`.plugin-update-locks/<SHA-256 of UTF-8 plugin ID>.lock` protocol for updates and
+version installs. The updated host and Toolbox companion must both ship for this
+cross-installer protection. Keep lock files permanently so all contenders use the same inode.

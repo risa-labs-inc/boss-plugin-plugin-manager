@@ -7,7 +7,7 @@ import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.api.PluginStorageProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -33,10 +33,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class UpdatePromptService(
     private val scope: CoroutineScope,
-    private val apiImpl: PluginManagerAPIImpl,
+    private val apiImpl: PluginManagerAPI,
     private val loaderDelegate: PluginLoaderDelegate?,
     private val notifications: NotificationProvider?,
-    private val storage: PluginStorageProvider?
+    private val storage: PluginStorageProvider?,
+    private val readPolicy: () -> HostAutomaticUpdatePolicy = HostAutomaticUpdatePolicy::read,
 ) {
 
     @Serializable
@@ -84,11 +85,10 @@ class UpdatePromptService(
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
         if (busy) return
-        retireManagedPrompt(HostAutomaticUpdatePolicy.read())
         val result = runCatching { apiImpl.checkForCompatibleUpdates() }
-        val policy = HostAutomaticUpdatePolicy.read()
-        retireManagedPrompt(policy)
         if (result.isFailure) return
+        val policy = readPolicy()
+        retireManagedPrompt(policy)
         val updates = result.getOrThrow().filter { policy.allowsPrompt(it.pluginId) }
         if (updates.isEmpty()) return
 
@@ -186,7 +186,7 @@ class UpdatePromptService(
         prompt = null
     }
 
-    /** Apply the prompted updates; invoked from the toast's action button. */
+    /** Retire stale mixed prompts only after a successful store check can re-offer remaining opt-outs. */
     private suspend fun retireManagedPrompt(policy: HostAutomaticUpdatePolicy) {
         val current = prompt ?: return
         if (current.offered.keys.any { !policy.allowsPrompt(it) }) {
@@ -195,6 +195,7 @@ class UpdatePromptService(
         }
     }
 
+    /** Apply the prompted updates; invoked from the toast's action button. */
     private fun performUpdate(targets: List<UpdateInfo>) {
         if (busy) return
         busy = true
@@ -213,7 +214,7 @@ class UpdatePromptService(
                 val cancelled = mutableListOf<UpdateInfo>()
                 for (target in targets) {
                     // A stale toast must not race the host after a preference change.
-                    if (!HostAutomaticUpdatePolicy.read().allowsPrompt(target.pluginId)) continue
+                    if (!readPolicy().allowsPrompt(target.pluginId)) continue
                     val result = runCatching { apiImpl.updatePlugin(target.pluginId) }
                         .getOrElse { InstallResult.LoadFailed(it.message ?: "Unknown error") }
                     when {

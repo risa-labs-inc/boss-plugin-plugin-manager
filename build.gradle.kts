@@ -118,6 +118,7 @@ dependencies {
     compileOnly("io.ktor:ktor-client-cio:3.4.0")
 
     testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
 
     // The serialization RUNTIME for tests, deliberately newer than the `implementation` above.
     //
