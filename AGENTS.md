@@ -182,8 +182,18 @@ BossConsole publishes optional JVM properties `boss.plugins.autoUpdate.enabled` 
 preserve manual prompts on older hosts. Automatic mode suppresses proactive prompts
 except for explicit per-plugin opt-outs. Preferences can change during a session, so
 recheck after store requests and before a toast action updates each plugin. Explicit
-Updates-tab controls remain available. Failed checks preserve the current prompt; retire mixed prompts only after a successful
-check can immediately re-offer remaining opt-outs. Host and Toolbox use the same
-`.plugin-update-locks/<SHA-256 of UTF-8 plugin ID>.lock` protocol for updates and
-version installs. The updated host and Toolbox companion must both ship for this
-cross-installer protection. Keep lock files permanently so all contenders use the same inode.
+Updates-tab controls remain available. Failed checks preserve the current prompt;
+retire mixed prompts only after a successful check can immediately re-offer opt-outs.
+Replacing a mixed offer deliberately clears all its records, so disabling automatic
+mode later can offer the formerly managed plugins again. Prompt replacement and
+record changes share one mutex, preventing overlapping checks from clearing a
+newer prompt's deduplication records.
+
+Host and Toolbox share `.plugin-update-locks/<SHA-256 of UTF-8 plugin ID>.lock` for
+all installer mutations, including uninstall. GitHub/file installs discover their
+manifest identity before acquiring the lease; existing update fallbacks reuse the
+held identity and reject mismatched manifests. Read installed state again inside
+the lease. A busy lease is a neutral result, preserving toast deduplication records
+and avoiding a false update-failure tally. Both host and Toolbox companion releases
+must ship for cross-installer protection. Keep lock files permanently: deleting one
+allows another installer to lock a new inode while the old inode is still locked.

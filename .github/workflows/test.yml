@@ -10,7 +10,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     env:
       # Selects the downloaded-jar branch in build.gradle.kts rather than the sibling
       # checkout, which only exists on a developer machine.
@@ -29,6 +33,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Fetch the latest plugin api jar
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -47,6 +52,7 @@ jobs:
           test -s build/downloaded-deps/boss-plugin-api.jar
 
       - name: Run tests
+        shell: bash
         run: ./gradlew test --no-daemon
 
       # buildPluginJar is where this repo's packaged-jar assertions live (plugin.json stamped
@@ -59,11 +65,12 @@ jobs:
       # 1.0.85 was passing locally and not running here at all, which is the worst shape a
       # guard can have. It depends on buildPluginJar, so this costs one task, not one build.
       - name: Build the plugin jar (runs the packaged-bytecode and api-leak guards)
+        shell: bash
         run: ./gradlew buildPluginJar verifyNoApiLeak --no-daemon
 
       - name: Upload test report on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-results-${{ matrix.os }}
           path: build/reports/tests/test

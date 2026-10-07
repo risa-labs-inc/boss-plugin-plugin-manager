@@ -76,6 +76,7 @@ import androidx.compose.material.Icon
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
 import androidx.compose.material.TextFieldDefaults
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Check
@@ -959,7 +960,9 @@ private fun VersionSheetDialog(
 
             when {
                 sheet.isLoading -> Text("Loading versions…", color = BossThemeColors.TextSecondary, fontSize = 13.sp)
-                sheet.error != null -> Text(sheet.error, color = BossThemeColors.ErrorColor, fontSize = 13.sp)
+                sheet.error != null -> Text(sheet.error,
+                    color = if (isNeutralInstallNotice(sheet.error)) BossThemeColors.TextSecondary else BossThemeColors.ErrorColor,
+                    fontSize = 13.sp)
                 sheet.versions.isEmpty() -> Text("No published versions in the store.", color = BossThemeColors.TextSecondary, fontSize = 13.sp)
                 else -> LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1845,10 +1848,12 @@ private fun ErrorBanner(
     message: String,
     onDismiss: () -> Unit
 ) {
+    val neutral = isNeutralInstallNotice(message)
+    val color = if (neutral) BossThemeColors.TextSecondary else BossThemeColors.ErrorColor
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(BossThemeColors.ErrorColor.copy(alpha = 0.15f))
+            .background(color.copy(alpha = 0.15f))
             .padding(12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1858,15 +1863,15 @@ private fun ErrorBanner(
             modifier = Modifier.weight(1f)
         ) {
             Icon(
-                Icons.Default.Warning,
+                if (neutral) Icons.Default.Info else Icons.Default.Warning,
                 contentDescription = null,
-                tint = BossThemeColors.ErrorColor,
+                tint = color,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(Modifier.width(8.dp))
             Text(
                 text = message,
-                color = BossThemeColors.ErrorColor,
+                color = color,
                 fontSize = 13.sp
             )
         }
@@ -1879,7 +1884,7 @@ private fun ErrorBanner(
             Icon(
                 Icons.Default.Close,
                 contentDescription = "Dismiss",
-                tint = BossThemeColors.ErrorColor,
+                tint = color,
                 modifier = Modifier.size(14.dp)
             )
         }
