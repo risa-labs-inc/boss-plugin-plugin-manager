@@ -1271,6 +1271,10 @@ class PluginManagerAPIImpl private constructor(
             val pluginId = readPluginIdFromJar(jarFile)
                 ?: return@withContext InstallResult.LoadFailed("Could not read plugin identity from JAR")
             withUpdateLease(pluginId) {
+                if (readPluginIdFromJar(jarFile) != pluginId) {
+                    return@withUpdateLease InstallResult.LoadFailed("Local JAR identity changed before installation")
+                }
+                val previousJarPath = getInstalledPlugin(pluginId)?.jarPath
                 pluginsDir.mkdirs()
                 val destFile = File(pluginsDir, jarFile.name)
                 var staged: File? = null
@@ -1295,6 +1299,7 @@ class PluginManagerAPIImpl private constructor(
                             if (loaderDelegate == null) "No plugin loader available"
                             else "Failed to load plugin from ${destFile.name} (see app logs for details)"
                         )
+                    cleanupOldVersionJars(pluginId, destFile, previousJarPath)
                     val pluginInfo = loadedInfo.toPluginInfo().copy(
                         jarPath = destFile.absolutePath, installedAt = System.currentTimeMillis())
                     refreshInstalledPlugins()

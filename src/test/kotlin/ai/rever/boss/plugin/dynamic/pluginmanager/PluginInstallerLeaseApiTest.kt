@@ -67,13 +67,15 @@ class PluginInstallerLeaseApiTest {
         var loads = 0
         var onRead: (() -> Unit)? = null
         var allowUnload = true
+        var failLoad = false
         override fun getLoadedPlugins(): List<LoadedPluginInfo> {
             reads++
             onRead?.invoke()
             return loaded
         }
-        override suspend fun loadPlugin(jarPath: String): LoadedPluginInfo {
+        override suspend fun loadPlugin(jarPath: String): LoadedPluginInfo? {
             loads++
+            if (failLoad) return null
             return LoadedPluginInfo(ID, "Fixture", "2.0.0", jarPath = jarPath).also { loaded = listOf(it) }
         }
         override suspend fun unloadPlugin(pluginId: String): Boolean {
@@ -147,6 +149,59 @@ class PluginInstallerLeaseApiTest {
                 }
             }
         }.toByteArray()
+
+    @Test
+    fun `successful local install removes prior same identity jars and signatures but keeps unrelated plugins`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            val oldSignature = File("${original.path}.sig").apply { writeText("old signature") }
+            val duplicate = File(plugins, "another-old-version.jar").apply { writeBytes(jar("0.9.0")) }
+            val duplicateSignature = File("${duplicate.path}.sig").apply { writeText("older signature") }
+            val unrelated = File(plugins, "unrelated.jar").apply { writeBytes(jar(id = "other.plugin")) }
+            val unrelatedSignature = File("${unrelated.path}.sig").apply { writeText("unrelated signature") }
+            val unrelatedBytes = unrelated.readBytes()
+            val incoming = File(directory, "local-new-name.jar").apply { writeBytes(jar()) }
+            val result = assertIs<InstallResult.Success>(api.installFromFile(incoming.path))
+            assertEquals(File(plugins, incoming.name).absolutePath, result.plugin.jarPath)
+            assertContentEquals(incoming.readBytes(), File(result.plugin.jarPath).readBytes())
+            assertFalse(original.exists())
+            assertFalse(oldSignature.exists())
+            assertFalse(duplicate.exists())
+            assertFalse(duplicateSignature.exists())
+            assertContentEquals(unrelatedBytes, unrelated.readBytes())
+            assertEquals("unrelated signature", unrelatedSignature.readText())
+        }
+    }
+
+    @Test
+    fun `failed local load preserves the previous jar and signature`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            val previousBytes = original.readBytes()
+            val signature = File("${original.path}.sig").apply { writeText("previous signature") }
+            val incoming = File(directory, "local-new-name.jar").apply { writeBytes(jar()) }
+            delegate.failLoad = true
+            assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
+            assertContentEquals(previousBytes, original.readBytes())
+            assertEquals("previous signature", signature.readText())
+            assertEquals(1, delegate.loads)
+        }
+    }
+
+    @Test
+    fun `same directory local source identity is rechecked after the lease refresh before unload`() = runBlocking {
+        for (replacement in listOf("missing manifest".toByteArray(), jar(id = "other.plugin"))) {
+            fixture {
+                val incoming = File(plugins, "incoming.jar").apply { writeBytes(jar()) }
+                delegate.onRead = { incoming.writeBytes(replacement) }
+                assertEquals(InstallResult.LoadFailed("Local JAR identity changed before installation"),
+                    api.installFromFile(incoming.path))
+                assertNoMutation()
+                assertContentEquals(replacement, incoming.readBytes())
+                PluginUpdateLease.acquire(plugins, ID).getOrThrow().close()
+            }
+        }
+    }
 
     @Test
     fun `ordinary in lease refresh failures return installer results for every install route`(): Unit = runBlocking {

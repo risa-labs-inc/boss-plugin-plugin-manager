@@ -1198,8 +1198,7 @@ class PluginManagerViewModel(
                     _state.update {
                         it.copy(
                             busyPlugins = it.busyPlugins - pluginId,
-                            error = if (result.wasBusy()) INSTALL_BUSY_NOTICE
-                                else "Uninstall failed: ${result.error}",
+                            error = uninstallFailureNotice(result),
                         )
                     }
                 }
@@ -1780,7 +1779,7 @@ internal fun updateAllError(
         else -> "Failed to update: " + failures.joinToString(", ") { "${it.first} (${it.second})" }
     }
     val busy = competing.takeIf { it.isNotEmpty() }
-        ?.let { INSTALL_COMPETING_PREFIX + it.joinToString(", ") }
+        ?.let { competingInstallNotice(it.joinToString(", ")) }
     return listOfNotNull(failure, busy).takeIf { it.isNotEmpty() }?.joinToString("\n")
 }
 

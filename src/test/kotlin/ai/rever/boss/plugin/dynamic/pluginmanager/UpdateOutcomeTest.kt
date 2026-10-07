@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.UninstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -97,9 +98,20 @@ class UpdateOutcomeTest {
             assertNull(failureReasonFor(result, action))
             val notice = outcomeErrorFor(result, action)!!
             assertEquals(INSTALL_BUSY_NOTICE, notice)
+            assertTrue(notice.contains("restart BOSS"), "Persistent contention must explain recovery")
             assertTrue(isNeutralInstallNotice(notice), "Contention must use informational styling")
             assertFalse(isNeutralInstallNotice(outcomeErrorFor(InstallResult.DownloadFailed("HTTP 503"), action)!!))
         }
+    }
+
+    @Test
+    fun `uninstall contention stays neutral and explains persistent busy recovery`() {
+        val notice = uninstallFailureNotice(UninstallResult.Failed(UPDATE_INSTALL_BUSY))
+        assertTrue(isNeutralInstallNotice(notice))
+        assertTrue(notice.contains("restart BOSS"), "Persistent contention must explain recovery")
+        val failure = uninstallFailureNotice(UninstallResult.Failed("Permission denied"))
+        assertFalse(isNeutralInstallNotice(failure))
+        assertTrue(failure.contains("Permission denied"))
     }
 
     @Test
@@ -162,7 +174,9 @@ class UpdateOutcomeTest {
         assertTrue(notice.contains("Failed Plugin") && notice.contains("HTTP 503"))
         assertTrue(notice.contains("Busy Plugin") && notice.contains(INSTALL_COMPETING_PREFIX))
         assertFalse(isNeutralInstallNotice(notice), "A mixed outcome must retain failure styling")
-        assertTrue(isNeutralInstallNotice(updateAllError(emptyList(), listOf("Busy Plugin"))!!))
+        val busyOnly = updateAllError(emptyList(), listOf("Busy Plugin"))!!
+        assertTrue(isNeutralInstallNotice(busyOnly))
+        assertTrue(busyOnly.contains("restart BOSS"), "Batch contention must explain recovery")
     }
 
     @Test

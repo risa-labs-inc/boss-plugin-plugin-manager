@@ -118,7 +118,7 @@ class UpdatePromptPolicyRegressionTest {
         notes.action!!.invoke()
         testScheduler.runCurrent()
         assertEquals(1, installs)
-        assertEquals("Already being installed or updated: A", notes.shown.last())
+        assertEquals(competingInstallNotice("A"), notes.shown.last())
         assertEquals(NotificationType.INFO, notes.types.last())
         service.checkAndPrompt()
         assertEquals(2, notes.shown.size, "A busy installer must not clear the existing version record")

@@ -259,7 +259,7 @@ class UpdatePromptService(
                 // Preserve busy records: competing installers report through their own UI.
                 if (competing.isNotEmpty()) {
                     notifications?.showToast(
-                        message = INSTALL_COMPETING_PREFIX + competing.joinToString(", ") { it.displayName },
+                        message = competingInstallNotice(competing.joinToString(", ") { it.displayName }),
                         type = NotificationType.INFO,
                     )
                 }
