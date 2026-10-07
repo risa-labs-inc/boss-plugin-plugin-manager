@@ -134,12 +134,17 @@ class PluginInstallerLeaseApiTest {
         try { f.block() } finally { f.scope.cancel(); directory.deleteRecursively() }
     }
 
-    private fun jar(version: String = "2.0.0", id: String = ID): ByteArray =
+    private fun jar(version: String = "2.0.0", id: String = ID, payload: String? = null): ByteArray =
         ByteArrayOutputStream().also { bytes ->
             ZipOutputStream(bytes).use { zip ->
                 zip.putNextEntry(ZipEntry("META-INF/boss-plugin/plugin.json"))
                 zip.write("""{"pluginId":"$id","version":"$version","displayName":"Fixture"}""".toByteArray())
                 zip.closeEntry()
+                if (payload != null) {
+                    zip.putNextEntry(ZipEntry("implementation.txt"))
+                    zip.write(payload.toByteArray())
+                    zip.closeEntry()
+                }
             }
         }.toByteArray()
 
@@ -179,19 +184,44 @@ class PluginInstallerLeaseApiTest {
     }
 
     @Test
-    fun `install and exact version use refreshed state inside the lease before any network`() = runBlocking {
+    fun `ordinary install uses refreshed state inside the lease before any network`() = runBlocking {
         fixture {
             original.writeBytes(jar("2.0.0"))
             val before = original.readBytes()
             delegate.loaded = listOf(info("2.0.0"))
             delegate.onRead = { assertTrue(PluginUpdateLease.acquire(plugins, ID).isFailure) }
             assertEquals(InstallResult.AlreadyInstalled("2.0.0"), api.installPlugin(ID))
-            assertEquals(InstallResult.AlreadyInstalled("2.0.0"), api.installVersion(ID, "2.0.0"))
             assertEquals("2.0.0", api.getInstalledPlugin(ID)?.version)
             assertEquals(emptyList(), requests)
             assertContentEquals(before, original.readBytes())
             assertEquals(0, delegate.unloads)
             assertEquals(0, delegate.loads)
+        }
+    }
+
+    @Test
+    fun `an explicit current version repairs its jar bytes and reloads instead of returning already installed`() = runBlocking {
+        fixture {
+            val damaged = jar("2.0.0", payload = "damaged implementation")
+            val requested = jar("2.0.0", payload = "replacement implementation")
+            val current = File(plugins, "test_plugin_2.0.0.jar").apply { writeBytes(damaged) }
+            delegate.loaded = listOf(info("2.0.0", current))
+            connection = { url ->
+                when {
+                    url.endsWith("/download/2.0.0") -> MemoryConnection(
+                        """{"downloadUrl":"https://fixture.invalid/repair.jar","version":"2.0.0"}""".toByteArray())
+                    url == "https://fixture.invalid/repair.jar" -> MemoryConnection(requested)
+                    else -> error("Unexpected request $url")
+                }
+            }
+            val result = api.installVersion(ID, "2.0.0")
+            assertIs<InstallResult.Success>(result)
+            assertEquals(current.path, result.plugin.jarPath)
+            assertContentEquals(requested, current.readBytes())
+            assertEquals(2, requests.size)
+            assertEquals(1, delegate.unloads)
+            assertEquals(1, delegate.loads)
+            assertFalse(plugins.listFiles()!!.any { it.name.endsWith(".part") })
         }
     }
 

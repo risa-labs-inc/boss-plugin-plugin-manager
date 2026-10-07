@@ -197,7 +197,8 @@ the lease. A busy lease is a neutral result, preserving toast deduplication reco
 and avoiding a false update-failure tally; the host reports its own failures.
 Targets handed to automatic mode by a stale toast clear matching records, so
 switching back to manual mode can re-offer them. Explicit GitHub URL installs
-still permit same-version repair; only updater fallbacks skip current versions. Both host and Toolbox companion releases
+and the version picker still permit same-version repair; only updater fallbacks
+skip current versions. Both host and Toolbox companion releases
 must ship for cross-installer protection. Keep lock files permanently: deleting one
 allows another installer to lock a new inode while the old inode is still locked.
 
@@ -210,4 +211,7 @@ still drop POSIX process locks by closing a contended descriptor. This is intern
 coordination state, not a string-valued preference signal. Its non-string value
 means diagnostics must not call `System.getProperties().list/store`; use
 `stringPropertyNames()` and `getProperty()` for string-only snapshots. A source
-audit found no host/Toolbox consumer using those unsafe dump methods.
+audit found no host/Toolbox consumer using those unsafe dump methods; bundled
+third-party library consumers were not audited. If abnormal teardown leaves a
+registry owner behind, restart BOSS to recover. Never probe a busy owner by
+opening/closing its lock file: that could drop its active POSIX OS lock.

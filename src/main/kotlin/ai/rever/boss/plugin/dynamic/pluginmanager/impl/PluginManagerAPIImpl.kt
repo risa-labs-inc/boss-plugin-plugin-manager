@@ -556,10 +556,6 @@ class PluginManagerAPIImpl private constructor(
     override suspend fun installVersion(pluginId: String, version: String): InstallResult = withContext(Dispatchers.IO) {
         withUpdateLease(pluginId) {
             val existing = getInstalledPlugin(pluginId)
-            // A locked plugin may still run the old version while disk contains a pending update.
-            if (existing?.version == version && readPluginVersionFromJar(File(existing.jarPath)) == version) {
-                return@withUpdateLease InstallResult.AlreadyInstalled(version)
-            }
             val isUpdate = existing != null
             withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), isUpdate) {
                 installVersionInternal(pluginId, version, existing, progressKey = pluginId)

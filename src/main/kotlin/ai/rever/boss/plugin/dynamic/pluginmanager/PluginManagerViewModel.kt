@@ -1356,8 +1356,7 @@ class PluginManagerViewModel(
             _state.update {
                 it.copy(
                     isLoading = false,
-                    error = updateAllError(failed) ?: competing.takeIf { it.isNotEmpty() }
-                        ?.let { INSTALL_COMPETING_PREFIX + it.joinToString(", ") },
+                    error = updateAllError(failed, competing),
                     // Clearing this outright named a plugin in the banner and took its Update
                     // button away in the same breath, leaving no action for the one thing it
                     // had reported.
@@ -1770,12 +1769,19 @@ internal fun outcomeErrorFor(
  * Takes display-name-to-reason pairs. Naming the plugins without their causes was the old
  * behaviour and is what this exists to correct.
  */
-internal fun updateAllError(failures: List<Pair<String, String>>): String? =
-    when (failures.size) {
+internal fun updateAllError(
+    failures: List<Pair<String, String>>,
+    competing: List<String> = emptyList(),
+): String? {
+    val failure = when (failures.size) {
         0 -> null
         1 -> "Failed to update ${failures[0].first}: ${failures[0].second}"
         else -> "Failed to update: " + failures.joinToString(", ") { "${it.first} (${it.second})" }
     }
+    val busy = competing.takeIf { it.isNotEmpty() }
+        ?.let { INSTALL_COMPETING_PREFIX + it.joinToString(", ") }
+    return listOfNotNull(failure, busy).takeIf { it.isNotEmpty() }?.joinToString("\n")
+}
 
 /**
  * The update rows that survive a run: drop what actually succeeded, keep everything else.

@@ -157,6 +157,15 @@ class UpdateOutcomeTest {
     }
 
     @Test
+    fun `mixed failed and competing updates both explain why their rows remain`() {
+        val notice = updateAllError(listOf("Failed Plugin" to "HTTP 503"), listOf("Busy Plugin"))!!
+        assertTrue(notice.contains("Failed Plugin") && notice.contains("HTTP 503"))
+        assertTrue(notice.contains("Busy Plugin") && notice.contains(INSTALL_COMPETING_PREFIX))
+        assertFalse(isNeutralInstallNotice(notice), "A mixed outcome must retain failure styling")
+        assertTrue(isNeutralInstallNotice(updateAllError(emptyList(), listOf("Busy Plugin"))!!))
+    }
+
+    @Test
     fun `update all keeps rows that did not succeed, including ones that arrived mid-run`() {
         val current = listOf(update("a"), update("b"), update("arrived.during.the.run"))
 
