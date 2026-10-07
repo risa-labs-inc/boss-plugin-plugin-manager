@@ -221,6 +221,14 @@ The lease intentionally spans download, state refresh and promotion; competing
 host/Toolbox actions provide their own outcome UI. The host retries busy leases
 without consuming its failure budget. Both revised releases must ship: an older
 participant can still drop POSIX process locks by closing a contended descriptor.
+Canonical-path ownership assumes lock directories do not alias the same inode
+through hard links or bind mounts.
 Registry mutation by arbitrary in-process code is not a security boundary; plugins
-already share JVM/file access. If abnormal teardown leaves an owner behind, restart
-BOSS. Never probe a busy owner by opening/closing its lock file.
+already share JVM/file access. Remote JMX access must be restricted to trusted
+administrators: invoking the registry getter exposes the live process owner map.
+Release an owner only after channel close returns successfully. Java can report
+`isOpen == false` before native descriptor cleanup completes, so a thrown close
+retains the token even after repeated close calls. A release failure alone does
+not retain it when channel close succeeds. If abnormal teardown or failed close
+leaves an owner behind, restart BOSS to recover. Never probe a busy owner by
+opening/closing its lock file.

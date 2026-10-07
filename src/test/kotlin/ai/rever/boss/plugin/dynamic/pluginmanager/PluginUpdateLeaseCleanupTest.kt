@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import java.io.IOException
+import java.nio.file.Files
 import java.nio.ByteBuffer
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
@@ -12,6 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertSame
 
 class PluginUpdateLeaseCleanupTest {
@@ -33,7 +35,7 @@ class PluginUpdateLeaseCleanupTest {
         override fun transferFrom(src: ReadableByteChannel, position: Long, count: Long): Long = error("unused")
         override fun map(mode: MapMode, position: Long, size: Long): MappedByteBuffer = error("unused")
         override fun lock(position: Long, size: Long, shared: Boolean): FileLock = error("unused")
-        override fun tryLock(position: Long, size: Long, shared: Boolean): FileLock? = error("unused")
+        override fun tryLock(position: Long, size: Long, shared: Boolean): FileLock? = null
     }
 
     private class Lock(channel: FileChannel, private val failure: Throwable? = null) :
@@ -44,18 +46,21 @@ class PluginUpdateLeaseCleanupTest {
     }
 
     @Test
-    fun `ordinary release and close failures preserve a completed result and clear a closed gate`() {
+    fun `ordinary release and close failures preserve a completed result and retain the uncertain gate`() {
         val channel = Channel(IOException("private close details"))
         val lock = Lock(channel, IOException("private release details"))
         val owners = ConcurrentHashMap<String, Any>()
         val token = Any()
         owners["fixture"] = token
-        val result = PluginUpdateLease(channel, lock, owners, "fixture", token).use { "committed" }
+        val lease = PluginUpdateLease(channel, lock, owners, "fixture", token)
+        val result = lease.use { "committed" }
         assertEquals("committed", result)
         assertEquals(1, lock.releases)
         assertEquals(1, channel.closes)
         assertFalse(channel.isOpen)
-        assertFalse(owners.containsKey("fixture"))
+        assertSame(token, owners["fixture"])
+        lease.close()
+        assertSame(token, owners["fixture"], "Repeated no-op close cannot resolve uncertain native cleanup")
     }
 
     @Test
@@ -66,11 +71,14 @@ class PluginUpdateLeaseCleanupTest {
         val owners = ConcurrentHashMap<String, Any>()
         val token = Any()
         owners["fixture"] = token
-        val caught = assertFailsWith<AssertionError> { PluginUpdateLease(channel, lock, owners, "fixture", token).close() }
+        val lease = PluginUpdateLease(channel, lock, owners, "fixture", token)
+        val caught = assertFailsWith<AssertionError> { lease.close() }
         assertSame(fatal, caught)
         assertEquals(1, channel.closes)
         assertEquals(0, fatal.suppressed.size)
-        assertFalse(owners.containsKey("fixture"))
+        assertSame(token, owners["fixture"])
+        lease.close()
+        assertSame(token, owners["fixture"])
     }
 
     @Test
@@ -83,7 +91,7 @@ class PluginUpdateLeaseCleanupTest {
         assertSame(fatal, assertFailsWith<AssertionError> {
             PluginUpdateLease(channel, Lock(channel), owners, "fixture", token).close()
         })
-        assertFalse(owners.containsKey("fixture"))
+        assertSame(token, owners["fixture"])
     }
 
     @Test
@@ -123,6 +131,68 @@ class PluginUpdateLeaseCleanupTest {
             PluginUpdateLease(channel, Lock(channel, original), owners, "fixture", token).close()
         })
         assertEquals(listOf(original), fatal.suppressed.toList())
+        assertSame(token, owners["fixture"])
+    }
+
+    @Test
+    fun `ordinary release failure with successful channel close frees the gate`() {
+        val channel = Channel()
+        val owners = ConcurrentHashMap<String, Any>()
+        val token = Any()
+        owners["fixture"] = token
+        val result = PluginUpdateLease(channel, Lock(channel, IOException("release fixture")),
+            owners, "fixture", token).use { "committed" }
+        assertEquals("committed", result)
         assertFalse(owners.containsKey("fixture"))
+    }
+
+    @Test
+    fun `fatal release failure with successful channel close frees the gate`() {
+        val fatal = AssertionError("release fixture")
+        val channel = Channel()
+        val owners = ConcurrentHashMap<String, Any>()
+        val token = Any()
+        owners["fixture"] = token
+        assertSame(fatal, assertFailsWith<AssertionError> {
+            PluginUpdateLease(channel, Lock(channel, fatal), owners, "fixture", token).close()
+        })
+        assertEquals(1, channel.closes)
+        assertFalse(owners.containsKey("fixture"))
+    }
+
+    @Test
+    fun `acquisition cleanup retains the gate when ordinary or fatal channel close fails`() {
+        for (failure in listOf(IOException("close fixture"), AssertionError("fatal close fixture"))) {
+            val directory = Files.createTempDirectory("lease-acquire-close-failure").toFile()
+            val owners = PluginUpdateProcessRegistry.owners()
+            var path: String? = null
+            var token: Any? = null
+            try {
+                val channel = Channel(failure)
+                val acquire = {
+                    PluginUpdateLease.acquire(directory, "fixture") { lockFile ->
+                        path = lockFile.path
+                        token = owners[lockFile.path]!!
+                        channel
+                    }
+                }
+                if (failure is Error) {
+                    assertSame(failure, assertFailsWith<AssertionError> { acquire() })
+                    assertEquals(1, failure.suppressed.size)
+                    assertIs<PluginUpdateLeaseBusyException>(failure.suppressed.single())
+                } else {
+                    assertIs<PluginUpdateLeaseBusyException>(acquire().exceptionOrNull())
+                }
+                assertFalse(channel.isOpen, "Java closed state alone cannot establish native cleanup success")
+                assertEquals(Any::class.java, token!!.javaClass)
+                assertIs<PluginUpdateLeaseBusyException>(
+                    PluginUpdateLease.acquire(directory, "fixture").exceptionOrNull())
+                assertSame(token, owners[path])
+            } finally {
+                // Only this fixture's deliberately retained token is removed; never replace the registry.
+                path?.let { ownerPath -> token?.let { owners.remove(ownerPath, it) } }
+                directory.deleteRecursively()
+            }
+        }
     }
 }

@@ -29,13 +29,21 @@ internal class PluginUpdateLeaseBusyException(pluginId: String) :
  * bootstrap-JDK process gate before opening any descriptor for that lock file.
  * POSIX can release the owner's OS lock when a contending channel is closed.
  */
-internal class PluginUpdateLease internal constructor(
-    private val channel: FileChannel,
+internal class PluginUpdateLease private constructor(
+    private val channelClose: PluginUpdateLeaseChannelClose,
     private val lock: FileLock,
     private val processOwners: ConcurrentHashMap<String, Any>,
     private val ownerPath: String,
     private val ownerToken: Any,
 ) : Closeable {
+    internal constructor(
+        channel: FileChannel,
+        lock: FileLock,
+        processOwners: ConcurrentHashMap<String, Any>,
+        ownerPath: String,
+        ownerToken: Any,
+    ) : this(PluginUpdateLeaseChannelClose(channel), lock, processOwners, ownerPath, ownerToken)
+
     @Synchronized
     override fun close() {
         var cleanupFailure: Throwable? = null
@@ -47,17 +55,29 @@ internal class PluginUpdateLease internal constructor(
             cleanupFailure = failure
         } finally {
             try {
-                cleanupFailure = closeChannel(channel, cleanupFailure)
+                cleanupFailure = closeChannel(channelClose, cleanupFailure)
             } finally {
-                // A failed close that leaves the descriptor open must keep the gate.
-                if (!channel.isOpen) processOwners.remove(ownerPath, ownerToken)
+                // Java marks a channel closed before native cleanup; a thrown close is uncertain.
+                // Keep that uncertainty sticky even when repeated close becomes a no-op.
+                if (channelClose.confirmed) processOwners.remove(ownerPath, ownerToken)
             }
         }
         (cleanupFailure as? Error)?.let { throw it }
     }
 
     companion object {
-        fun acquire(pluginDir: File, pluginId: String): Result<PluginUpdateLease> = try {
+        fun acquire(pluginDir: File, pluginId: String): Result<PluginUpdateLease> =
+            acquire(pluginDir, pluginId) { lockFile ->
+                FileChannel.open(lockFile.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+            }
+
+        internal fun acquire(
+            pluginDir: File,
+            pluginId: String,
+            openChannel: (File) -> FileChannel,
+        ): Result<PluginUpdateLease> = try {
+            // Resolve and allocate cleanup state before claiming ownership or opening a descriptor.
+            val channelClose = PluginUpdateLeaseChannelClose(null)
             val directory = File(pluginDir, ".plugin-update-locks")
             check(directory.isDirectory || directory.mkdirs()) { "Cannot create plugin update lock directory" }
             val name = MessageDigest.getInstance("SHA-256").digest(pluginId.toByteArray(Charsets.UTF_8))
@@ -68,17 +88,17 @@ internal class PluginUpdateLease internal constructor(
             val token = Any() // java.lang.Object; never retain a plugin/host classloader in the shared map.
             if (owners.putIfAbsent(ownerPath, token) != null) throw PluginUpdateLeaseBusyException(pluginId)
 
-            var channel: FileChannel? = null
             try {
-                channel = FileChannel.open(lockFile.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+                val channel = openChannel(lockFile)
+                channelClose.attach(channel)
                 val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
                     ?: throw PluginUpdateLeaseBusyException(pluginId)
-                Result.success(PluginUpdateLease(channel, lock, owners, ownerPath, token))
+                Result.success(PluginUpdateLease(channelClose, lock, owners, ownerPath, token))
             } catch (failure: Throwable) {
                 try {
-                    throw if (channel != null) closeChannel(channel, failure) ?: failure else failure
+                    throw closeChannel(channelClose, failure) ?: failure
                 } finally {
-                    if (channel == null || !channel.isOpen) owners.remove(ownerPath, token)
+                    if (channelClose.confirmed) owners.remove(ownerPath, token)
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -88,9 +108,9 @@ internal class PluginUpdateLease internal constructor(
         }
 
         /** Ordinary cleanup errors cannot turn a completed installation into a failure. */
-        private fun closeChannel(channel: FileChannel, previous: Throwable?): Throwable? {
+        private fun closeChannel(channelClose: PluginUpdateLeaseChannelClose, previous: Throwable?): Throwable? {
             val fatal = try {
-                channel.close()
+                channelClose.close()
                 null
             } catch (cleanup: Exception) {
                 logCleanup("close", cleanup)
@@ -119,5 +139,25 @@ internal class PluginUpdateLease internal constructor(
             fatal.addSuppressed(failure)
             fatal
         }
+    }
+}
+
+/** A failed native close is sticky even though AbstractInterruptibleChannel reports closed. */
+private class PluginUpdateLeaseChannelClose(private var channel: FileChannel?) {
+    var confirmed: Boolean = channel == null
+        private set
+    private var attempted = false
+
+    fun attach(channel: FileChannel) {
+        confirmed = false
+        this.channel = channel
+    }
+
+    fun close() {
+        if (attempted) return
+        attempted = true
+        val attached = channel
+        attached?.close()
+        confirmed = attached == null || !attached.isOpen
     }
 }
