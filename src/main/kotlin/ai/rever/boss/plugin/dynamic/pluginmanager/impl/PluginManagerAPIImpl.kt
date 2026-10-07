@@ -851,7 +851,7 @@ class PluginManagerAPIImpl private constructor(
             // so only in its log). Blank resolves to UNKNOWN and installs, which is what keeps
             // this working against a store that does not send the field yet.
             bossFloorRefusal(downloadInfo)?.let { return it }
-            if (version == null) {
+            if (version == null && downloadInfo.version.isNotBlank()) {
                 getInstalledPlugin(pluginId)?.takeIf { !isVersionNewer(downloadInfo.version, it.version) }
                     ?.let { return InstallResult.AlreadyInstalled(it.version) }
             }
@@ -1173,7 +1173,7 @@ class PluginManagerAPIImpl private constructor(
             return withIncomingLease(incomingPluginId, heldPluginId) {
                 val incomingVersion = readPluginVersionFromJar(partFile)
                 getInstalledPlugin(incomingPluginId)?.takeIf {
-                    heldPluginId != null && incomingVersion != null && !isVersionNewer(incomingVersion, it.version)
+                    heldPluginId != null && !incomingVersion.isNullOrBlank() && !isVersionNewer(incomingVersion, it.version)
                 }?.let { return@withIncomingLease InstallResult.AlreadyInstalled(it.version) }
                 val previousJarPath = getInstalledPlugin(incomingPluginId)?.jarPath
 
@@ -1483,7 +1483,7 @@ class PluginManagerAPIImpl private constructor(
             // here does not merely fail to arrive, it takes the working plugin with it - which is
             // how a 1.2.21 filename ended up holding 1.2.22 bytes that no longer loaded.
             bossFloorRefusal(downloadInfo)?.let { return it }
-            if (version == null) {
+            if (version == null && downloadInfo.version.isNotBlank()) {
                 getInstalledPlugin(pluginId)?.takeIf { !isVersionNewer(downloadInfo.version, it.version) }
                     ?.let { return InstallResult.AlreadyInstalled(it.version) }
             }
@@ -1517,6 +1517,8 @@ class PluginManagerAPIImpl private constructor(
                 tempFile.delete()
                 return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
             }
+            val installedVersion = downloadInfo.version.takeIf { it.isNotBlank() }
+                ?: readPluginVersionFromJar(tempFile).orEmpty()
 
             destinationIdentityRefusal(destFile, pluginId)?.let {
                 tempFile.delete()
@@ -1552,7 +1554,7 @@ class PluginManagerAPIImpl private constructor(
             persistSignatureSidecar(destFile, downloadInfo.signature)
 
             val pluginInfo = existing.copy(
-                version = downloadInfo.version,
+                version = installedVersion,
                 installedAt = System.currentTimeMillis()
             )
 
@@ -1635,7 +1637,7 @@ class PluginManagerAPIImpl private constructor(
 
             val incomingVersion = readPluginVersionFromJar(tempFile)
             getInstalledPlugin(expectedPluginId)?.takeIf {
-                incomingVersion != null && !isVersionNewer(incomingVersion, it.version)
+                !incomingVersion.isNullOrBlank() && !isVersionNewer(incomingVersion, it.version)
             }?.let {
                 tempFile.delete()
                 return InstallResult.AlreadyInstalled(it.version)

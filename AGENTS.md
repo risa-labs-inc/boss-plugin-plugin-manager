@@ -205,7 +205,12 @@ allows another installer to lock a new inode while the old inode is still locked
 The revised process fence uses reserved internal JVM state
 `boss.plugins.updateLease.processOwners`: a bootstrap-JDK ConcurrentHashMap of
 canonical lock paths to java.lang.Object owner tokens, claimed before opening a
-lock-file descriptor. No plugin-defined object may be retained in that registry.
+lock-file descriptor. Keep this protocol identical to BossConsole
+`composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/PluginUpdateLease.kt`
+(`acquire` and `processOwners`), including canonical paths and synchronization on
+`System.getProperties()`. No plugin-defined object may be retained in that registry.
+The lease intentionally spans the download and state refresh as well as promotion;
+the host retries busy leases without consuming its failure budget.
 Host and Toolbox must both ship this revised fence: an older participant can
 still drop POSIX process locks by closing a contended descriptor. This is internal
 coordination state, not a string-valued preference signal. Its non-string value

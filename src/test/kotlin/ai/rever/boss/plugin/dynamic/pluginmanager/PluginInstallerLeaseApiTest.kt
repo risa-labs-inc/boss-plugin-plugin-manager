@@ -412,4 +412,42 @@ class PluginInstallerLeaseApiTest {
         }
     }
 
+
+    @Test
+    fun `a missing or blank offered version still downloads and applies a regular plugin update`() = runBlocking {
+        verifyUnknownOfferedVersion(locked = false)
+    }
+
+    @Test
+    fun `a missing or blank offered version stages a locked update and reports its verified manifest version`() = runBlocking {
+        verifyUnknownOfferedVersion(locked = true)
+    }
+
+    private suspend fun verifyUnknownOfferedVersion(locked: Boolean) {
+        for (offeredVersion in listOf(null, "", " ")) fixture {
+            original.writeBytes(jar("1.0.0", payload = "old implementation"))
+            val requested = jar("2.0.0", payload = "replacement implementation")
+            delegate.loaded = listOf(info("1.0.0", locked = locked))
+            connection = { url ->
+                when {
+                    url.endsWith("/download") -> {
+                        val versionField = offeredVersion?.let { ",\"version\":\"$it\"" }.orEmpty()
+                        MemoryConnection("""{"downloadUrl":"https://fixture.invalid/update.jar"$versionField}""".toByteArray())
+                    }
+                    url == "https://fixture.invalid/update.jar" -> MemoryConnection(requested)
+                    else -> error("Unexpected request $url")
+                }
+            }
+            val result = api.updatePlugin(ID)
+            assertIs<InstallResult.Success>(result, "unknown offered version must not become already-current")
+            assertEquals("2.0.0", result.plugin.version)
+            assertContentEquals(requested, File(result.plugin.jarPath).readBytes())
+            assertEquals(2, requests.size)
+            assertEquals(if (locked) 0 else 1, delegate.unloads)
+            assertEquals(if (locked) 0 else 1, delegate.loads)
+            if (locked) assertEquals("1.0.0", delegate.loaded.single().version)
+            assertFalse(plugins.listFiles()!!.any { it.name.endsWith(".part") || it.name.endsWith(".update") })
+        }
+    }
+
 }
