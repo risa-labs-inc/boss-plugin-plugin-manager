@@ -5,6 +5,9 @@ import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
+import ai.rever.boss.plugin.dynamic.pluginmanager.UPDATE_INSTALL_BUSY
+import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLeaseBusyException
+import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLease
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.TrackedDownloader
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
@@ -26,9 +29,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
-import ai.rever.boss.plugin.dynamic.pluginmanager.UPDATE_INSTALL_BUSY
-import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLeaseBusyException
-import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLease
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
