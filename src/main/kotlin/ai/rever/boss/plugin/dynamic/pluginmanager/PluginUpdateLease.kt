@@ -79,7 +79,7 @@ internal class PluginUpdateLease private constructor(
             // Resolve and allocate cleanup state before claiming ownership or opening a descriptor.
             val channelClose = PluginUpdateLeaseChannelClose(null)
             val directory = File(pluginDir, ".plugin-update-locks")
-            check(directory.isDirectory || directory.mkdirs()) { "Cannot create plugin update lock directory" }
+            check(directory.mkdirs() || directory.isDirectory) { "Cannot create plugin update lock directory" }
             val name = MessageDigest.getInstance("SHA-256").digest(pluginId.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
             val lockFile = File(directory, "$name.lock").canonicalFile
