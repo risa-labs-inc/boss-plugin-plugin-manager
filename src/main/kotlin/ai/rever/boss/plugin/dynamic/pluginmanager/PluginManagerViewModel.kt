@@ -1198,7 +1198,7 @@ class PluginManagerViewModel(
                     _state.update {
                         it.copy(
                             busyPlugins = it.busyPlugins - pluginId,
-                            error = "Uninstall failed: ${result.error}",
+                            error = uninstallFailureNotice(result),
                         )
                     }
                 }
@@ -1329,6 +1329,8 @@ class PluginManagerViewModel(
             // rather than parallel accumulators of names and ids, matching UpdatePromptService.
             val failed = mutableListOf<Pair<String, String>>()
             val succeeded = mutableListOf<String>()
+            val competing = mutableListOf<String>()
+            val alreadyCurrent = mutableListOf<String>()
 
             for (update in updates) {
                 val result = api.updatePlugin(update.pluginId)
@@ -1340,6 +1342,10 @@ class PluginManagerViewModel(
                     failed.add(update.displayName to reason)
                 } else if (result is InstallResult.Success) {
                     succeeded.add(update.pluginId)
+                } else if (result.wasBusy()) {
+                    competing.add(update.displayName)
+                } else if (result is InstallResult.AlreadyInstalled) {
+                    alreadyCurrent.add(update.pluginId)
                 }
             }
 
@@ -1349,11 +1355,11 @@ class PluginManagerViewModel(
             _state.update {
                 it.copy(
                     isLoading = false,
-                    error = updateAllError(failed),
+                    error = updateAllError(failed, competing),
                     // Clearing this outright named a plugin in the banner and took its Update
                     // button away in the same breath, leaving no action for the one thing it
                     // had reported.
-                    updates = remainingUpdates(it.updates, succeeded.toSet()),
+                    updates = remainingUpdates(it.updates, (succeeded + alreadyCurrent).toSet()),
                     postUpdatePrompt = prompt,
                 )
             }
@@ -1717,17 +1723,14 @@ internal fun failureReasonFor(
                 // Checked before any work happens, so nothing failed. It is still worth a word -
                 // see [outcomeErrorFor] - but it is not a failure and must not be counted as one.
                 PluginAction.INSTALL -> null
-                // Not benign here. `updatePluginInternal` reaches `installPluginInternal` only
-                // AFTER `uninstallPlugin` returned Success, and that function's first act is to
-                // return AlreadyInstalled if the plugin is still registered. So this means the
-                // unload reported success while the old version stayed - the update silently did
-                // not happen, which is the exact symptom this change exists to stop hiding.
-                PluginAction.UPDATE -> "version ${result.currentVersion} is still installed"
+                // Only identity/version checks produce this; loader refusals remain failures.
+                // The host may finish the same update before Toolbox acquires its lease.
+                PluginAction.UPDATE -> null
             }
         // A cancel is an answer, not a fault: the user pressed Cancel in the download
         // dialog. Answered here rather than at each button so the Update All banner
         // does not count it as a failure either.
-        is InstallResult.DownloadFailed -> result.error.takeIf { it != DOWNLOAD_CANCELLED }
+        is InstallResult.DownloadFailed -> result.error.takeIf { !result.wasCancelled() && !result.wasBusy() }
         is InstallResult.LoadFailed -> result.error
         // Not currently produced anywhere - nothing in PluginManagerAPIImpl constructs it, and
         // the IPC gate reports DownloadFailed instead. Handled because the sealed class allows
@@ -1750,8 +1753,12 @@ internal fun outcomeErrorFor(
     // Not a failure, so it has no reason - but the user pressed a button and nothing happened,
     // which is the shape of bug this whole change exists to stop. Wording kept from
     // installFromRemote, which has always said exactly this.
+    if (result.wasBusy()) return INSTALL_BUSY_NOTICE
+    if (result is InstallResult.AlreadyInstalled && action == PluginAction.UPDATE) {
+        return ALREADY_CURRENT_PREFIX + result.currentVersion + ")"
+    }
     if (result is InstallResult.AlreadyInstalled && action == PluginAction.INSTALL) {
-        return "Plugin already installed (v${result.currentVersion})"
+        return ALREADY_INSTALLED_PREFIX + result.currentVersion + ")"
     }
     return failureReasonFor(result, action)?.let { reason -> "${action.label} failed: $reason" }
 }
@@ -1762,12 +1769,19 @@ internal fun outcomeErrorFor(
  * Takes display-name-to-reason pairs. Naming the plugins without their causes was the old
  * behaviour and is what this exists to correct.
  */
-internal fun updateAllError(failures: List<Pair<String, String>>): String? =
-    when (failures.size) {
+internal fun updateAllError(
+    failures: List<Pair<String, String>>,
+    competing: List<String> = emptyList(),
+): String? {
+    val failure = when (failures.size) {
         0 -> null
         1 -> "Failed to update ${failures[0].first}: ${failures[0].second}"
         else -> "Failed to update: " + failures.joinToString(", ") { "${it.first} (${it.second})" }
     }
+    val busy = competing.takeIf { it.isNotEmpty() }
+        ?.let { competingInstallNotice(it.joinToString(", ")) }
+    return listOfNotNull(failure, busy).takeIf { it.isNotEmpty() }?.joinToString("\n")
+}
 
 /**
  * The update rows that survive a run: drop what actually succeeded, keep everything else.

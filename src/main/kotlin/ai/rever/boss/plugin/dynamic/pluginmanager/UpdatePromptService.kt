@@ -7,8 +7,9 @@ import ai.rever.boss.plugin.api.PluginLoaderDelegate
 import ai.rever.boss.plugin.api.PluginStorageProvider
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -33,10 +34,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class UpdatePromptService(
     private val scope: CoroutineScope,
-    private val apiImpl: PluginManagerAPIImpl,
+    private val apiImpl: PluginManagerAPI,
     private val loaderDelegate: PluginLoaderDelegate?,
     private val notifications: NotificationProvider?,
-    private val storage: PluginStorageProvider?
+    private val storage: PluginStorageProvider?,
+    private val readPolicy: () -> HostAutomaticUpdatePolicy = HostAutomaticUpdatePolicy::read,
 ) {
 
     @Serializable
@@ -77,63 +79,84 @@ class UpdatePromptService(
 
     /**
      * Check for compatible updates and show a prompt for any not yet
-     * prompted at their current latest version. Safe to call repeatedly
+     * prompted at their current latest version. Automatic mode only prompts for
+     * explicit opt-outs; stale toast actions recheck the current preference. Safe to call repeatedly
      * (startup, realtime events) — dedupe makes extra calls harmless.
+     * Host notification callbacks must remain nonblocking: prompt changes share a
+     * non-reentrant mutex, and toast actions launch their own coroutine.
      */
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
         if (busy) return
-        val updates = runCatching { apiImpl.checkForCompatibleUpdates() }.getOrDefault(emptyList())
-        if (updates.isEmpty()) return
+        val losslessSource = apiImpl as? CompatibleUpdateSource
+        val updatesResult = try {
+            if (losslessSource != null) {
+                losslessSource.checkForCompatibleUpdatesResult().getOrElse { return }
+            } else {
+                apiImpl.checkForCompatibleUpdates()
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return
+        }
+        mutex.withLock {
+            if (busy) return
+            val policy = readPolicy()
+            // Legacy list queries cannot prove success; never retire an existing offer from them.
+            if (losslessSource != null) retireManagedPrompt(policy)
+            val updates = updatesResult.filter { policy.allowsPrompt(it.pluginId) }
+            if (updates.isEmpty()) return
 
-        val fresh = mutex.withLock {
-            val records = loadRecords()
-            updates.filter { records[it.pluginId]?.version != it.newVersion }
-                .also { toPrompt ->
-                    if (toPrompt.isNotEmpty()) {
-                        val now = System.currentTimeMillis()
-                        saveRecords(records + toPrompt.associate {
-                            it.pluginId to PromptRecord(it.newVersion, now)
-                        })
+            val fresh = run {
+                val records = loadRecords()
+                updates.filter { records[it.pluginId]?.version != it.newVersion }
+                    .also { toPrompt ->
+                        if (toPrompt.isNotEmpty()) {
+                            val now = System.currentTimeMillis()
+                            saveRecords(records + toPrompt.associate {
+                                it.pluginId to PromptRecord(it.newVersion, now)
+                            })
+                        }
                     }
-                }
-        }
-        if (fresh.isEmpty()) return
+            }
+            if (fresh.isEmpty()) return
 
-        // Replace any prior prompt still on screen
-        prompt?.let { notifications.dismiss(it.id) }
-        val shown = if (fresh.size == 1) {
-            val u = fresh[0]
-            notifications.showToast(
-                message = "${u.displayName} ${u.currentVersion} → ${u.newVersion}",
-                type = NotificationType.INFO,
-                duration = NotificationDuration.INDEFINITE,
-                title = "Plugin update available",
-                actionLabel = "Update",
-                onAction = { performUpdate(fresh) }
-            )
-        } else {
-            notifications.showToast(
-                message = fresh.joinToString(", ") { it.displayName },
-                type = NotificationType.INFO,
-                duration = NotificationDuration.INDEFINITE,
-                title = "${fresh.size} plugin updates available",
-                actionLabel = "Update All",
-                onAction = { performUpdate(fresh) }
-            )
-        }
-        // One assignment, once the toast exists: the collector reads this as a unit, so
-        // it can no longer act on one prompt's offers and dismiss another prompt's id.
-        val current = Prompt(shown, fresh.associate { it.pluginId to it.newVersion })
-        prompt = current
+            // Replace any prior prompt still on screen
+            prompt?.let { notifications.dismiss(it.id) }
+            val shown = if (fresh.size == 1) {
+                val u = fresh[0]
+                notifications.showToast(
+                    message = "${u.displayName} ${u.currentVersion} → ${u.newVersion}",
+                    type = NotificationType.INFO,
+                    duration = NotificationDuration.INDEFINITE,
+                    title = "Plugin update available",
+                    actionLabel = "Update",
+                    onAction = { performUpdate(fresh) }
+                )
+            } else {
+                notifications.showToast(
+                    message = fresh.joinToString(", ") { it.displayName },
+                    type = NotificationType.INFO,
+                    duration = NotificationDuration.INDEFINITE,
+                    title = "${fresh.size} plugin updates available",
+                    actionLabel = "Update All",
+                    onAction = { performUpdate(fresh) }
+                )
+            }
+            // One assignment, once the toast exists: the collector reads this as a unit, so
+            // it can no longer act on one prompt's offers and dismiss another prompt's id.
+            val current = Prompt(shown, fresh.associate { it.pluginId to it.newVersion })
+            prompt = current
 
-        // The collector cannot cover the window between showToast returning and the
-        // line above: it saw an empty map, returned, and observeInstalledPlugins has no
-        // reason to emit again - so an update landing in that gap left an INDEFINITE
-        // toast offering a version already installed until the next refresh. Asked once
-        // more here, where the map is finally set.
-        val installedNow = apiImpl.getInstalledPlugins().associate { it.pluginId to it.version }
-        if (promptSatisfied(current.offered, installedNow)) dismissPrompt(current)
+            // The collector cannot cover the window between showToast returning and the
+            // line above: it saw an empty map, returned, and observeInstalledPlugins has no
+            // reason to emit again - so an update landing in that gap left an INDEFINITE
+            // toast offering a version already installed until the next refresh. Asked once
+            // more here, where the map is finally set.
+            val installedNow = apiImpl.getInstalledPlugins().associate { it.pluginId to it.version }
+            if (promptSatisfied(current.offered, installedNow)) dismissPrompt(current)
+        }
     }
 
     /**
@@ -172,12 +195,24 @@ class UpdatePromptService(
      *
      * Naming which prompt is the point: a collector that decided on one prompt's
      * offers must not dismiss whatever arrived since.
+     * Called under the record mutex too; never acquire that non-reentrant mutex here.
      */
     private fun dismissPrompt(target: Prompt?) {
         val current = prompt ?: return
         if (target != null && target !== current) return
         notifications?.dismiss(current.id)
         prompt = null
+    }
+
+    /** Retire stale mixed prompts only after a successful store check can re-offer remaining opt-outs. */
+    private suspend fun retireManagedPrompt(policy: HostAutomaticUpdatePolicy) {
+        val current = prompt ?: return
+        if (current.offered.keys.any { !policy.allowsPrompt(it) }) {
+            // Clear the whole replaced offer deliberately: if automatic mode is
+            // later disabled, its formerly managed plugins can be offered again.
+            saveRecords(loadRecords() - current.offered.keys)
+            dismissPrompt(current)
+        }
     }
 
     /** Apply the prompted updates; invoked from the toast's action button. */
@@ -191,6 +226,9 @@ class UpdatePromptService(
             try {
                 val succeeded = mutableListOf<String>()
                 val failed = mutableListOf<UpdateInfo>()
+                val managed = mutableListOf<UpdateInfo>()
+                val competing = mutableListOf<UpdateInfo>()
+                val current = mutableListOf<UpdateInfo>()
                 // Three buckets, not two. A cancel is neither: the host's download
                 // dialog offers Cancel on exactly this path, and calling it a failure
                 // told the user "Failed to update: Docker" for the thing they had just
@@ -198,13 +236,50 @@ class UpdatePromptService(
                 // failed while the rest succeeded.
                 val cancelled = mutableListOf<UpdateInfo>()
                 for (target in targets) {
-                    val result = runCatching { apiImpl.updatePlugin(target.pluginId) }
-                        .getOrElse { InstallResult.LoadFailed(it.message ?: "Unknown error") }
+                    // A stale toast must not race the host after a preference change.
+                    if (!readPolicy().allowsPrompt(target.pluginId)) {
+                        managed.add(target)
+                        continue
+                    }
+                    val result = try {
+                        apiImpl.updatePlugin(target.pluginId)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        InstallResult.LoadFailed(failure.message ?: "Unknown error")
+                    }
                     when {
                         result is InstallResult.Success -> succeeded.add(target.pluginId)
+                        result.wasBusy() -> competing.add(target)
+                        result is InstallResult.AlreadyInstalled -> current.add(target)
                         result.wasCancelled() -> cancelled.add(target)
                         else -> failed.add(target)
                     }
+                }
+
+                // Preserve busy records: competing installers report through their own UI.
+                if (competing.isNotEmpty()) {
+                    notifications?.showToast(
+                        message = competingInstallNotice(competing.joinToString(", ") { it.displayName }),
+                        type = NotificationType.INFO,
+                    )
+                }
+                if (managed.isNotEmpty()) {
+                    mutex.withLock {
+                        val records = loadRecords()
+                        val skipped = managed.filter { records[it.pluginId]?.version == it.newVersion }
+                        saveRecords(records - skipped.map { it.pluginId }.toSet())
+                    }
+                    notifications?.showToast(
+                        message = "Now managed by automatic updates: ${managed.joinToString(", ") { it.displayName }}",
+                        type = NotificationType.INFO,
+                    )
+                }
+                if (current.isNotEmpty()) {
+                    notifications?.showToast(
+                        message = "Already up to date: ${current.joinToString(", ") { it.displayName }}",
+                        type = NotificationType.INFO,
+                    )
                 }
 
                 // Both are re-offered next cycle: a cancelled update has not happened
@@ -327,6 +402,8 @@ class UpdatePromptService(
             storage.getJson(STORAGE_KEY)
                 ?.let { json.decodeFromString<PromptRecords>(it).records }
                 ?: emptyMap()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             inMemoryRecords.toMap()
         }
@@ -338,6 +415,8 @@ class UpdatePromptService(
         val storage = storage ?: return
         try {
             storage.putJson(STORAGE_KEY, json.encodeToString(PromptRecords.serializer(), PromptRecords(records)))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             // In-memory copy still dedupes for this session
         }

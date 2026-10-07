@@ -2,9 +2,13 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
+import ai.rever.boss.plugin.dynamic.pluginmanager.CompatibleUpdateSource
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
+import ai.rever.boss.plugin.dynamic.pluginmanager.UPDATE_INSTALL_BUSY
+import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLeaseBusyException
+import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLease
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadDisplayNames
 import ai.rever.boss.plugin.dynamic.pluginmanager.TrackedDownloader
 import ai.rever.boss.plugin.dynamic.pluginmanager.UpdateSource
@@ -49,7 +53,7 @@ import java.util.concurrent.ConcurrentHashMap
  * Edge Functions are kept only for operations needing server-side logic:
  * download (signed URLs), publish, and admin delete.
  */
-class PluginManagerAPIImpl(
+class PluginManagerAPIImpl private constructor(
     private val scope: CoroutineScope,
     private val loaderDelegate: PluginLoaderDelegate?,
     /**
@@ -58,8 +62,21 @@ class PluginManagerAPIImpl(
      * class only ever sees [TransferReporter], which names no api type - see
      * `HostDownloadCenter` for why that matters on an older host.
      */
-    private val reporter: TransferReporter
-) : PluginManagerAPI {
+    private val reporter: TransferReporter,
+    private val installConnections: InstallerConnections,
+    providedStoreClient: SupabaseClient? = null,
+) : PluginManagerAPI, CompatibleUpdateSource {
+    constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter) :
+        this(scope, loaderDelegate, reporter, InstallerConnections { URL(it).openConnection() as HttpURLConnection })
+
+    internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
+                         connections: (String) -> HttpURLConnection) :
+        this(scope, loaderDelegate, reporter, InstallerConnections(connections))
+
+    internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
+                         storeClient: SupabaseClient) :
+        this(scope, loaderDelegate, reporter,
+            InstallerConnections { URL(it).openConnection() as HttpURLConnection }, storeClient)
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -100,7 +117,7 @@ class PluginManagerAPIImpl(
     }
 
     // Supabase Postgrest client for database reads (created with host classloader)
-    private val supabaseClient: SupabaseClient = withHostClassLoader {
+    private val supabaseClient: SupabaseClient = providedStoreClient ?: withHostClassLoader {
         createSupabaseClient(
             supabaseUrl = SUPABASE_URL,
             supabaseKey = SUPABASE_ANON_KEY
@@ -544,10 +561,12 @@ class PluginManagerAPIImpl(
     }
 
     override suspend fun installVersion(pluginId: String, version: String): InstallResult = withContext(Dispatchers.IO) {
-        val existing = getInstalledPlugin(pluginId)
-        val isUpdate = existing != null
-        withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), isUpdate) {
-            installVersionInternal(pluginId, version, existing, progressKey = pluginId)
+        withUpdateLease(pluginId) {
+            val existing = getInstalledPlugin(pluginId)
+            val isUpdate = existing != null
+            withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), isUpdate) {
+                installVersionInternal(pluginId, version, existing, progressKey = pluginId)
+            }
         }
     }
 
@@ -623,25 +642,31 @@ class PluginManagerAPIImpl(
         }
     }
 
-    override suspend fun checkForCompatibleUpdates(): List<UpdateInfo> = withContext(Dispatchers.IO) {
+    override suspend fun checkForCompatibleUpdates(): List<UpdateInfo> =
+        checkForCompatibleUpdatesResult().getOrNull().orEmpty()
+
+    /** A failed check must not be treated as a successful empty offer when retiring prompts. */
+    override suspend fun checkForCompatibleUpdatesResult(): Result<List<UpdateInfo>> = withContext(Dispatchers.IO) {
         val installed = getInstalledPlugins()
-        if (installed.isEmpty()) return@withContext emptyList()
+        if (installed.isEmpty()) return@withContext Result.success(emptyList())
         val installedById = installed.associateBy { it.pluginId }
 
         // Step 1: candidates with a newer published version (one view query).
-        val candidates = checkForUpdates()
-        if (candidates.isEmpty()) return@withContext emptyList()
+        val candidates = checkForUpdatesResult().getOrElse { return@withContext Result.failure(it) }.loadable
+        if (candidates.isEmpty()) return@withContext Result.success(emptyList())
 
         // Step 2: resolve each candidate version's min_ipc_version. If the
         // lookup fails outright, skip this cycle rather than prompting for
         // updates we can't verify (the download gate would refuse them anyway).
         val versionRows = try {
             fetchCandidateVersionRows(candidates)
-        } catch (_: Exception) {
-            return@withContext emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            return@withContext Result.failure(failure)
         }
 
-        candidates.mapNotNull { (pluginId, latestVersion) ->
+        Result.success(candidates.mapNotNull { (pluginId, latestVersion) ->
             val current = installedById[pluginId] ?: return@mapNotNull null
             val versionRow = versionRows[pluginId]
             // A missing row resolves to UNKNOWN → installable, matching the
@@ -661,7 +686,7 @@ class PluginManagerAPIImpl(
                 newVersion = latestVersion,
                 changelog = versionRow?.changelog ?: ""
             )
-        }
+        })
     }
 
     /**
@@ -734,12 +759,11 @@ class PluginManagerAPIImpl(
     ) = downloads.download(connection, dest, progressKey, expectedSize)
 
     override suspend fun installPlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
-        // Check if already installed
-        getInstalledPlugin(pluginId)?.let {
-            return@withContext InstallResult.AlreadyInstalled(it.version)
-        }
-        withDownloadTracking(pluginId, fallbackDisplayName(pluginId), isUpdate = false) {
-            installPluginInternal(pluginId, progressKey = pluginId)
+        withUpdateLease(pluginId) {
+            getInstalledPlugin(pluginId)?.let { return@withUpdateLease InstallResult.AlreadyInstalled(it.version) }
+            withDownloadTracking(pluginId, fallbackDisplayName(pluginId), isUpdate = false) {
+                installPluginInternal(pluginId, progressKey = pluginId)
+            }
         }
     }
 
@@ -752,7 +776,7 @@ class PluginManagerAPIImpl(
 
         // Try to download directly from plugin store first
         val downloadResult = downloadFromStore(pluginId, null, progressKey)
-        if (downloadResult is InstallResult.Success || isCancelled(downloadResult)) {
+        if (downloadResult is InstallResult.Success || downloadResult is InstallResult.AlreadyInstalled || isCancelled(downloadResult)) {
             return downloadResult
         }
 
@@ -778,7 +802,7 @@ class PluginManagerAPIImpl(
         }
 
         // Try GitHub as fallback
-        return installFromGitHubInternal(githubUrl, progressKey)
+        return installFromGitHubInternal(githubUrl, progressKey, heldPluginId = pluginId)
     }
 
     /**
@@ -799,7 +823,7 @@ class PluginManagerAPIImpl(
             val encodedId = java.net.URLEncoder.encode(pluginId, "UTF-8")
             val versionSuffix = version?.let { "/${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""
             val downloadUrl = "$STORE_API_URL/$encodedId/download$versionSuffix"
-            val infoConnection = URL(downloadUrl).openConnection() as HttpURLConnection
+            val infoConnection = installConnections.open(downloadUrl)
             infoConnection.requestMethod = "GET"
             infoConnection.setRequestProperty("Accept", "application/json")
             infoConnection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
@@ -840,6 +864,10 @@ class PluginManagerAPIImpl(
             // so only in its log). Blank resolves to UNKNOWN and installs, which is what keeps
             // this working against a store that does not send the field yet.
             bossFloorRefusal(downloadInfo)?.let { return it }
+            if (version == null && downloadInfo.version.isNotBlank()) {
+                getInstalledPlugin(pluginId)?.takeIf { !isVersionNewer(downloadInfo.version, it.version) }
+                    ?.let { return InstallResult.AlreadyInstalled(it.version) }
+            }
 
             // Download the JAR from the signed URL.
             //
@@ -854,7 +882,7 @@ class PluginManagerAPIImpl(
             val destFile = File(pluginsDir, jarFileName)
             val partFile = File(pluginsDir, "$jarFileName.part")
 
-            val jarConnection = URL(downloadInfo.downloadUrl).openConnection() as HttpURLConnection
+            val jarConnection = installConnections.open(downloadInfo.downloadUrl)
             jarConnection.instanceFollowRedirects = true
             jarConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             jarConnection.connectTimeout = 30000
@@ -876,10 +904,19 @@ class PluginManagerAPIImpl(
                 }
             }
 
+            if (readPluginIdFromJar(partFile) != pluginId) {
+                partFile.delete()
+                return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
+            }
+
             // Everything that can fail without consequence has now happened, so this is where
             // the installed copy gets replaced. A refused unload is reported rather than
             // ignored: `unloadIfAlreadyLoaded` discards the delegate's Boolean, which would
             // leave the old plugin loaded and then load a second copy over it.
+            destinationIdentityRefusal(destFile, pluginId)?.let {
+                partFile.delete()
+                return it
+            }
             unloadForReplacement(pluginId)?.let { reason ->
                 partFile.delete()
                 return InstallResult.LoadFailed("could not replace the installed version - $reason")
@@ -938,6 +975,8 @@ class PluginManagerAPIImpl(
             _events.emit(PluginEvent.PluginInstalled(pluginInfo))
             return InstallResult.Success(pluginInfo)
 
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             // A throw anywhere above can strand the part file. It is inert (the host's scan only
             // looks at `.jar`), but leaving one per failed attempt would accumulate silently.
@@ -967,20 +1006,30 @@ class PluginManagerAPIImpl(
      * Read the pluginId from a JAR's bundled manifest without loading the plugin.
      * Returns null if the manifest is absent or unparseable.
      */
-    private fun readPluginIdFromJar(jarFile: File): String? = try {
+    private fun readPluginIdFromJar(jarFile: File): String? = readPluginManifestField(jarFile, "pluginId")
+
+    private fun readPluginVersionFromJar(jarFile: File): String? = readPluginManifestField(jarFile, "version")
+
+    private fun readPluginManifestField(jarFile: File, field: String): String? = try {
         java.util.zip.ZipFile(jarFile).use { zip ->
             val entry = zip.getEntry("META-INF/boss-plugin/plugin.json")
             if (entry == null) {
                 null
             } else {
                 val text = zip.getInputStream(entry).bufferedReader().use { it.readText() }
-                json.parseToJsonElement(text).jsonObject["pluginId"]?.jsonPrimitive?.contentOrNull
+                json.parseToJsonElement(text).jsonObject[field]?.jsonPrimitive?.contentOrNull
                     ?.takeIf { it.isNotBlank() }
             }
         }
     } catch (_: Exception) {
         null
     }
+
+    /** An arbitrary asset basename must not replace another plugin under this plugin's lease. */
+    private fun destinationIdentityRefusal(destination: File, pluginId: String): InstallResult.LoadFailed? =
+        readPluginIdFromJar(destination)?.takeIf { it != pluginId }?.let {
+            InstallResult.LoadFailed("Destination JAR belongs to a different plugin")
+        }
 
     /**
      * Make plugin loading idempotent: if a plugin with the same id is already
@@ -1075,7 +1124,8 @@ class PluginManagerAPIImpl(
         }
     }
 
-    private suspend fun installFromGitHubInternal(githubUrl: String, progressKey: String): InstallResult {
+    private suspend fun installFromGitHubInternal(githubUrl: String, progressKey: String, heldPluginId: String? = null): InstallResult {
+        var staged: File? = null
         try {
             // Parse GitHub URL to get owner/repo
             val regex = Regex("""github\.com/([^/]+)/([^/]+)""")
@@ -1087,7 +1137,7 @@ class PluginManagerAPIImpl(
 
             // Get latest release
             val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
-            val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
+            val releaseConnection = installConnections.open(releaseUrl)
             releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
             releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             releaseConnection.connectTimeout = 10000
@@ -1114,9 +1164,9 @@ class PluginManagerAPIImpl(
             // `outputStream()` truncates on open - so writing directly would destroy a working
             // install the moment the connection opened. `.part` rather than `.jar` keeps a
             // half-written file out of every scan that looks for plugins.
-            val partFile = File(pluginsDir, "$jarFileName.part")
+            val partFile = File.createTempFile(".github-install-", ".part", pluginsDir).also { staged = it }
 
-            val downloadConnection = URL(jarUrl).openConnection() as HttpURLConnection
+            val downloadConnection = installConnections.open(jarUrl)
             downloadConnection.instanceFollowRedirects = true
             downloadConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             downloadConnection.connectTimeout = 30000
@@ -1132,70 +1182,77 @@ class PluginManagerAPIImpl(
             // GitHub URL" as well as by update, so the caller does not always know it, and it is
             // needed BEFORE the load now that the unload below is checked.
             val incomingPluginId = readPluginIdFromJar(partFile)
-            val previousJarPath = incomingPluginId?.let { getInstalledPlugin(it)?.jarPath }
+                ?: return InstallResult.LoadFailed("Could not read plugin identity from downloaded JAR")
+            return withIncomingLease(incomingPluginId, heldPluginId) {
+                val incomingVersion = readPluginVersionFromJar(partFile)
+                getInstalledPlugin(incomingPluginId)?.takeIf {
+                    heldPluginId != null && !incomingVersion.isNullOrBlank() && !isVersionNewer(incomingVersion, it.version)
+                }?.let { return@withIncomingLease InstallResult.AlreadyInstalled(it.version) }
+                val previousJarPath = getInstalledPlugin(incomingPluginId)?.jarPath
 
-            // Nothing above this line touched the installed copy. Everything below does, so a
-            // refused unload is reported rather than discarded: `unloadIfAlreadyLoaded` throws
-            // away the delegate's Boolean, which would leave the old plugin loaded and then load
-            // a second copy on top of it.
-            if (incomingPluginId != null) {
+                // Nothing above this line touched the installed copy. Everything below does, so a
+                // refused unload is reported rather than discarded: `unloadIfAlreadyLoaded` throws
+                // away the delegate's Boolean, which would leave the old plugin loaded and then load
+                // a second copy on top of it.
+                destinationIdentityRefusal(destFile, incomingPluginId)?.let { return@withIncomingLease it }
                 unloadForReplacement(incomingPluginId)?.let { reason ->
+                    return@withIncomingLease InstallResult.LoadFailed("could not replace the installed version - $reason")
+                }
+
+                // Promote the downloaded bytes. Delete first so the rename cannot fail on a platform
+                // that refuses to overwrite; the unload above has already released any handle.
+                if (destFile.exists()) destFile.delete()
+                if (!partFile.renameTo(destFile)) {
                     partFile.delete()
-                    return InstallResult.LoadFailed("could not replace the installed version - $reason")
+                    return@withIncomingLease InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
                 }
-            }
 
-            // Promote the downloaded bytes. Delete first so the rename cannot fail on a platform
-            // that refuses to overwrite; the unload above has already released any handle.
-            if (destFile.exists()) destFile.delete()
-            if (!partFile.renameTo(destFile)) {
-                partFile.delete()
-                return InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
-            }
+                // GitHub installs carry no store signature — clear any stale
+                // sidecar so load-time verification treats it as unsigned rather
+                // than rejecting it against a leftover signature.
+                persistSignatureSidecar(destFile, null)
 
-            // GitHub installs carry no store signature — clear any stale
-            // sidecar so load-time verification treats it as unsigned rather
-            // than rejecting it against a leftover signature.
-            persistSignatureSidecar(destFile, null)
-
-            // Load the plugin via delegate
-            val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-            if (loadedInfo == null) {
-                // Same reasoning as the store path: the new JAR will not load and
-                // `cleanupOldVersionJars` never ran, so the previous version is still on disk.
-                // Two JARs declaring one pluginId means the startup scan can pick either, which
-                // is how a restart silently comes back on the old version. Drop the one that does
-                // not work - unless they are the same file, which would leave no JAR at all.
-                val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
-                if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
-                    runCatching { destFile.delete() }
-                    deleteSignatureSidecar(destFile)
+                // Load the plugin via delegate
+                val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
+                if (loadedInfo == null) {
+                    // Same reasoning as the store path: the new JAR will not load and
+                    // `cleanupOldVersionJars` never ran, so the previous version is still on disk.
+                    // Two JARs declaring one pluginId means the startup scan can pick either, which
+                    // is how a restart silently comes back on the old version. Drop the one that does
+                    // not work - unless they are the same file, which would leave no JAR at all.
+                    val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
+                    if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
+                        runCatching { destFile.delete() }
+                        deleteSignatureSidecar(destFile)
+                    }
+                    return@withIncomingLease InstallResult.LoadFailed(
+                        if (loaderDelegate == null) "No plugin loader available"
+                        else "Failed to load plugin from ${destFile.name} (see app logs for details)"
+                    )
                 }
-                return InstallResult.LoadFailed(
-                    if (loaderDelegate == null) "No plugin loader available"
-                    else "Failed to load plugin from ${destFile.name} (see app logs for details)"
+
+                val pluginInfo = loadedInfo.toPluginInfo().copy(
+                    jarPath = destFile.absolutePath,
+                    installedAt = System.currentTimeMillis(),
+                    url = githubUrl
                 )
+
+                // Remove the old version's JAR (and any stale duplicates).
+                cleanupOldVersionJars(
+                    pluginId = pluginInfo.pluginId,
+                    newJar = destFile,
+                    previousJarPath = previousJarPath
+                )
+
+                // Refresh installed plugins
+                refreshInstalledPlugins()
+
+                _events.emit(PluginEvent.PluginInstalled(pluginInfo))
+                return@withIncomingLease InstallResult.Success(pluginInfo)
+
             }
-
-            val pluginInfo = loadedInfo.toPluginInfo().copy(
-                jarPath = destFile.absolutePath,
-                installedAt = System.currentTimeMillis(),
-                url = githubUrl
-            )
-
-            // Remove the old version's JAR (and any stale duplicates).
-            cleanupOldVersionJars(
-                pluginId = pluginInfo.pluginId,
-                newJar = destFile,
-                previousJarPath = previousJarPath
-            )
-
-            // Refresh installed plugins
-            refreshInstalledPlugins()
-
-            _events.emit(PluginEvent.PluginInstalled(pluginInfo))
-            return InstallResult.Success(pluginInfo)
-
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             // Explicit rather than relying on e.message happening to BE the constant:
             // it does, because DownloadCancelledException carries it, but a future
@@ -1203,101 +1260,174 @@ class PluginManagerAPIImpl(
             // cancel back into an error the buttons report.
             if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
             return InstallResult.DownloadFailed(e.message ?: "Unknown error")
+        } finally {
+            staged?.delete()
         }
     }
 
     override suspend fun installFromFile(jarPath: String): InstallResult = withContext(Dispatchers.IO) {
         try {
             val jarFile = File(jarPath)
-            if (!jarFile.exists()) {
-                return@withContext InstallResult.DownloadFailed("File not found: $jarPath")
+            if (!jarFile.exists()) return@withContext InstallResult.DownloadFailed("File not found: $jarPath")
+            val pluginId = readPluginIdFromJar(jarFile)
+                ?: return@withContext InstallResult.LoadFailed("Could not read plugin identity from JAR")
+            withUpdateLease(pluginId) {
+                if (readPluginIdFromJar(jarFile) != pluginId) {
+                    return@withUpdateLease InstallResult.LoadFailed("Local JAR identity changed before installation")
+                }
+                val previousJarPath = getInstalledPlugin(pluginId)?.jarPath
+                pluginsDir.mkdirs()
+                val destFile = File(pluginsDir, jarFile.name)
+                val destinationExisted = destFile.exists()
+                var createdArtifact = false
+                var loaded = false
+                var staged: File? = null
+                try {
+                    if (jarFile.absolutePath != destFile.absolutePath) {
+                        staged = File.createTempFile(".local-install-", ".part", pluginsDir)
+                        jarFile.copyTo(staged, overwrite = true)
+                        if (readPluginIdFromJar(staged) != pluginId) {
+                            return@withUpdateLease InstallResult.LoadFailed("Local JAR identity changed while copying")
+                        }
+                    }
+                    destinationIdentityRefusal(destFile, pluginId)?.let { return@withUpdateLease it }
+                    unloadForReplacement(pluginId)?.let { reason ->
+                        return@withUpdateLease InstallResult.LoadFailed("could not replace the installed version - $reason")
+                    }
+                    if (staged != null && !promoteJar(staged, destFile)) {
+                        return@withUpdateLease InstallResult.DownloadFailed("Could not put the local JAR in place")
+                    }
+                    createdArtifact = staged != null && !destinationExisted
+                    persistSignatureSidecar(destFile, null)
+                    val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
+                        ?: return@withUpdateLease InstallResult.LoadFailed(
+                            if (loaderDelegate == null) "No plugin loader available"
+                            else "Failed to load plugin from ${destFile.name} (see app logs for details)"
+                        )
+                    loaded = true
+                    cleanupOldVersionJars(pluginId, destFile, previousJarPath)
+                    val pluginInfo = loadedInfo.toPluginInfo().copy(
+                        jarPath = destFile.absolutePath, installedAt = System.currentTimeMillis())
+                    refreshInstalledPlugins()
+                    _events.emit(PluginEvent.PluginInstalled(pluginInfo))
+                    InstallResult.Success(pluginInfo)
+                } finally {
+                    staged?.delete()
+                    if (!loaded && createdArtifact) {
+                        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
+                        if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
+                            // Only remove a failed artifact this attempt created; an in-directory
+                            // source or preexisting user file remains theirs even when loading fails.
+                            try {
+                                destFile.delete()
+                                deleteSignatureSidecar(destFile)
+                            } catch (_: Exception) {
+                                // Best effort: preserve the loader's failure/cancellation outcome.
+                            }
+                        }
+                    }
+                }
             }
-
-            // Copy to plugins directory if not already there
-            val destFile = if (jarFile.parentFile.absolutePath == pluginsDir.absolutePath) {
-                jarFile
-            } else {
-                val dest = File(pluginsDir, jarFile.name)
-                jarFile.copyTo(dest, overwrite = true)
-                dest
-            }
-
-            // Local side-load: no store signature — clear any stale sidecar.
-            persistSignatureSidecar(destFile, null)
-
-            // Replace any already-loaded copy so the new version loads cleanly
-            // (no manual uninstall needed).
-            unloadIfAlreadyLoaded(destFile)
-
-            // Load the plugin via delegate
-            val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
-                ?: return@withContext InstallResult.LoadFailed(
-                    if (loaderDelegate == null) "No plugin loader available"
-                    else "Failed to load plugin from ${destFile.name} (see app logs for details)"
-                )
-
-            val pluginInfo = loadedInfo.toPluginInfo().copy(
-                jarPath = destFile.absolutePath,
-                installedAt = System.currentTimeMillis()
-            )
-
-            // Refresh installed plugins
-            refreshInstalledPlugins()
-
-            _events.emit(PluginEvent.PluginInstalled(pluginInfo))
-            InstallResult.Success(pluginInfo)
-
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             InstallResult.DownloadFailed(e.message ?: "Unknown error")
         }
     }
 
     override suspend fun uninstallPlugin(pluginId: String): UninstallResult = withContext(Dispatchers.IO) {
-        val plugin = getInstalledPlugin(pluginId)
-            ?: return@withContext UninstallResult.NotFound(pluginId)
-
-        if (plugin.isSystemPlugin || !plugin.canUnload) {
-            return@withContext UninstallResult.CannotUnload("System plugins cannot be uninstalled")
+        val lease = PluginUpdateLease.acquire(pluginsDir, pluginId).getOrElse {
+            return@withContext UninstallResult.Failed(leaseFailureMessage(it))
         }
+        lease.use {
+            try {
+                refreshInstalledPlugins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@use UninstallResult.Failed("Could not refresh installed plugins from the host")
+            }
+            val plugin = getInstalledPlugin(pluginId)
+                ?: return@use UninstallResult.NotFound(pluginId)
 
-        try {
-            // Unload from runtime via delegate
-            val unloaded = loaderDelegate?.unloadPlugin(pluginId) ?: false
-            if (!unloaded && loaderDelegate != null) {
-                // The delegate hands back a bare Boolean, so the host's reasons cannot reach
-                // here - say where they are instead of restating the failure. The host logs
-                // them as "Plugin unload refused".
-                return@withContext UninstallResult.Failed(
-                    "the host refused to unload it (it may still be in use by another plugin)"
-                )
+            if (plugin.isSystemPlugin || !plugin.canUnload) {
+                return@use UninstallResult.CannotUnload("System plugins cannot be uninstalled")
             }
 
-            // Delete JAR file (and its signature sidecar)
-            if (plugin.jarPath.isNotBlank()) {
-                val jarFile = File(plugin.jarPath)
-                if (jarFile.exists()) {
-                    jarFile.delete()
+            try {
+                // Unload from runtime via delegate
+                val unloaded = loaderDelegate?.unloadPlugin(pluginId) ?: false
+                if (!unloaded && loaderDelegate != null) {
+                    // The delegate hands back a bare Boolean, so the host's reasons cannot reach
+                    // here - say where they are instead of restating the failure. The host logs
+                    // them as "Plugin unload refused".
+                    return@use UninstallResult.Failed(
+                        "the host refused to unload it (it may still be in use by another plugin)"
+                    )
                 }
-                deleteSignatureSidecar(jarFile)
+
+                // Delete JAR file (and its signature sidecar)
+                if (plugin.jarPath.isNotBlank()) {
+                    val jarFile = File(plugin.jarPath)
+                    if (jarFile.exists()) {
+                        jarFile.delete()
+                    }
+                    deleteSignatureSidecar(jarFile)
+                }
+
+                // Refresh installed plugins
+                refreshInstalledPlugins()
+
+                _events.emit(PluginEvent.PluginUninstalled(pluginId))
+                UninstallResult.Success
+
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                UninstallResult.Failed(e.message ?: "Unknown error")
             }
-
-            // Refresh installed plugins
-            refreshInstalledPlugins()
-
-            _events.emit(PluginEvent.PluginUninstalled(pluginId))
-            UninstallResult.Success
-
-        } catch (e: Exception) {
-            UninstallResult.Failed(e.message ?: "Unknown error")
         }
     }
 
     override suspend fun updatePlugin(pluginId: String): InstallResult = withContext(Dispatchers.IO) {
-        val existing = getInstalledPlugin(pluginId)
-            ?: return@withContext InstallResult.DownloadFailed("Plugin not installed: $pluginId")
-        withDownloadTracking(pluginId, existing.displayName, isUpdate = true) {
-            updatePluginInternal(pluginId, existing, progressKey = pluginId)
+        withUpdateLease(pluginId) {
+            val existing = getInstalledPlugin(pluginId)
+                ?: return@withUpdateLease InstallResult.DownloadFailed("Plugin not installed: $pluginId")
+            withDownloadTracking(pluginId, existing.displayName, isUpdate = true) {
+                updatePluginInternal(pluginId, existing, progressKey = pluginId)
+            }
         }
+    }
+
+    private suspend fun withUpdateLease(pluginId: String, operation: suspend () -> InstallResult): InstallResult {
+        val lease = PluginUpdateLease.acquire(pluginsDir, pluginId).getOrElse {
+            return InstallResult.DownloadFailed(leaseFailureMessage(it))
+        }
+        return lease.use {
+            try {
+                refreshInstalledPlugins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@use InstallResult.DownloadFailed("Could not refresh installed plugins from the host")
+            }
+            operation()
+        }
+    }
+
+    private fun leaseFailureMessage(failure: Throwable): String =
+        if (failure is PluginUpdateLeaseBusyException) UPDATE_INSTALL_BUSY
+        else failure.message ?: "Could not acquire plugin installation lock"
+
+    /** Internal fallback callers already own their expected plugin's lease. */
+    private suspend fun withIncomingLease(
+        incomingPluginId: String,
+        heldPluginId: String?,
+        operation: suspend () -> InstallResult,
+    ): InstallResult = when {
+        heldPluginId == null -> withUpdateLease(incomingPluginId, operation)
+        incomingPluginId != heldPluginId -> InstallResult.LoadFailed("Downloaded JAR has a different plugin identity")
+        else -> operation()
     }
 
     private suspend fun updatePluginInternal(
@@ -1336,15 +1466,15 @@ class PluginManagerAPIImpl(
         // the plugin is already installed, and reaching past it is what lets the uninstall above
         // be dropped.
         val result = when (val source = updateSourceFor(existing)) {
-            is UpdateSource.Github -> installFromGitHubInternal(source.url, progressKey)
+            is UpdateSource.Github -> installFromGitHubInternal(source.url, progressKey, heldPluginId = pluginId)
             is UpdateSource.Store -> {
                 val store = downloadFromStore(pluginId, null, progressKey)
                 // A cancel is not a source that failed: falling through would open a
                 // second connection to fetch the same jar the user just stopped.
-                if (store is InstallResult.Success || isCancelled(store) || source.fallbackUrl == null) {
+                if (store is InstallResult.Success || store is InstallResult.AlreadyInstalled || isCancelled(store) || source.fallbackUrl == null) {
                     store
                 } else {
-                    installFromGitHubInternal(source.fallbackUrl, progressKey)
+                    installFromGitHubInternal(source.fallbackUrl, progressKey, heldPluginId = pluginId)
                 }
             }
         }
@@ -1373,7 +1503,7 @@ class PluginManagerAPIImpl(
             val encodedId = java.net.URLEncoder.encode(pluginId, "UTF-8")
             val versionSuffix = version?.let { "/${java.net.URLEncoder.encode(it, "UTF-8")}" } ?: ""
             val downloadUrl = "$STORE_API_URL/$encodedId/download$versionSuffix"
-            val infoConnection = URL(downloadUrl).openConnection() as HttpURLConnection
+            val infoConnection = installConnections.open(downloadUrl)
             infoConnection.requestMethod = "GET"
             infoConnection.setRequestProperty("Accept", "application/json")
             infoConnection.setRequestProperty("apikey", SUPABASE_ANON_KEY)
@@ -1383,7 +1513,7 @@ class PluginManagerAPIImpl(
             if (infoConnection.responseCode != 200) {
                 // Fallback to GitHub if store download fails (latest only).
                 if (version == null && existing.url.isNotBlank()) {
-                    return installFromGitHubToPath(existing.url, existing.jarPath, progressKey)
+                    return installFromGitHubToPath(existing.url, existing.jarPath, progressKey, pluginId)
                 }
                 return InstallResult.DownloadFailed("Store download failed: HTTP ${infoConnection.responseCode}")
             }
@@ -1403,12 +1533,16 @@ class PluginManagerAPIImpl(
             // here does not merely fail to arrive, it takes the working plugin with it - which is
             // how a 1.2.21 filename ended up holding 1.2.22 bytes that no longer loaded.
             bossFloorRefusal(downloadInfo)?.let { return it }
+            if (version == null && downloadInfo.version.isNotBlank()) {
+                getInstalledPlugin(pluginId)?.takeIf { !isVersionNewer(downloadInfo.version, it.version) }
+                    ?.let { return InstallResult.AlreadyInstalled(it.version) }
+            }
 
             // Download new JAR to a temp file first
             val destFile = File(existing.jarPath)
             val tempFile = File(destFile.parentFile, destFile.name + ".update")
 
-            val jarConnection = URL(downloadInfo.downloadUrl).openConnection() as HttpURLConnection
+            val jarConnection = installConnections.open(downloadInfo.downloadUrl)
             jarConnection.instanceFollowRedirects = true
             jarConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             jarConnection.connectTimeout = 30000
@@ -1427,6 +1561,18 @@ class PluginManagerAPIImpl(
                     tempFile.delete()
                     return InstallResult.DownloadFailed("SHA-256 verification failed")
                 }
+            }
+
+            if (readPluginIdFromJar(tempFile) != pluginId) {
+                tempFile.delete()
+                return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
+            }
+            val installedVersion = downloadInfo.version.takeIf { it.isNotBlank() }
+                ?: readPluginVersionFromJar(tempFile).orEmpty()
+
+            destinationIdentityRefusal(destFile, pluginId)?.let {
+                tempFile.delete()
+                return it
             }
 
             // Clear the old sidecar BEFORE swapping the JAR: if the process
@@ -1458,7 +1604,7 @@ class PluginManagerAPIImpl(
             persistSignatureSidecar(destFile, downloadInfo.signature)
 
             val pluginInfo = existing.copy(
-                version = downloadInfo.version,
+                version = installedVersion,
                 installedAt = System.currentTimeMillis()
             )
 
@@ -1473,6 +1619,8 @@ class PluginManagerAPIImpl(
             _installedPlugins.value = currentList
 
             return InstallResult.Success(pluginInfo)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             // The caller supplies the verb, so naming it here produced "Update failed: Update
             // failed: <msg>". The other DownloadFailed sites in this file still self-prefix;
@@ -1491,7 +1639,8 @@ class PluginManagerAPIImpl(
     private suspend fun installFromGitHubToPath(
         githubUrl: String,
         targetJarPath: String,
-        progressKey: String
+        progressKey: String,
+        expectedPluginId: String,
     ): InstallResult {
         try {
             val regex = Regex("""github\.com/([^/]+)/([^/]+)""")
@@ -1502,7 +1651,7 @@ class PluginManagerAPIImpl(
             val repo = match.groupValues[2].removeSuffix(".git")
 
             val releaseUrl = "$GITHUB_API_URL/repos/$owner/$repo/releases/latest"
-            val releaseConnection = URL(releaseUrl).openConnection() as HttpURLConnection
+            val releaseConnection = installConnections.open(releaseUrl)
             releaseConnection.setRequestProperty("Accept", "application/vnd.github.v3+json")
             releaseConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             releaseConnection.connectTimeout = 10000
@@ -1520,7 +1669,7 @@ class PluginManagerAPIImpl(
             val destFile = File(targetJarPath)
             val tempFile = File(destFile.parentFile, destFile.name + ".update")
 
-            val jarConnection = URL(jarUrl).openConnection() as HttpURLConnection
+            val jarConnection = installConnections.open(jarUrl)
             jarConnection.instanceFollowRedirects = true
             jarConnection.setRequestProperty("User-Agent", "BOSS-Plugin-Manager")
             jarConnection.connectTimeout = 30000
@@ -1531,6 +1680,23 @@ class PluginManagerAPIImpl(
             }
 
             downloadWithProgress(jarConnection, tempFile, progressKey)
+            if (readPluginIdFromJar(tempFile) != expectedPluginId) {
+                tempFile.delete()
+                return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
+            }
+
+            val incomingVersion = readPluginVersionFromJar(tempFile)
+            getInstalledPlugin(expectedPluginId)?.takeIf {
+                !incomingVersion.isNullOrBlank() && !isVersionNewer(incomingVersion, it.version)
+            }?.let {
+                tempFile.delete()
+                return InstallResult.AlreadyInstalled(it.version)
+            }
+
+            destinationIdentityRefusal(destFile, expectedPluginId)?.let {
+                tempFile.delete()
+                return it
+            }
 
             // Clear the stale sidecar before the swap (crash-safety: new JAR +
             // no sidecar degrades to warn, not a tampered rejection). GitHub
@@ -1549,6 +1715,8 @@ class PluginManagerAPIImpl(
                 displayName = "",
                 version = "latest"
             ))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             if (e is DownloadCancelledException) return InstallResult.DownloadFailed(DOWNLOAD_CANCELLED)
             return InstallResult.DownloadFailed("GitHub update failed: ${e.message}")
@@ -2154,3 +2322,6 @@ internal fun isVersionNewer(
     }
     return false
 }
+
+/** Immutable installer-only network seam; production retains ordinary HTTP connections. */
+private fun interface InstallerConnections { fun open(url: String): HttpURLConnection }

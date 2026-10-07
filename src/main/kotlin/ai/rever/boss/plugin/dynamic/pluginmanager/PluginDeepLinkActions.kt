@@ -204,7 +204,8 @@ class PluginDeepLinkActions(
                 toast("$displayName is already installed (${result.currentVersion}).", NotificationType.INFO)
 
             is InstallResult.DownloadFailed ->
-                toast("Download failed: ${result.error}", NotificationType.ERROR)
+                if (result.wasBusy()) toast(competingInstallNotice(displayName), NotificationType.INFO)
+                else toast("Download failed: ${result.error}", NotificationType.ERROR)
 
             is InstallResult.LoadFailed ->
                 toast("Could not load it: ${result.error}", NotificationType.ERROR)

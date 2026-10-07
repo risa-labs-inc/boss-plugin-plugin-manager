@@ -174,3 +174,59 @@ Pushes to `main` trigger the release workflow which:
 3. Publishes to the BOSS Plugin Store
 
 The workflow is defined in `.github/workflows/build.yml` and delegates to the shared workflow in `risa-labs-inc/BossConsole-Releases`.
+
+### Automatic update prompt policy
+
+BossConsole publishes optional JVM properties `boss.plugins.autoUpdate.enabled` and
+`boss.plugins.autoUpdate.optOuts` (comma-separated plugin IDs). Missing properties
+preserve manual prompts on older hosts. Automatic mode suppresses proactive prompts
+except for explicit per-plugin opt-outs. Preferences can change during a session, so
+recheck after store requests and before a toast action updates each plugin. Explicit
+Updates-tab controls remain available. Failed checks preserve the current prompt;
+retire mixed prompts only after a successful check can immediately re-offer opt-outs.
+Replacing a mixed offer deliberately clears all its records, so disabling automatic
+mode later can offer the formerly managed plugins again. Prompt replacement and
+record changes share one mutex, preventing overlapping checks from clearing a
+newer prompt's deduplication records.
+
+Host and Toolbox share `.plugin-update-locks/<SHA-256 of UTF-8 plugin ID>.lock` for
+all installer mutations, including uninstall. GitHub/file installs discover their
+manifest identity before acquiring the lease; existing update fallbacks reuse the
+held identity and reject mismatched manifests. Read installed state again inside
+the lease. A busy lease is a neutral result, preserving toast deduplication records
+and avoiding a false update-failure tally; competing installers report outcomes through their own UI.
+Prompt checks use the internal CompatibleUpdateSource lossless Result capability:
+failures in either candidate or version-row lookups leave the visible prompt and records
+untouched. The legacy public list API still collapses failures for callers that
+only act on nonempty offers; never use it to retire prompts.
+Targets handed to automatic mode by a stale toast clear matching records, so
+switching back to manual mode can re-offer them. Explicit GitHub URL installs
+and the version picker still permit same-version repair; only updater fallbacks
+skip current versions. Both host and Toolbox companion releases
+must ship for cross-installer protection. Keep lock files permanently: deleting one
+allows another installer to lock a new inode while the old inode is still locked.
+
+The process fence uses `System.getProperties()` with String keys prefixed
+`boss.plugins.updateLease.protocol3.` plus SHA-256 of the UTF-8 canonical lock-file
+path, and UUID String values. Atomic `putIfAbsent` claims ownership before any
+lock descriptor opens; conditional `remove(key, token)` releases only its owner.
+The lease captures the Properties instance, key and token once. No non-String
+value or plugin-defined object enters this bootstrap state; property diagnostics
+remain String-compatible, and there is no JMX bean or captured access-control context.
+Keep the protocol identical to BossConsole's
+`composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/PluginUpdateProcessRegistry.kt`
+and `PluginUpdateLease.kt`, including canonical paths and exact-token removal.
+The lease intentionally spans download, state refresh and promotion; competing
+host/Toolbox actions provide their own outcome UI. The host retries busy leases
+without consuming its failure budget. Both revised releases must ship: an older
+participant can still drop POSIX process locks by closing a contended descriptor.
+Canonical-path ownership assumes lock directories do not alias the same inode
+through hard links or bind mounts. Arbitrary in-process mutation, clearing or
+replacement of system properties is outside this cooperating-installer protocol;
+plugins already share JVM/file access, so it is not a security boundary.
+Release an owner only after channel close returns successfully. Java can report
+`isOpen == false` before native descriptor cleanup completes, so a thrown close
+retains the token even after repeated close calls. A release failure alone does
+not retain it when channel close succeeds. If abnormal teardown or failed close
+leaves an owner behind, restart BOSS to recover. Never probe a busy owner by
+opening/closing its lock file.

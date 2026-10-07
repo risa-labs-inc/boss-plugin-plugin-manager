@@ -2,12 +2,14 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.UninstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 /**
  * What the Install and Update buttons tell the user, per outcome.
@@ -83,12 +85,33 @@ class UpdateOutcomeTest {
     }
 
     @Test
-    fun `already installed is a failure for update`() {
-        // The update path only reaches that check AFTER its uninstall reported success, so the
-        // same value means the old version survived and the update silently did not happen.
-        val reason = failureReasonFor(InstallResult.AlreadyInstalled("1.1.0"), PluginAction.UPDATE)
-        assertNotNull(reason, "an update that left the old version installed must not read as success")
-        assertTrue(reason.contains("1.1.0"), "the stranded version should be named: was <$reason>")
+    fun `already updated by the host is a neutral outcome`() {
+        val result = InstallResult.AlreadyInstalled("1.1.0")
+        assertNull(failureReasonFor(result, PluginAction.UPDATE))
+        assertEquals("Plugin is already up to date (v1.1.0)", outcomeErrorFor(result, PluginAction.UPDATE))
+    }
+
+    @Test
+    fun `installer contention is reported without a failed update`() {
+        val result = InstallResult.DownloadFailed(UPDATE_INSTALL_BUSY)
+        PluginAction.entries.forEach { action ->
+            assertNull(failureReasonFor(result, action))
+            val notice = outcomeErrorFor(result, action)!!
+            assertEquals(INSTALL_BUSY_NOTICE, notice)
+            assertTrue(notice.contains("restart BOSS"), "Persistent contention must explain recovery")
+            assertTrue(isNeutralInstallNotice(notice), "Contention must use informational styling")
+            assertFalse(isNeutralInstallNotice(outcomeErrorFor(InstallResult.DownloadFailed("HTTP 503"), action)!!))
+        }
+    }
+
+    @Test
+    fun `uninstall contention stays neutral and explains persistent busy recovery`() {
+        val notice = uninstallFailureNotice(UninstallResult.Failed(UPDATE_INSTALL_BUSY))
+        assertTrue(isNeutralInstallNotice(notice))
+        assertTrue(notice.contains("restart BOSS"), "Persistent contention must explain recovery")
+        val failure = uninstallFailureNotice(UninstallResult.Failed("Permission denied"))
+        assertFalse(isNeutralInstallNotice(failure))
+        assertTrue(failure.contains("Permission denied"))
     }
 
     @Test
@@ -143,6 +166,17 @@ class UpdateOutcomeTest {
         listOf("AI Gateway", "Flow", "refused", "HTTP 500").forEach {
             assertTrue(many.contains(it), "<$it> missing from <$many>")
         }
+    }
+
+    @Test
+    fun `mixed failed and competing updates both explain why their rows remain`() {
+        val notice = updateAllError(listOf("Failed Plugin" to "HTTP 503"), listOf("Busy Plugin"))!!
+        assertTrue(notice.contains("Failed Plugin") && notice.contains("HTTP 503"))
+        assertTrue(notice.contains("Busy Plugin") && notice.contains(INSTALL_COMPETING_PREFIX))
+        assertFalse(isNeutralInstallNotice(notice), "A mixed outcome must retain failure styling")
+        val busyOnly = updateAllError(emptyList(), listOf("Busy Plugin"))!!
+        assertTrue(isNeutralInstallNotice(busyOnly))
+        assertTrue(busyOnly.contains("restart BOSS"), "Batch contention must explain recovery")
     }
 
     @Test
