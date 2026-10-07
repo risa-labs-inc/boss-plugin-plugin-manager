@@ -207,4 +207,7 @@ canonical lock paths to java.lang.Object owner tokens, claimed before opening a
 lock-file descriptor. No plugin-defined object may be retained in that registry.
 Host and Toolbox must both ship this revised fence: an older participant can
 still drop POSIX process locks by closing a contended descriptor. This is internal
-coordination state, not a string-valued preference signal.
+coordination state, not a string-valued preference signal. Its non-string value
+means diagnostics must not call `System.getProperties().list/store`; use
+`stringPropertyNames()` and `getProperty()` for string-only snapshots. A source
+audit found no host/Toolbox consumer using those unsafe dump methods.
