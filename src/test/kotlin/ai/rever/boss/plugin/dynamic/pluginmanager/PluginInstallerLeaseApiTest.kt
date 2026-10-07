@@ -149,6 +149,65 @@ class PluginInstallerLeaseApiTest {
         }.toByteArray()
 
     @Test
+    fun `ordinary in lease refresh failures return installer results for every install route`(): Unit = runBlocking {
+        for (route in listOf("store", "version", "update", "file", "github")) {
+            fixture {
+                val incoming = File(directory, "incoming.jar").apply { writeBytes(jar()) }
+                if (route == "github") github(jar())
+                delegate.onRead = { throw IllegalStateException("private host failure details") }
+                val result = when (route) {
+                    "store" -> api.installPlugin(ID)
+                    "version" -> api.installVersion(ID, "2.0.0")
+                    "update" -> api.updatePlugin(ID)
+                    "file" -> api.installFromFile(incoming.path)
+                    else -> api.installFromGitHub("https://github.com/fixture/plugin")
+                }
+                assertEquals(InstallResult.DownloadFailed("Could not refresh installed plugins from the host"),
+                    result, route)
+                assertNoMutation()
+                assertEquals(if (route == "github") 2 else 0, requests.size, route)
+                assertTrue(reporter.busyIds.value.isEmpty())
+                assertFalse(File(plugins, incoming.name).exists())
+                PluginUpdateLease.acquire(plugins, ID).getOrThrow().close()
+            }
+        }
+    }
+
+    @Test
+    fun `ordinary in lease uninstall refresh failure returns a result without mutation`(): Unit = runBlocking {
+        fixture {
+            delegate.onRead = { throw IllegalStateException("private host failure details") }
+            assertEquals(UninstallResult.Failed("Could not refresh installed plugins from the host"),
+                api.uninstallPlugin(ID))
+            assertNoMutation()
+            PluginUpdateLease.acquire(plugins, ID).getOrThrow().close()
+        }
+    }
+
+    @Test
+    fun `in lease refresh cancellation and fatal errors propagate and release installer leases`(): Unit = runBlocking {
+        for (route in listOf("update", "uninstall")) {
+            for (failure in listOf(CancellationException("fixture cancellation"), AssertionError("fatal fixture"))) {
+                fixture {
+                    delegate.onRead = { throw failure }
+                    val operation: suspend () -> Any = {
+                        if (route == "update") api.updatePlugin(ID) else api.uninstallPlugin(ID)
+                    }
+                    val caught = if (failure is CancellationException) {
+                        assertFailsWith<CancellationException> { operation() }
+                    } else {
+                        assertFailsWith<AssertionError> { operation() }
+                    }
+                    assertTrue(caught === failure || caught.cause === failure,
+                        "Coroutine stack recovery may copy the exception but must retain its original cause")
+                    assertNoMutation()
+                    PluginUpdateLease.acquire(plugins, ID).getOrThrow().close()
+                }
+            }
+        }
+    }
+
+    @Test
     fun `busy leases stop every known identity route before reads downloads or mutation`() = runBlocking {
         fixture {
             val incoming = File(directory, "incoming.jar").apply { writeBytes(jar()) }

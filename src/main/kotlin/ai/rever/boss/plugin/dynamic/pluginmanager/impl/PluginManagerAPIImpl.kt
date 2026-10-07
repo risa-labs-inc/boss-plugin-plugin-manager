@@ -1314,7 +1314,13 @@ class PluginManagerAPIImpl private constructor(
             return@withContext UninstallResult.Failed(leaseFailureMessage(it))
         }
         lease.use {
-            refreshInstalledPlugins()
+            try {
+                refreshInstalledPlugins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@use UninstallResult.Failed("Could not refresh installed plugins from the host")
+            }
             val plugin = getInstalledPlugin(pluginId)
                 ?: return@use UninstallResult.NotFound(pluginId)
 
@@ -1372,7 +1378,13 @@ class PluginManagerAPIImpl private constructor(
             return InstallResult.DownloadFailed(leaseFailureMessage(it))
         }
         return lease.use {
-            refreshInstalledPlugins()
+            try {
+                refreshInstalledPlugins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@use InstallResult.DownloadFailed("Could not refresh installed plugins from the host")
+            }
             operation()
         }
     }
