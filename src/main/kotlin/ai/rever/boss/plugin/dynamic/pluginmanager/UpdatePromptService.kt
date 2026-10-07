@@ -187,6 +187,7 @@ class UpdatePromptService(
      *
      * Naming which prompt is the point: a collector that decided on one prompt's
      * offers must not dismiss whatever arrived since.
+     * Called under the record mutex too; never acquire that non-reentrant mutex here.
      */
     private fun dismissPrompt(target: Prompt?) {
         val current = prompt ?: return
@@ -248,13 +249,19 @@ class UpdatePromptService(
                     }
                 }
 
+                // Preserve busy records: the competing host surfaces its own failures.
                 if (competing.isNotEmpty()) {
                     notifications?.showToast(
-                        message = "Already being installed or updated: ${competing.joinToString(", ") { it.displayName }}",
+                        message = INSTALL_COMPETING_PREFIX + competing.joinToString(", ") { it.displayName },
                         type = NotificationType.INFO,
                     )
                 }
                 if (managed.isNotEmpty()) {
+                    mutex.withLock {
+                        val records = loadRecords()
+                        val skipped = managed.filter { records[it.pluginId]?.version == it.newVersion }
+                        saveRecords(records - skipped.map { it.pluginId }.toSet())
+                    }
                     notifications?.showToast(
                         message = "Now managed by automatic updates: ${managed.joinToString(", ") { it.displayName }}",
                         type = NotificationType.INFO,

@@ -87,6 +87,10 @@ class UpdatePromptPolicyRegressionTest {
         assertEquals(listOf("toast-1"), notes.dismissed)
         assertEquals("Now managed by automatic updates: A", notes.shown.last())
         assertEquals(NotificationType.INFO, notes.types.last())
+        policy = HostAutomaticUpdatePolicy(false, emptySet())
+        service.checkAndPrompt()
+        assertEquals("A 1 → 2", notes.shown.last(), "Turning automatic mode off must re-offer a skipped version")
+        assertEquals(3, notes.shown.size)
     }
 
     // Proxy stubs return immediately; a suspending stub must handle the continuation explicitly.

@@ -194,6 +194,17 @@ all installer mutations, including uninstall. GitHub/file installs discover thei
 manifest identity before acquiring the lease; existing update fallbacks reuse the
 held identity and reject mismatched manifests. Read installed state again inside
 the lease. A busy lease is a neutral result, preserving toast deduplication records
-and avoiding a false update-failure tally. Both host and Toolbox companion releases
+and avoiding a false update-failure tally; the host reports its own failures.
+Targets handed to automatic mode by a stale toast clear matching records, so
+switching back to manual mode can re-offer them. Explicit GitHub URL installs
+still permit same-version repair; only updater fallbacks skip current versions. Both host and Toolbox companion releases
 must ship for cross-installer protection. Keep lock files permanently: deleting one
 allows another installer to lock a new inode while the old inode is still locked.
+
+The revised process fence uses reserved internal JVM state
+`boss.plugins.updateLease.processOwners`: a bootstrap-JDK ConcurrentHashMap of
+canonical lock paths to java.lang.Object owner tokens, claimed before opening a
+lock-file descriptor. No plugin-defined object may be retained in that registry.
+Host and Toolbox must both ship this revised fence: an older participant can
+still drop POSIX process locks by closing a contended descriptor. This is internal
+coordination state, not a string-valued preference signal.

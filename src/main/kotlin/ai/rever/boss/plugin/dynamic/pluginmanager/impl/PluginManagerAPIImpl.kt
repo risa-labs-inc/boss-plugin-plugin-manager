@@ -1177,7 +1177,7 @@ class PluginManagerAPIImpl private constructor(
             return withIncomingLease(incomingPluginId, heldPluginId) {
                 val incomingVersion = readPluginVersionFromJar(partFile)
                 getInstalledPlugin(incomingPluginId)?.takeIf {
-                    incomingVersion != null && !isVersionNewer(incomingVersion, it.version)
+                    heldPluginId != null && incomingVersion != null && !isVersionNewer(incomingVersion, it.version)
                 }?.let { return@withIncomingLease InstallResult.AlreadyInstalled(it.version) }
                 val previousJarPath = getInstalledPlugin(incomingPluginId)?.jarPath
 

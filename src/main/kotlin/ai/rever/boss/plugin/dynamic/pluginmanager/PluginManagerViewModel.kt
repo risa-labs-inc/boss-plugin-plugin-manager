@@ -1198,7 +1198,7 @@ class PluginManagerViewModel(
                     _state.update {
                         it.copy(
                             busyPlugins = it.busyPlugins - pluginId,
-                            error = if (result.error == UPDATE_INSTALL_BUSY) INSTALL_BUSY_NOTICE
+                            error = if (result.wasBusy()) INSTALL_BUSY_NOTICE
                                 else "Uninstall failed: ${result.error}",
                         )
                     }
@@ -1357,7 +1357,7 @@ class PluginManagerViewModel(
                 it.copy(
                     isLoading = false,
                     error = updateAllError(failed) ?: competing.takeIf { it.isNotEmpty() }
-                        ?.let { "Already being installed or updated: ${it.joinToString(", ")}" },
+                        ?.let { INSTALL_COMPETING_PREFIX + it.joinToString(", ") },
                     // Clearing this outright named a plugin in the banner and took its Update
                     // button away in the same breath, leaving no action for the one thing it
                     // had reported.
@@ -1756,10 +1756,10 @@ internal fun outcomeErrorFor(
     // installFromRemote, which has always said exactly this.
     if (result.wasBusy()) return INSTALL_BUSY_NOTICE
     if (result is InstallResult.AlreadyInstalled && action == PluginAction.UPDATE) {
-        return "Plugin is already up to date (v${result.currentVersion})"
+        return ALREADY_CURRENT_PREFIX + result.currentVersion + ")"
     }
     if (result is InstallResult.AlreadyInstalled && action == PluginAction.INSTALL) {
-        return "Plugin already installed (v${result.currentVersion})"
+        return ALREADY_INSTALLED_PREFIX + result.currentVersion + ")"
     }
     return failureReasonFor(result, action)?.let { reason -> "${action.label} failed: $reason" }
 }

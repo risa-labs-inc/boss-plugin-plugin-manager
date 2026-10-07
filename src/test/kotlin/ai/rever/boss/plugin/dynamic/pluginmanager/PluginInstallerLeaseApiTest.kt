@@ -258,14 +258,30 @@ class PluginInstallerLeaseApiTest {
     }
 
     @Test
-    fun `github replacement uses current installed version refreshed under its discovered identity lease`() = runBlocking {
+    fun `github update uses current installed version under its held identity lease`() = runBlocking {
         fixture {
             github(jar("2.0.0"))
-            delegate.loaded = listOf(info("2.0.0"))
+            val githubConnection = connection
+            connection = { url -> if (url.endsWith("/download")) MemoryConnection(byteArrayOf(), 503) else githubConnection(url) }
+            delegate.loaded = listOf(info("2.0.0", url = "https://github.com/fixture/plugin"))
             delegate.onRead = { assertTrue(PluginUpdateLease.acquire(plugins, ID).isFailure) }
-            assertEquals(InstallResult.AlreadyInstalled("2.0.0"), api.installFromGitHub("https://github.com/fixture/plugin"))
+            assertEquals(InstallResult.AlreadyInstalled("2.0.0"), api.updatePlugin(ID))
             assertFalse(File(plugins, "incoming.jar").exists())
             assertNoMutation()
+        }
+    }
+
+    @Test
+    fun `explicit github install permits a same version repair under its discovered lease`() = runBlocking {
+        fixture {
+            val incoming = jar("2.0.0")
+            github(incoming)
+            delegate.loaded = listOf(info("2.0.0"))
+            delegate.onRead = { assertTrue(PluginUpdateLease.acquire(plugins, ID).isFailure) }
+            assertIs<InstallResult.Success>(api.installFromGitHub("https://github.com/fixture/plugin"))
+            assertEquals(1, delegate.unloads)
+            assertEquals(1, delegate.loads)
+            assertContentEquals(incoming, File(plugins, "incoming.jar").readBytes())
         }
     }
 
