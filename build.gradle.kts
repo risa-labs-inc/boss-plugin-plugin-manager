@@ -118,9 +118,10 @@ dependencies {
     compileOnly("io.ktor:ktor-client-cio:3.4.0")
 
     // Actual installer API fixtures need the host-provided clients, without bundling them.
-    testRuntimeOnly("io.github.jan-tennert.supabase:postgrest-kt:3.6.0")
+    testImplementation("io.github.jan-tennert.supabase:postgrest-kt:3.6.0")
     testRuntimeOnly("io.github.jan-tennert.supabase:realtime-kt:3.6.0")
     testRuntimeOnly("io.ktor:ktor-client-cio:3.4.0")
+    testImplementation("io.ktor:ktor-client-mock:3.4.0")
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")

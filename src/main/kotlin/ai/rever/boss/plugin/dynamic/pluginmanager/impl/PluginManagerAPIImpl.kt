@@ -63,6 +63,7 @@ class PluginManagerAPIImpl private constructor(
      */
     private val reporter: TransferReporter,
     private val installConnections: InstallerConnections,
+    providedStoreClient: SupabaseClient? = null,
 ) : PluginManagerAPI {
     constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter) :
         this(scope, loaderDelegate, reporter, InstallerConnections { URL(it).openConnection() as HttpURLConnection })
@@ -70,6 +71,11 @@ class PluginManagerAPIImpl private constructor(
     internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
                          connections: (String) -> HttpURLConnection) :
         this(scope, loaderDelegate, reporter, InstallerConnections(connections))
+
+    internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
+                         storeClient: SupabaseClient) :
+        this(scope, loaderDelegate, reporter,
+            InstallerConnections { URL(it).openConnection() as HttpURLConnection }, storeClient)
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -110,7 +116,7 @@ class PluginManagerAPIImpl private constructor(
     }
 
     // Supabase Postgrest client for database reads (created with host classloader)
-    private val supabaseClient: SupabaseClient = withHostClassLoader {
+    private val supabaseClient: SupabaseClient = providedStoreClient ?: withHostClassLoader {
         createSupabaseClient(
             supabaseUrl = SUPABASE_URL,
             supabaseKey = SUPABASE_ANON_KEY
@@ -635,25 +641,31 @@ class PluginManagerAPIImpl private constructor(
         }
     }
 
-    override suspend fun checkForCompatibleUpdates(): List<UpdateInfo> = withContext(Dispatchers.IO) {
+    override suspend fun checkForCompatibleUpdates(): List<UpdateInfo> =
+        checkForCompatibleUpdatesResult().getOrNull().orEmpty()
+
+    /** A failed check must not be treated as a successful empty offer when retiring prompts. */
+    internal suspend fun checkForCompatibleUpdatesResult(): Result<List<UpdateInfo>> = withContext(Dispatchers.IO) {
         val installed = getInstalledPlugins()
-        if (installed.isEmpty()) return@withContext emptyList()
+        if (installed.isEmpty()) return@withContext Result.success(emptyList())
         val installedById = installed.associateBy { it.pluginId }
 
         // Step 1: candidates with a newer published version (one view query).
-        val candidates = checkForUpdates()
-        if (candidates.isEmpty()) return@withContext emptyList()
+        val candidates = checkForUpdatesResult().getOrElse { return@withContext Result.failure(it) }.loadable
+        if (candidates.isEmpty()) return@withContext Result.success(emptyList())
 
         // Step 2: resolve each candidate version's min_ipc_version. If the
         // lookup fails outright, skip this cycle rather than prompting for
         // updates we can't verify (the download gate would refuse them anyway).
         val versionRows = try {
             fetchCandidateVersionRows(candidates)
-        } catch (_: Exception) {
-            return@withContext emptyList()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            return@withContext Result.failure(failure)
         }
 
-        candidates.mapNotNull { (pluginId, latestVersion) ->
+        Result.success(candidates.mapNotNull { (pluginId, latestVersion) ->
             val current = installedById[pluginId] ?: return@mapNotNull null
             val versionRow = versionRows[pluginId]
             // A missing row resolves to UNKNOWN → installable, matching the
@@ -673,7 +685,7 @@ class PluginManagerAPIImpl private constructor(
                 newVersion = latestVersion,
                 changelog = versionRow?.changelog ?: ""
             )
-        }
+        })
     }
 
     /**

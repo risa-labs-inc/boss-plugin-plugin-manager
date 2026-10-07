@@ -9,6 +9,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -82,12 +83,18 @@ class UpdatePromptService(
      * prompted at their current latest version. Automatic mode only prompts for
      * explicit opt-outs; stale toast actions recheck the current preference. Safe to call repeatedly
      * (startup, realtime events) — dedupe makes extra calls harmless.
+     * Host notification callbacks must remain nonblocking: prompt changes share a
+     * non-reentrant mutex, and toast actions launch their own coroutine.
      */
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
         if (busy) return
         val updatesResult = try {
-            apiImpl.checkForCompatibleUpdates()
+            if (apiImpl is PluginManagerAPIImpl) {
+                apiImpl.checkForCompatibleUpdatesResult().getOrElse { return }
+            } else {
+                apiImpl.checkForCompatibleUpdates()
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
