@@ -195,8 +195,8 @@ manifest identity before acquiring the lease; existing update fallbacks reuse th
 held identity and reject mismatched manifests. Read installed state again inside
 the lease. A busy lease is a neutral result, preserving toast deduplication records
 and avoiding a false update-failure tally; competing installers report outcomes through their own UI.
-Prompt checks use the real API's lossless compatible-update Result: failures in
-either candidate or version-row lookups leave the visible prompt and records
+Prompt checks use the internal CompatibleUpdateSource lossless Result capability:
+failures in either candidate or version-row lookups leave the visible prompt and records
 untouched. The legacy public list API still collapses failures for callers that
 only act on nonempty offers; never use it to retire prompts.
 Targets handed to automatic mode by a stale toast clear matching records, so

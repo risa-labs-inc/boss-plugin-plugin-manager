@@ -38,17 +38,12 @@ class UpdatePromptPolicyRegressionTest {
         val updates = listOf(UpdateInfo("a", "A", "1", "2"), UpdateInfo("b", "B", "1", "2"))
         var failed = false
         var policy = HostAutomaticUpdatePolicy(false, emptySet())
-        val api = Proxy.newProxyInstance(PluginManagerAPI::class.java.classLoader,
-            arrayOf(PluginManagerAPI::class.java)) { _, method, _ ->
-            when (method.name) {
-                "checkForCompatibleUpdates" -> {
-                    if (failed) error("Store unavailable")
-                    updates
-                }
-                "getInstalledPlugins" -> emptyList<PluginInfo>()
-                else -> error("Unexpected call: ${method.name}")
-            }
-        } as PluginManagerAPI
+        val legacy = api(updates) { error("Must not install") }
+        val api = object : PluginManagerAPI by legacy, CompatibleUpdateSource {
+            override suspend fun checkForCompatibleUpdatesResult(): Result<List<UpdateInfo>> =
+                if (failed) Result.failure(IllegalStateException("Store unavailable"))
+                else Result.success(updates)
+        }
         val notes = Notes()
         val service = UpdatePromptService(this, api, null, notes, null, { policy })
         service.checkAndPrompt()
@@ -62,6 +57,43 @@ class UpdatePromptPolicyRegressionTest {
         assertEquals(listOf("toast-1"), notes.dismissed)
         assertEquals(2, notes.shown.size)
         assertEquals("A 1 → 2", notes.shown.last())
+    }
+
+    @Test
+    fun `legacy empty list preserves a mixed prompt and records after a policy change`(): Unit = runTest {
+        var updates = listOf(UpdateInfo("a", "A", "1", "2"), UpdateInfo("b", "B", "1", "2"))
+        var policy = HostAutomaticUpdatePolicy(false, emptySet())
+        val api = Proxy.newProxyInstance(PluginManagerAPI::class.java.classLoader,
+            arrayOf(PluginManagerAPI::class.java)) { _, method, _ ->
+            when (method.name) {
+                "checkForCompatibleUpdates" -> updates
+                "getInstalledPlugins" -> emptyList<PluginInfo>()
+                else -> error("Unexpected call: ${method.name}")
+            }
+        } as PluginManagerAPI
+        var records: String? = null
+        val storage = Proxy.newProxyInstance(PluginStorageProvider::class.java.classLoader,
+            arrayOf(PluginStorageProvider::class.java)) { _, method, arguments ->
+            when (method.name) {
+                "getJson" -> records
+                "putJson" -> { records = arguments!![1] as String; Unit }
+                else -> error("Unexpected storage call: ${method.name}")
+            }
+        } as PluginStorageProvider
+        val notes = Notes()
+        val service = UpdatePromptService(this, api, null, notes, storage, { policy })
+        service.checkAndPrompt()
+        val originalRecords = records
+        assertEquals(listOf("A, B"), notes.shown)
+        policy = HostAutomaticUpdatePolicy(true, setOf("a"))
+        updates = emptyList() // The public legacy API collapses store failures to this value.
+        service.checkAndPrompt()
+        assertEquals(emptyList(), notes.dismissed)
+        assertEquals(originalRecords, records)
+        updates = listOf(UpdateInfo("a", "A", "1", "2"))
+        service.checkAndPrompt()
+        assertEquals(listOf("A, B"), notes.shown, "Preserved records must still deduplicate the old offer")
+        assertEquals(emptyList(), notes.dismissed)
     }
 
     @Test
@@ -93,9 +125,9 @@ class UpdatePromptPolicyRegressionTest {
         assertEquals(3, notes.shown.size)
     }
 
-    // Proxy stubs return immediately; a suspending stub must handle the continuation explicitly.
-    private fun api(updates: List<UpdateInfo>, install: () -> InstallResult): PluginManagerAPI =
-        Proxy.newProxyInstance(PluginManagerAPI::class.java.classLoader,
+    // Result-returning suspend methods use typed Kotlin overrides, avoiding proxy boxing ambiguity.
+    private fun api(updates: List<UpdateInfo>, install: () -> InstallResult): PluginManagerAPI {
+        val legacy = Proxy.newProxyInstance(PluginManagerAPI::class.java.classLoader,
             arrayOf(PluginManagerAPI::class.java)) { _, method, _ ->
             when (method.name) {
                 "checkForCompatibleUpdates" -> updates
@@ -104,6 +136,11 @@ class UpdatePromptPolicyRegressionTest {
                 else -> error("Unexpected call: ${method.name}")
             }
         } as PluginManagerAPI
+        return object : PluginManagerAPI by legacy, CompatibleUpdateSource {
+            override suspend fun checkForCompatibleUpdatesResult(): Result<List<UpdateInfo>> =
+                Result.success(updates)
+        }
+    }
 
     @Test
     fun `busy installer is neutral and preserves prompt deduplication`(): Unit = runTest {

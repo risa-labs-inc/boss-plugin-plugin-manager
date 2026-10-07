@@ -9,7 +9,6 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
-import ai.rever.boss.plugin.dynamic.pluginmanager.impl.PluginManagerAPIImpl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -89,9 +88,10 @@ class UpdatePromptService(
     suspend fun checkAndPrompt() {
         val notifications = notifications ?: return
         if (busy) return
+        val losslessSource = apiImpl as? CompatibleUpdateSource
         val updatesResult = try {
-            if (apiImpl is PluginManagerAPIImpl) {
-                apiImpl.checkForCompatibleUpdatesResult().getOrElse { return }
+            if (losslessSource != null) {
+                losslessSource.checkForCompatibleUpdatesResult().getOrElse { return }
             } else {
                 apiImpl.checkForCompatibleUpdates()
             }
@@ -103,7 +103,8 @@ class UpdatePromptService(
         mutex.withLock {
             if (busy) return
             val policy = readPolicy()
-            retireManagedPrompt(policy)
+            // Legacy list queries cannot prove success; never retire an existing offer from them.
+            if (losslessSource != null) retireManagedPrompt(policy)
             val updates = updatesResult.filter { policy.allowsPrompt(it.pluginId) }
             if (updates.isEmpty()) return
 

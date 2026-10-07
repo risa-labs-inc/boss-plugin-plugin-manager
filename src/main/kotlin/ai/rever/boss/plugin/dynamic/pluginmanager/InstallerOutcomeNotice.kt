@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UninstallResult
 
+// Prefixes below are informational-style sentinels; update producers and classifier together.
 internal const val INSTALL_BUSY_GUIDANCE =
     "Wait for any active installation; if it stays busy, restart BOSS and retry."
 internal const val INSTALL_BUSY_NOTICE = "This plugin is busy. " + INSTALL_BUSY_GUIDANCE

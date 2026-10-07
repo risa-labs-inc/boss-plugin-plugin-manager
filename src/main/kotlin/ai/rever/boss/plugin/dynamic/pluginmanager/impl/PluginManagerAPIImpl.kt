@@ -2,6 +2,7 @@ package ai.rever.boss.plugin.dynamic.pluginmanager.impl
 
 import ai.rever.boss.plugin.api.LoadedPluginInfo
 import ai.rever.boss.plugin.api.PluginLoaderDelegate
+import ai.rever.boss.plugin.dynamic.pluginmanager.CompatibleUpdateSource
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
@@ -64,7 +65,7 @@ class PluginManagerAPIImpl private constructor(
     private val reporter: TransferReporter,
     private val installConnections: InstallerConnections,
     providedStoreClient: SupabaseClient? = null,
-) : PluginManagerAPI {
+) : PluginManagerAPI, CompatibleUpdateSource {
     constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter) :
         this(scope, loaderDelegate, reporter, InstallerConnections { URL(it).openConnection() as HttpURLConnection })
 
@@ -645,7 +646,7 @@ class PluginManagerAPIImpl private constructor(
         checkForCompatibleUpdatesResult().getOrNull().orEmpty()
 
     /** A failed check must not be treated as a successful empty offer when retiring prompts. */
-    internal suspend fun checkForCompatibleUpdatesResult(): Result<List<UpdateInfo>> = withContext(Dispatchers.IO) {
+    override suspend fun checkForCompatibleUpdatesResult(): Result<List<UpdateInfo>> = withContext(Dispatchers.IO) {
         val installed = getInstalledPlugins()
         if (installed.isEmpty()) return@withContext Result.success(emptyList())
         val installedById = installed.associateBy { it.pluginId }
