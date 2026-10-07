@@ -2,7 +2,6 @@ package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import java.io.File
 import java.nio.file.Files
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -47,10 +46,7 @@ class PluginUpdateLeaseProcessTest {
         val directory = Files.createTempDirectory("plugin-lease-gate").toFile()
         try {
             val first = PluginUpdateLease.acquire(directory, "plugin").getOrThrow()
-            val properties = System.getProperties()
-            val owners = synchronized(properties) {
-                properties["boss.plugins.updateLease.processOwners"] as ConcurrentHashMap<*, *>
-            }
+            val owners = PluginUpdateProcessRegistry.owners()
             val lockFile = File(directory, ".plugin-update-locks").listFiles()!!.single().canonicalFile
             val token = owners[lockFile.path]!!
             assertEquals(null, owners.javaClass.classLoader)

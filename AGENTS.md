@@ -194,7 +194,7 @@ all installer mutations, including uninstall. GitHub/file installs discover thei
 manifest identity before acquiring the lease; existing update fallbacks reuse the
 held identity and reject mismatched manifests. Read installed state again inside
 the lease. A busy lease is a neutral result, preserving toast deduplication records
-and avoiding a false update-failure tally; the host reports its own failures.
+and avoiding a false update-failure tally; competing installers report outcomes through their own UI.
 Targets handed to automatic mode by a stale toast clear matching records, so
 switching back to manual mode can re-offer them. Explicit GitHub URL installs
 and the version picker still permit same-version repair; only updater fallbacks
@@ -202,21 +202,21 @@ skip current versions. Both host and Toolbox companion releases
 must ship for cross-installer protection. Keep lock files permanently: deleting one
 allows another installer to lock a new inode while the old inode is still locked.
 
-The revised process fence uses reserved internal JVM state
-`boss.plugins.updateLease.processOwners`: a bootstrap-JDK ConcurrentHashMap of
-canonical lock paths to java.lang.Object owner tokens, claimed before opening a
-lock-file descriptor. Keep this protocol identical to BossConsole
-`composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/PluginUpdateLease.kt`
-(`acquire` and `processOwners`), including canonical paths and synchronization on
-`System.getProperties()`. No plugin-defined object may be retained in that registry.
-The lease intentionally spans the download and state refresh as well as promotion;
-the host retries busy leases without consuming its failure budget.
-Host and Toolbox must both ship this revised fence: an older participant can
-still drop POSIX process locks by closing a contended descriptor. This is internal
-coordination state, not a string-valued preference signal. Its non-string value
-means diagnostics must not call `System.getProperties().list/store`; use
-`stringPropertyNames()` and `getProperty()` for string-only snapshots. A source
-audit found no host/Toolbox consumer using those unsafe dump methods; bundled
-third-party library consumers were not audited. If abnormal teardown leaves a
-registry owner behind, restart BOSS to recover. Never probe a busy owner by
-opening/closing its lock file: that could drop its active POSIX OS lock.
+The process fence uses the platform MBeanServer's JDK-only RequiredModelMBean
+`boss.plugins:type=UpdateLeaseRegistry,protocol=2`. Its managed resource is an
+AtomicReference to a bootstrap ConcurrentHashMap of canonical lock paths to
+java.lang.Object owner tokens, claimed before opening any lock descriptor. The
+bean exposes only AtomicReference.get; map/token values never enter MBeanInfo.
+Atomic registration chooses the shared winner across classloaders. Incompatible
+metadata or map types fail closed; never replace or unregister the production bean.
+No plugin-defined object may be retained in it, and system properties remain
+string-compatible. Keep the protocol identical to BossConsole's
+`composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/PluginUpdateProcessRegistry.kt`
+and `PluginUpdateLease.kt`, including canonical paths and exact-token removal.
+The lease intentionally spans download, state refresh and promotion; competing
+host/Toolbox actions provide their own outcome UI. The host retries busy leases
+without consuming its failure budget. Both revised releases must ship: an older
+participant can still drop POSIX process locks by closing a contended descriptor.
+Registry mutation by arbitrary in-process code is not a security boundary; plugins
+already share JVM/file access. If abnormal teardown leaves an owner behind, restart
+BOSS. Never probe a busy owner by opening/closing its lock file.

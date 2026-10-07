@@ -249,7 +249,7 @@ class UpdatePromptService(
                     }
                 }
 
-                // Preserve busy records: the competing host surfaces its own failures.
+                // Preserve busy records: competing installers report through their own UI.
                 if (competing.isNotEmpty()) {
                     notifications?.showToast(
                         message = INSTALL_COMPETING_PREFIX + competing.joinToString(", ") { it.displayName },

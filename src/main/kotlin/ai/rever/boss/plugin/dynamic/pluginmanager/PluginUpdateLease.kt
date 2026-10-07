@@ -38,41 +38,25 @@ internal class PluginUpdateLease internal constructor(
 ) : Closeable {
     @Synchronized
     override fun close() {
-        var fatal: Error? = null
+        var cleanupFailure: Throwable? = null
         try {
-            lock.release()
+            if (lock.isValid) lock.release()
         } catch (failure: Exception) {
-            fatal = logCleanup("release", failure)
+            cleanupFailure = logCleanup("release", failure) ?: failure
         } catch (failure: Error) {
-            fatal = failure
+            cleanupFailure = failure
         } finally {
             try {
-                fatal = closeChannel(channel, fatal) as? Error
+                cleanupFailure = closeChannel(channel, cleanupFailure)
             } finally {
                 // A failed close that leaves the descriptor open must keep the gate.
                 if (!channel.isOpen) processOwners.remove(ownerPath, ownerToken)
             }
         }
-        fatal?.let { throw it }
+        (cleanupFailure as? Error)?.let { throw it }
     }
 
     companion object {
-        private const val PROCESS_OWNERS_KEY = "boss.plugins.updateLease.processOwners"
-
-        @Suppress("UNCHECKED_CAST")
-        private fun processOwners(): ConcurrentHashMap<String, Any> {
-            val properties = System.getProperties()
-            return synchronized(properties) {
-                val existing = properties[PROCESS_OWNERS_KEY]
-                if (existing == null) {
-                    ConcurrentHashMap<String, Any>().also { properties[PROCESS_OWNERS_KEY] = it }
-                } else {
-                    check(existing is ConcurrentHashMap<*, *>) { "Invalid plugin update process gate" }
-                    existing as ConcurrentHashMap<String, Any>
-                }
-            }
-        }
-
         fun acquire(pluginDir: File, pluginId: String): Result<PluginUpdateLease> = try {
             val directory = File(pluginDir, ".plugin-update-locks")
             check(directory.isDirectory || directory.mkdirs()) { "Cannot create plugin update lock directory" }
@@ -80,7 +64,7 @@ internal class PluginUpdateLease internal constructor(
                 .joinToString("") { "%02x".format(it) }
             val lockFile = File(directory, "$name.lock").canonicalFile
             val ownerPath = lockFile.path
-            val owners = processOwners()
+            val owners = PluginUpdateProcessRegistry.owners()
             val token = Any() // java.lang.Object; never retain a plugin/host classloader in the shared map.
             if (owners.putIfAbsent(ownerPath, token) != null) throw PluginUpdateLeaseBusyException(pluginId)
 
@@ -122,12 +106,17 @@ internal class PluginUpdateLease internal constructor(
             return fatal
         }
 
-        private fun logCleanup(phase: String, failure: Exception): Error? = try {
-            System.err.println("[PluginManager] Plugin update lease cleanup failed: $phase (${failure.javaClass.simpleName})")
+        internal fun logCleanup(
+            phase: String,
+            failure: Exception,
+            diagnostic: (String) -> Unit = { System.err.println(it) },
+        ): Error? = try {
+            diagnostic("[PluginManager] Plugin update lease cleanup failed: $phase (${failure.javaClass.simpleName})")
             null
         } catch (_: Exception) {
             null
         } catch (fatal: Error) {
+            fatal.addSuppressed(failure)
             fatal
         }
     }

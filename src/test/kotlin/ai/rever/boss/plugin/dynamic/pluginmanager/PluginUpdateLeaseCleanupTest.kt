@@ -85,4 +85,44 @@ class PluginUpdateLeaseCleanupTest {
         })
         assertFalse(owners.containsKey("fixture"))
     }
+
+    @Test
+    fun `repeated close skips an invalid lock and preserves a replacement owner`() {
+        val channel = Channel()
+        val lock = Lock(channel)
+        val owners = ConcurrentHashMap<String, Any>()
+        val token = Any()
+        owners["fixture"] = token
+        val lease = PluginUpdateLease(channel, lock, owners, "fixture", token)
+        lease.close()
+        val replacement = Any()
+        owners["fixture"] = replacement
+        lease.close()
+        assertEquals(1, lock.releases)
+        assertEquals(1, channel.closes)
+        assertSame(replacement, owners["fixture"])
+    }
+
+    @Test
+    fun `fatal diagnostic failures retain the original ordinary cleanup failure`() {
+        val original = IOException("private cleanup details")
+        val fatal = AssertionError("fatal logging fixture")
+        assertSame(fatal, PluginUpdateLease.logCleanup("release", original) { throw fatal })
+        assertEquals(listOf(original), fatal.suppressed.toList())
+    }
+
+    @Test
+    fun `fatal channel cleanup wins an ordinary release failure and retains its context`() {
+        val original = IOException("private release details")
+        val fatal = AssertionError("fatal close fixture")
+        val channel = Channel(fatal)
+        val owners = ConcurrentHashMap<String, Any>()
+        val token = Any()
+        owners["fixture"] = token
+        assertSame(fatal, assertFailsWith<AssertionError> {
+            PluginUpdateLease(channel, Lock(channel, original), owners, "fixture", token).close()
+        })
+        assertEquals(listOf(original), fatal.suppressed.toList())
+        assertFalse(owners.containsKey("fixture"))
+    }
 }

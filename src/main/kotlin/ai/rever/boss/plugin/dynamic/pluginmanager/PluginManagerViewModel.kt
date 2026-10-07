@@ -1724,6 +1724,7 @@ internal fun failureReasonFor(
                 // Checked before any work happens, so nothing failed. It is still worth a word -
                 // see [outcomeErrorFor] - but it is not a failure and must not be counted as one.
                 PluginAction.INSTALL -> null
+                // Only identity/version checks produce this; loader refusals remain failures.
                 // The host may finish the same update before Toolbox acquires its lease.
                 PluginAction.UPDATE -> null
             }
