@@ -10,6 +10,7 @@ import com.risaboss.toolbox.downloadcenter.TransferReporter
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
@@ -68,6 +69,8 @@ class PluginInstallerLeaseApiTest {
         var onRead: (() -> Unit)? = null
         var allowUnload = true
         var failLoad = false
+        var loadFailure: Throwable? = null
+        var onLoad: ((String) -> Unit)? = null
         override fun getLoadedPlugins(): List<LoadedPluginInfo> {
             reads++
             onRead?.invoke()
@@ -75,6 +78,8 @@ class PluginInstallerLeaseApiTest {
         }
         override suspend fun loadPlugin(jarPath: String): LoadedPluginInfo? {
             loads++
+            onLoad?.invoke(jarPath)
+            loadFailure?.let { throw it }
             if (failLoad) return null
             return LoadedPluginInfo(ID, "Fixture", "2.0.0", jarPath = jarPath).also { loaded = listOf(it) }
         }
@@ -180,11 +185,70 @@ class PluginInstallerLeaseApiTest {
             val previousBytes = original.readBytes()
             val signature = File("${original.path}.sig").apply { writeText("previous signature") }
             val incoming = File(directory, "local-new-name.jar").apply { writeBytes(jar()) }
+            val sourceBytes = incoming.readBytes()
+            val unrelated = File(plugins, "unrelated.jar").apply { writeBytes(jar(id = "other.plugin")) }
+            val unrelatedBytes = unrelated.readBytes()
             delegate.failLoad = true
+            delegate.onLoad = { File("$it.sig").writeText("failed artifact signature") }
             assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
             assertContentEquals(previousBytes, original.readBytes())
             assertEquals("previous signature", signature.readText())
             assertEquals(1, delegate.loads)
+            assertFalse(File(plugins, incoming.name).exists())
+            assertFalse(File(plugins, "${incoming.name}.sig").exists())
+            assertContentEquals(sourceBytes, incoming.readBytes())
+            assertContentEquals(unrelatedBytes, unrelated.readBytes())
+        }
+    }
+
+    @Test
+    fun `thrown local load failures remove only the newly promoted artifact`(): Unit = runBlocking {
+        for (failure in listOf(IOException("load fixture"), CancellationException("load cancellation"),
+            AssertionError("fatal load fixture"))) {
+            fixture {
+                original.writeBytes(jar("1.0.0"))
+                val previousBytes = original.readBytes()
+                val signature = File("${original.path}.sig").apply { writeText("previous signature") }
+                val incoming = File(directory, "local-new-name.jar").apply { writeBytes(jar()) }
+                val sourceBytes = incoming.readBytes()
+                val unrelated = File(plugins, "unrelated.jar").apply { writeBytes(jar(id = "other.plugin")) }
+                val unrelatedBytes = unrelated.readBytes()
+                delegate.loadFailure = failure
+                delegate.onLoad = { File("$it.sig").writeText("failed artifact signature") }
+                when (failure) {
+                    is CancellationException, is Error -> {
+                        val caught = if (failure is CancellationException) {
+                            assertFailsWith<CancellationException> { api.installFromFile(incoming.path) }
+                        } else {
+                            assertFailsWith<AssertionError> { api.installFromFile(incoming.path) }
+                        }
+                        assertTrue(caught === failure || caught.cause === failure,
+                            "Coroutine stack recovery must retain the original cause")
+                    }
+                    else -> assertIs<InstallResult.DownloadFailed>(api.installFromFile(incoming.path))
+                }
+                assertContentEquals(previousBytes, original.readBytes())
+                assertEquals("previous signature", signature.readText())
+                assertContentEquals(sourceBytes, incoming.readBytes())
+                assertContentEquals(unrelatedBytes, unrelated.readBytes())
+                assertFalse(File(plugins, incoming.name).exists())
+                assertFalse(File(plugins, "${incoming.name}.sig").exists())
+                PluginUpdateLease.acquire(plugins, ID).getOrThrow().close()
+            }
+        }
+    }
+
+    @Test
+    fun `failed local load leaves an existing in directory user source untouched`(): Unit = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            val previousBytes = original.readBytes()
+            val incoming = File(plugins, "user-source.jar").apply { writeBytes(jar()) }
+            val sourceBytes = incoming.readBytes()
+            delegate.failLoad = true
+            assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
+            assertContentEquals(previousBytes, original.readBytes())
+            assertContentEquals(sourceBytes, incoming.readBytes())
         }
     }
 

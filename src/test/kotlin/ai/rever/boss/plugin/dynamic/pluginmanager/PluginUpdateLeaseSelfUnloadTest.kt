@@ -6,7 +6,8 @@ import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Properties
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
@@ -31,9 +32,9 @@ class PluginUpdateLeaseSelfUnloadTest {
         }
         val directory = Files.createTempDirectory("lease-self-unload")
         val path = directory.resolve("fixture.lock")
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
-        val ownerPath = path.toFile().canonicalPath
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
+        val ownerPath = PluginUpdateProcessRegistry.ownerKey(path.toFile().canonicalPath)
         owners[ownerPath] = token
         val channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
         try {
@@ -41,8 +42,8 @@ class PluginUpdateLeaseSelfUnloadTest {
             val childType = loader.loadClass(prefix)
             assertSame(loader, childType.classLoader)
             val constructor = childType.getDeclaredConstructor(
-                FileChannel::class.java, FileLock::class.java, ConcurrentHashMap::class.java,
-                String::class.java, Any::class.java,
+                FileChannel::class.java, FileLock::class.java, Properties::class.java,
+                String::class.java, String::class.java,
             )
             constructor.isAccessible = true
             val lease = constructor.newInstance(channel, lock, owners, ownerPath, token) as Closeable

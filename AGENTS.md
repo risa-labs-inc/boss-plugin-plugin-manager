@@ -206,15 +206,14 @@ skip current versions. Both host and Toolbox companion releases
 must ship for cross-installer protection. Keep lock files permanently: deleting one
 allows another installer to lock a new inode while the old inode is still locked.
 
-The process fence uses the platform MBeanServer's JDK-only RequiredModelMBean
-`boss.plugins:type=UpdateLeaseRegistry,protocol=2`. Its managed resource is an
-AtomicReference to a bootstrap ConcurrentHashMap of canonical lock paths to
-java.lang.Object owner tokens, claimed before opening any lock descriptor. The
-bean exposes only AtomicReference.get; map/token values never enter MBeanInfo.
-Atomic registration chooses the shared winner across classloaders. Incompatible
-metadata or map types fail closed; never replace or unregister the production bean.
-No plugin-defined object may be retained in it, and system properties remain
-string-compatible. Keep the protocol identical to BossConsole's
+The process fence uses `System.getProperties()` with String keys prefixed
+`boss.plugins.updateLease.protocol3.` plus SHA-256 of the UTF-8 canonical lock-file
+path, and UUID String values. Atomic `putIfAbsent` claims ownership before any
+lock descriptor opens; conditional `remove(key, token)` releases only its owner.
+The lease captures the Properties instance, key and token once. No non-String
+value or plugin-defined object enters this bootstrap state; property diagnostics
+remain String-compatible, and there is no JMX bean or captured access-control context.
+Keep the protocol identical to BossConsole's
 `composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/PluginUpdateProcessRegistry.kt`
 and `PluginUpdateLease.kt`, including canonical paths and exact-token removal.
 The lease intentionally spans download, state refresh and promotion; competing
@@ -222,10 +221,9 @@ host/Toolbox actions provide their own outcome UI. The host retries busy leases
 without consuming its failure budget. Both revised releases must ship: an older
 participant can still drop POSIX process locks by closing a contended descriptor.
 Canonical-path ownership assumes lock directories do not alias the same inode
-through hard links or bind mounts.
-Registry mutation by arbitrary in-process code is not a security boundary; plugins
-already share JVM/file access. Remote JMX access must be restricted to trusted
-administrators: invoking the registry getter exposes the live process owner map.
+through hard links or bind mounts. Arbitrary in-process mutation, clearing or
+replacement of system properties is outside this cooperating-installer protocol;
+plugins already share JVM/file access, so it is not a security boundary.
 Release an owner only after channel close returns successfully. Java can report
 `isOpen == false` before native descriptor cleanup completes, so a thrown close
 retains the token even after repeated close calls. A release failure alone does

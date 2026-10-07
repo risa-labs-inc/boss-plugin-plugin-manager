@@ -1277,6 +1277,9 @@ class PluginManagerAPIImpl private constructor(
                 val previousJarPath = getInstalledPlugin(pluginId)?.jarPath
                 pluginsDir.mkdirs()
                 val destFile = File(pluginsDir, jarFile.name)
+                val destinationExisted = destFile.exists()
+                var createdArtifact = false
+                var loaded = false
                 var staged: File? = null
                 try {
                     if (jarFile.absolutePath != destFile.absolutePath) {
@@ -1293,19 +1296,36 @@ class PluginManagerAPIImpl private constructor(
                     if (staged != null && !promoteJar(staged, destFile)) {
                         return@withUpdateLease InstallResult.DownloadFailed("Could not put the local JAR in place")
                     }
+                    createdArtifact = staged != null && !destinationExisted
                     persistSignatureSidecar(destFile, null)
                     val loadedInfo = loaderDelegate?.loadPlugin(destFile.absolutePath)
                         ?: return@withUpdateLease InstallResult.LoadFailed(
                             if (loaderDelegate == null) "No plugin loader available"
                             else "Failed to load plugin from ${destFile.name} (see app logs for details)"
                         )
+                    loaded = true
                     cleanupOldVersionJars(pluginId, destFile, previousJarPath)
                     val pluginInfo = loadedInfo.toPluginInfo().copy(
                         jarPath = destFile.absolutePath, installedAt = System.currentTimeMillis())
                     refreshInstalledPlugins()
                     _events.emit(PluginEvent.PluginInstalled(pluginInfo))
                     InstallResult.Success(pluginInfo)
-                } finally { staged?.delete() }
+                } finally {
+                    staged?.delete()
+                    if (!loaded && createdArtifact) {
+                        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
+                        if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
+                            // Only remove a failed artifact this attempt created; an in-directory
+                            // source or preexisting user file remains theirs even when loading fails.
+                            try {
+                                destFile.delete()
+                                deleteSignatureSidecar(destFile)
+                            } catch (_: Exception) {
+                                // Best effort: preserve the loader's failure/cancellation outcome.
+                            }
+                        }
+                    }
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

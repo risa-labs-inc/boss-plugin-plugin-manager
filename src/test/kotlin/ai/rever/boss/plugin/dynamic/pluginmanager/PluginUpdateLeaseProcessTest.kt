@@ -48,17 +48,17 @@ class PluginUpdateLeaseProcessTest {
             val first = PluginUpdateLease.acquire(directory, "plugin").getOrThrow()
             val owners = PluginUpdateProcessRegistry.owners()
             val lockFile = File(directory, ".plugin-update-locks").listFiles()!!.single().canonicalFile
-            val token = owners[lockFile.path]!!
+            val token = owners[PluginUpdateProcessRegistry.ownerKey(lockFile.path)]!!
             assertEquals(null, owners.javaClass.classLoader)
-            assertEquals(Any::class.java, token.javaClass)
+            assertTrue(token is String)
             first.close()
             val second = PluginUpdateLease.acquire(directory, "plugin").getOrThrow()
             try {
                 first.close()
-                assertTrue(owners[lockFile.path] !== token)
+                assertTrue(owners[PluginUpdateProcessRegistry.ownerKey(lockFile.path)] !== token)
                 assertTrue(PluginUpdateLease.acquire(directory, "plugin").isFailure)
             } finally { second.close() }
-            assertFalse(owners.containsKey(lockFile.path))
+            assertFalse(owners.containsKey(PluginUpdateProcessRegistry.ownerKey(lockFile.path)))
         } finally { directory.deleteRecursively() }
     }
 

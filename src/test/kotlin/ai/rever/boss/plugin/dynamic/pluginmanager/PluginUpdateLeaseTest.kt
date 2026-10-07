@@ -32,7 +32,7 @@ class PluginUpdateLeaseTest {
             val lockFiles = directory.resolve(".plugin-update-locks").listFiles()!!
             assertEquals(8, lockFiles.size)
             val owners = PluginUpdateProcessRegistry.owners()
-            lockFiles.forEach { assertFalse(owners.containsKey(it.canonicalFile.path)) }
+            lockFiles.forEach { assertFalse(owners.containsKey(PluginUpdateProcessRegistry.ownerKey(it.canonicalFile.path))) }
         } finally {
             start.countDown()
             executor.shutdownNow()

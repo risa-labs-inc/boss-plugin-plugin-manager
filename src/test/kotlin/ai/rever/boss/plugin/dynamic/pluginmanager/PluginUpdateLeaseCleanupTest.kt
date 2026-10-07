@@ -8,7 +8,8 @@ import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.channels.ReadableByteChannel
 import java.nio.channels.WritableByteChannel
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Properties
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -49,8 +50,8 @@ class PluginUpdateLeaseCleanupTest {
     fun `ordinary release and close failures preserve a completed result and retain the uncertain gate`() {
         val channel = Channel(IOException("private close details"))
         val lock = Lock(channel, IOException("private release details"))
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         val lease = PluginUpdateLease(channel, lock, owners, "fixture", token)
         val result = lease.use { "committed" }
@@ -68,8 +69,8 @@ class PluginUpdateLeaseCleanupTest {
         val fatal = AssertionError("fatal fixture")
         val channel = Channel(fatal)
         val lock = Lock(channel, fatal)
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         val lease = PluginUpdateLease(channel, lock, owners, "fixture", token)
         val caught = assertFailsWith<AssertionError> { lease.close() }
@@ -85,8 +86,8 @@ class PluginUpdateLeaseCleanupTest {
     fun `fatal close errors propagate without becoming ordinary cleanup diagnostics`() {
         val fatal = AssertionError("fatal close fixture")
         val channel = Channel(fatal)
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         assertSame(fatal, assertFailsWith<AssertionError> {
             PluginUpdateLease(channel, Lock(channel), owners, "fixture", token).close()
@@ -98,8 +99,8 @@ class PluginUpdateLeaseCleanupTest {
     fun `repeated close skips an invalid lock and preserves a replacement owner`() {
         val channel = Channel()
         val lock = Lock(channel)
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         val lease = PluginUpdateLease(channel, lock, owners, "fixture", token)
         lease.close()
@@ -124,8 +125,8 @@ class PluginUpdateLeaseCleanupTest {
         val original = IOException("private release details")
         val fatal = AssertionError("fatal close fixture")
         val channel = Channel(fatal)
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         assertSame(fatal, assertFailsWith<AssertionError> {
             PluginUpdateLease(channel, Lock(channel, original), owners, "fixture", token).close()
@@ -137,8 +138,8 @@ class PluginUpdateLeaseCleanupTest {
     @Test
     fun `ordinary release failure with successful channel close frees the gate`() {
         val channel = Channel()
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         val result = PluginUpdateLease(channel, Lock(channel, IOException("release fixture")),
             owners, "fixture", token).use { "committed" }
@@ -150,8 +151,8 @@ class PluginUpdateLeaseCleanupTest {
     fun `fatal release failure with successful channel close frees the gate`() {
         val fatal = AssertionError("release fixture")
         val channel = Channel()
-        val owners = ConcurrentHashMap<String, Any>()
-        val token = Any()
+        val owners = Properties()
+        val token = UUID.randomUUID().toString()
         owners["fixture"] = token
         assertSame(fatal, assertFailsWith<AssertionError> {
             PluginUpdateLease(channel, Lock(channel, fatal), owners, "fixture", token).close()
@@ -166,13 +167,13 @@ class PluginUpdateLeaseCleanupTest {
             val directory = Files.createTempDirectory("lease-acquire-close-failure").toFile()
             val owners = PluginUpdateProcessRegistry.owners()
             var path: String? = null
-            var token: Any? = null
+            var token: String? = null
             try {
                 val channel = Channel(failure)
                 val acquire = {
                     PluginUpdateLease.acquire(directory, "fixture") { lockFile ->
-                        path = lockFile.path
-                        token = owners[lockFile.path]!!
+                        path = PluginUpdateProcessRegistry.ownerKey(lockFile.path)
+                        token = owners[PluginUpdateProcessRegistry.ownerKey(lockFile.path)] as String
                         channel
                     }
                 }
@@ -184,7 +185,7 @@ class PluginUpdateLeaseCleanupTest {
                     assertIs<PluginUpdateLeaseBusyException>(acquire().exceptionOrNull())
                 }
                 assertFalse(channel.isOpen, "Java closed state alone cannot establish native cleanup success")
-                assertEquals(Any::class.java, token!!.javaClass)
+                assertEquals(String::class.java, token!!.javaClass)
                 assertIs<PluginUpdateLeaseBusyException>(
                     PluginUpdateLease.acquire(directory, "fixture").exceptionOrNull())
                 assertSame(token, owners[path])

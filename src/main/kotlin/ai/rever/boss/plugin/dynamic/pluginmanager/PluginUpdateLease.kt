@@ -10,7 +10,8 @@ import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Properties
+import java.util.UUID
 
 /** Neutral contention result: another installer owns this plugin, rather than a failed transfer. */
 internal const val UPDATE_INSTALL_BUSY = "Plugin installation already in progress"
@@ -32,16 +33,16 @@ internal class PluginUpdateLeaseBusyException(pluginId: String) :
 internal class PluginUpdateLease private constructor(
     private val channelClose: PluginUpdateLeaseChannelClose,
     private val lock: FileLock,
-    private val processOwners: ConcurrentHashMap<String, Any>,
+    private val processOwners: Properties,
     private val ownerPath: String,
-    private val ownerToken: Any,
+    private val ownerToken: String,
 ) : Closeable {
     internal constructor(
         channel: FileChannel,
         lock: FileLock,
-        processOwners: ConcurrentHashMap<String, Any>,
+        processOwners: Properties,
         ownerPath: String,
-        ownerToken: Any,
+        ownerToken: String,
     ) : this(PluginUpdateLeaseChannelClose(channel), lock, processOwners, ownerPath, ownerToken)
 
     @Synchronized
@@ -83,9 +84,9 @@ internal class PluginUpdateLease private constructor(
             val name = MessageDigest.getInstance("SHA-256").digest(pluginId.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
             val lockFile = File(directory, "$name.lock").canonicalFile
-            val ownerPath = lockFile.path
+            val ownerPath = PluginUpdateProcessRegistry.ownerKey(lockFile.path)
             val owners = PluginUpdateProcessRegistry.owners()
-            val token = Any() // java.lang.Object; never retain a plugin/host classloader in the shared map.
+            val token = UUID.randomUUID().toString() // Only bootstrap Strings enter shared properties.
             if (owners.putIfAbsent(ownerPath, token) != null) throw PluginUpdateLeaseBusyException(pluginId)
 
             try {
