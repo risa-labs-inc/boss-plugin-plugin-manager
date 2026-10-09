@@ -65,6 +65,7 @@ class PluginManagerAPIImpl private constructor(
     private val reporter: TransferReporter,
     private val installConnections: InstallerConnections,
     providedStoreClient: SupabaseClient? = null,
+    private val deleteFailedArtifact: (File) -> Boolean = { it.delete() },
 ) : PluginManagerAPI, CompatibleUpdateSource {
     constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter) :
         this(scope, loaderDelegate, reporter, InstallerConnections { URL(it).openConnection() as HttpURLConnection })
@@ -72,6 +73,12 @@ class PluginManagerAPIImpl private constructor(
     internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
                          connections: (String) -> HttpURLConnection) :
         this(scope, loaderDelegate, reporter, InstallerConnections(connections))
+
+    internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
+                         connections: (String) -> HttpURLConnection,
+                         deleteFailedArtifact: (File) -> Boolean) :
+        this(scope, loaderDelegate, reporter, InstallerConnections(connections),
+            deleteFailedArtifact = deleteFailedArtifact)
 
     internal constructor(scope: CoroutineScope, loaderDelegate: PluginLoaderDelegate?, reporter: TransferReporter,
                          storeClient: SupabaseClient) :
@@ -1086,18 +1093,19 @@ class PluginManagerAPIImpl private constructor(
                 return ReplacementLoad(info = it)
             }
         } catch (cancelled: CancellationException) {
-            withContext(kotlinx.coroutines.NonCancellable) {
-                restorePreviousAfterFailedLoad(
+            withContext(NonCancellable) {
+                restoreWithoutReplacingPrimaryFailure(
                     previousJarPath, replacementJar, removeFailedArtifact, wasLoaded)
             }
             throw cancelled
         } catch (fatal: Error) {
-            withContext(kotlinx.coroutines.NonCancellable) {
-                restorePreviousAfterFailedLoad(
+            withContext(NonCancellable) {
+                restoreWithoutReplacingPrimaryFailure(
                     previousJarPath, replacementJar, removeFailedArtifact, wasLoaded)
             }
             throw fatal
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            logReplacementFailure("replacement load", replacementJar, failure)
             // The caller returns the same stable load-failure result used for a null delegate result.
         }
 
@@ -1110,28 +1118,77 @@ class PluginManagerAPIImpl private constructor(
         return ReplacementLoad(info = null, restored = restored)
     }
 
+    /** A rollback is secondary to the cancellation/fatal error that triggered it. */
+    private suspend fun restoreWithoutReplacingPrimaryFailure(
+        previousJarPath: String?,
+        failedJar: File,
+        removeFailedArtifact: Boolean,
+        restoreRuntime: Boolean,
+    ) {
+        try {
+            restorePreviousAfterFailedLoad(
+                previousJarPath, failedJar, removeFailedArtifact, restoreRuntime)
+        } catch (rollbackFailure: Throwable) {
+            logReplacementFailure("rollback after interrupted replacement", failedJar, rollbackFailure)
+        }
+    }
+
     private suspend fun restorePreviousAfterFailedLoad(
         previousJarPath: String?,
         failedJar: File,
         removeFailedArtifact: Boolean,
         restoreRuntime: Boolean,
     ): Boolean {
+        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File) ?: return false
+        if (!previous.exists() || sameFile(previous, failedJar)) return false
         if (removeFailedArtifact && failedJar.exists()) {
-            if (!runCatching { failedJar.delete() }.getOrDefault(false)) return false
-            deleteSignatureSidecar(failedJar)
+            val removed = try {
+                deleteFailedArtifact(failedJar)
+            } catch (failure: Exception) {
+                logReplacementFailure("failed-artifact deletion", failedJar, failure)
+                false
+            }
+            if (removed) {
+                deleteSignatureSidecar(failedJar)
+            } else {
+                // A locked failed JAR is less harmful than leaving the previously running
+                // plugin absent. Keep its matching sidecar and restore the known old path;
+                // the next successful install cleans duplicate versions.
+                System.err.println("[plugin-manager] failed replacement remains on disk: ${failedJar.absolutePath}")
+            }
         }
         if (!restoreRuntime) return false
-        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File) ?: return false
-        if (!previous.exists() || previous.absolutePath == failedJar.absolutePath) return false
         val restored = try {
             loaderDelegate?.loadPlugin(previous.absolutePath) != null
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            logReplacementFailure("rollback load", previous, failure)
             false
         }
-        if (restored) refreshInstalledPlugins()
+        if (restored) {
+            try {
+                refreshInstalledPlugins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                // Runtime recovery succeeded. A stale Toolbox list must not replace that
+                // outcome with a download failure or mask an original cancellation/Error.
+                logReplacementFailure("installed-state refresh after rollback", previous, failure)
+            }
+        }
         return restored
+    }
+
+    private fun sameFile(left: File, right: File): Boolean =
+        runCatching { left.canonicalFile == right.canonicalFile }
+            .getOrElse { left.absoluteFile.toPath().normalize() == right.absoluteFile.toPath().normalize() }
+
+    private fun logReplacementFailure(action: String, jar: File, failure: Throwable) {
+        System.err.println(
+            "[plugin-manager] $action failed for ${jar.absolutePath}: " +
+                "${failure::class.simpleName}: ${failure.message}",
+        )
     }
 
     /**
@@ -1391,11 +1448,13 @@ class PluginManagerAPIImpl private constructor(
                         if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
                             // Only remove a failed artifact this attempt created; an in-directory
                             // source or preexisting user file remains theirs even when loading fails.
+                            // The rollback helper normally did this already; this finally also
+                            // covers throws between promotion and the replacement load.
                             try {
-                                destFile.delete()
-                                deleteSignatureSidecar(destFile)
-                            } catch (_: Exception) {
+                                if (deleteFailedArtifact(destFile)) deleteSignatureSidecar(destFile)
+                            } catch (failure: Exception) {
                                 // Best effort: preserve the loader's failure/cancellation outcome.
+                                logReplacementFailure("local failed-artifact cleanup", destFile, failure)
                             }
                         }
                     }

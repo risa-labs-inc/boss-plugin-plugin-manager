@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.PrintStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
@@ -103,7 +104,10 @@ class PluginInstallerLeaseApiTest {
         override fun getInaccessiblePlugins(): List<InaccessiblePluginInfo> = emptyList()
     }
 
-    private class Fixture(val directory: File) {
+    private class Fixture(
+        val directory: File,
+        deleteFailedArtifact: (File) -> Boolean = { it.delete() },
+    ) {
         val plugins = File(directory, "plugins").apply { mkdirs() }
         val original = File(plugins, "installed.jar").apply { writeText("irreplaceable installed bytes") }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
@@ -111,10 +115,13 @@ class PluginInstallerLeaseApiTest {
         val reporter = Reporter()
         val requests = mutableListOf<String>()
         var connection: (String) -> HttpURLConnection = { error("Unexpected installer network request: $it") }
-        val api = PluginManagerAPIImpl(scope, delegate, reporter) { url ->
-            requests += url
-            connection(url)
-        }
+        val api = PluginManagerAPIImpl(
+            scope,
+            delegate,
+            reporter,
+            connections = { url -> requests += url; connection(url) },
+            deleteFailedArtifact = deleteFailedArtifact,
+        )
 
         fun info(version: String, jar: File = original, locked: Boolean = false, url: String = "") =
             LoadedPluginInfo(ID, "Fixture", version, jarPath = jar.path,
@@ -138,10 +145,25 @@ class PluginInstallerLeaseApiTest {
         }
     }
 
-    private suspend fun fixture(block: suspend Fixture.() -> Unit) {
+    private suspend fun fixture(
+        deleteFailedArtifact: (File) -> Boolean = { it.delete() },
+        block: suspend Fixture.() -> Unit,
+    ) {
         val directory = Files.createTempDirectory("toolbox-lease-api").toFile()
-        val f = Fixture(directory)
+        val f = Fixture(directory, deleteFailedArtifact)
         try { f.block() } finally { f.scope.cancel(); directory.deleteRecursively() }
+    }
+
+    private suspend fun captureStderr(block: suspend () -> Unit): String {
+        val previous = System.err
+        val bytes = ByteArrayOutputStream()
+        System.setErr(PrintStream(bytes, true, Charsets.UTF_8))
+        return try {
+            block()
+            bytes.toString(Charsets.UTF_8)
+        } finally {
+            System.setErr(previous)
+        }
     }
 
     private fun jar(version: String = "2.0.0", id: String = ID, payload: String? = null): ByteArray =
@@ -553,14 +575,132 @@ class PluginInstallerLeaseApiTest {
                 if (it.endsWith("incoming.jar")) IOException("fixture replacement failure") else null
             }
 
+            lateinit var result: InstallResult.LoadFailed
+            val logged = captureStderr {
+                result = assertIs(
+                    api.installFromGitHub("https://github.com/fixture/plugin"),
+                )
+            }
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertTrue(logged.contains("replacement load failed"), logged)
+            assertTrue(logged.contains("fixture replacement failure"), logged)
+            assertEquals(2, delegate.loads)
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertFalse(File(plugins, "incoming.jar").exists())
+        }
+    }
+
+    @Test
+    fun `failed same-version github repair keeps its only jar`() = runBlocking {
+        fixture {
+            val onlyJar = File(plugins, "incoming.jar").apply { writeBytes(jar("2.0.0")) }
+            delegate.loaded = listOf(info("2.0.0", onlyJar))
+            api.refreshInstalledPlugins()
+            github(jar("2.0.0", payload = "repair"))
+            delegate.failLoadFor = { it == onlyJar.absolutePath }
+
+            assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertTrue(onlyJar.exists(), "same-path failure deleted the only plugin JAR")
+            assertEquals(1, delegate.loads, "same path cannot be restored as a second load")
+        }
+    }
+
+    @Test
+    fun `failed same-version store repair keeps its only jar`() = runBlocking {
+        fixture {
+            val onlyJar = File(plugins, "test_plugin_2.0.0.jar").apply { writeBytes(jar("2.0.0")) }
+            delegate.loaded = listOf(info("2.0.0", onlyJar))
+            api.refreshInstalledPlugins()
+            val replacement = jar("2.0.0", payload = "repair")
+            connection = { url ->
+                when {
+                    url.endsWith("/download/2.0.0") -> MemoryConnection(
+                        """{"downloadUrl":"https://fixture.invalid/store.jar","version":"2.0.0"}""".toByteArray())
+                    url == "https://fixture.invalid/store.jar" -> MemoryConnection(replacement)
+                    else -> error("Unexpected request $url")
+                }
+            }
+            delegate.failLoadFor = { it == onlyJar.absolutePath }
+
+            assertIs<InstallResult.LoadFailed>(api.installVersion(ID, "2.0.0"))
+
+            assertTrue(onlyJar.exists(), "same-path failure deleted the only plugin JAR")
+            assertEquals(1, delegate.loads, "same path cannot be restored as a second load")
+        }
+    }
+
+    @Test
+    fun `delete failure still restores the previous runtime`() = runBlocking {
+        fixture(deleteFailedArtifact = { false }) {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.failLoadFor = { it.endsWith("incoming.jar") }
+            delegate.onLoad = {
+                if (it.endsWith("incoming.jar")) File("$it.sig").writeText("matching failed signature")
+            }
+
             val result = assertIs<InstallResult.LoadFailed>(
                 api.installFromGitHub("https://github.com/fixture/plugin"),
             )
 
             assertTrue(result.error.contains("previous version was restored"))
-            assertEquals(2, delegate.loads)
             assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
-            assertFalse(File(plugins, "incoming.jar").exists())
+            assertTrue(File(plugins, "incoming.jar").exists(), "fixture must exercise failed deletion")
+            assertTrue(
+                File(plugins, "incoming.jar.sig").exists(),
+                "a sidecar must stay with failed bytes that could not be deleted",
+            )
+        }
+    }
+
+    @Test
+    fun `refresh failure after rollback does not hide successful recovery`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.failLoadFor = { it.endsWith("incoming.jar") }
+            delegate.onRead = {
+                if (delegate.loads >= 2) throw IOException("fixture refresh failure")
+            }
+
+            lateinit var result: InstallResult.LoadFailed
+            val logged = captureStderr {
+                result = assertIs(
+                    api.installFromGitHub("https://github.com/fixture/plugin"),
+                )
+            }
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertTrue(logged.contains("installed-state refresh after rollback"), logged)
+            assertTrue(logged.contains("fixture refresh failure"), logged)
+        }
+    }
+
+    @Test
+    fun `rollback exception is logged and does not claim recovery`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.failLoadFor = { it.endsWith("incoming.jar") }
+            delegate.loadFailureFor = {
+                if (it == original.absolutePath) IOException("fixture rollback failure") else null
+            }
+
+            lateinit var result: InstallResult.LoadFailed
+            val logged = captureStderr {
+                result = assertIs(
+                    api.installFromGitHub("https://github.com/fixture/plugin"),
+                )
+            }
+
+            assertFalse(result.error.contains("previous version was restored"))
+            assertTrue(logged.contains("rollback load failed"), logged)
+            assertTrue(logged.contains("fixture rollback failure"), logged)
         }
     }
 
@@ -580,7 +720,10 @@ class PluginInstallerLeaseApiTest {
             assertFalse(result.error.contains("previous version was restored"))
             assertEquals(1, delegate.loads)
             assertTrue(delegate.loaded.isEmpty())
-            assertFalse(File(plugins, "incoming.jar").exists())
+            assertTrue(
+                File(plugins, "incoming.jar").exists(),
+                "a fresh failed install has no distinct previous artifact that makes deletion safe",
+            )
         }
     }
 
