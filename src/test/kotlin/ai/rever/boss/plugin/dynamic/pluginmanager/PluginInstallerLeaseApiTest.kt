@@ -71,6 +71,7 @@ class PluginInstallerLeaseApiTest {
         var failLoad = false
         var failLoadFor: ((String) -> Boolean)? = null
         var loadFailure: Throwable? = null
+        var loadFailureFor: ((String) -> Throwable?)? = null
         var onLoad: ((String) -> Unit)? = null
         override fun getLoadedPlugins(): List<LoadedPluginInfo> {
             reads++
@@ -80,6 +81,7 @@ class PluginInstallerLeaseApiTest {
         override suspend fun loadPlugin(jarPath: String): LoadedPluginInfo? {
             loads++
             onLoad?.invoke(jarPath)
+            loadFailureFor?.invoke(jarPath)?.let { throw it }
             loadFailure?.let { throw it }
             if (failLoad || failLoadFor?.invoke(jarPath) == true) return null
             return LoadedPluginInfo(ID, "Fixture", "2.0.0", jarPath = jarPath).also { loaded = listOf(it) }
@@ -189,12 +191,15 @@ class PluginInstallerLeaseApiTest {
             val sourceBytes = incoming.readBytes()
             val unrelated = File(plugins, "unrelated.jar").apply { writeBytes(jar(id = "other.plugin")) }
             val unrelatedBytes = unrelated.readBytes()
-            delegate.failLoad = true
-            delegate.onLoad = { File("$it.sig").writeText("failed artifact signature") }
+            delegate.failLoadFor = { it.endsWith(incoming.name) }
+            delegate.onLoad = {
+                if (it.endsWith(incoming.name)) File("$it.sig").writeText("failed artifact signature")
+            }
             assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
             assertContentEquals(previousBytes, original.readBytes())
             assertEquals("previous signature", signature.readText())
-            assertEquals(1, delegate.loads)
+            assertEquals(2, delegate.loads)
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
             assertFalse(File(plugins, incoming.name).exists())
             assertFalse(File(plugins, "${incoming.name}.sig").exists())
             assertContentEquals(sourceBytes, incoming.readBytes())
@@ -215,7 +220,9 @@ class PluginInstallerLeaseApiTest {
                 val unrelated = File(plugins, "unrelated.jar").apply { writeBytes(jar(id = "other.plugin")) }
                 val unrelatedBytes = unrelated.readBytes()
                 delegate.loadFailure = failure
-                delegate.onLoad = { File("$it.sig").writeText("failed artifact signature") }
+                delegate.onLoad = {
+                    if (it.endsWith(incoming.name)) File("$it.sig").writeText("failed artifact signature")
+                }
                 when (failure) {
                     is CancellationException, is Error -> {
                         val caught = if (failure is CancellationException) {
@@ -226,7 +233,7 @@ class PluginInstallerLeaseApiTest {
                         assertTrue(caught === failure || caught.cause === failure,
                             "Coroutine stack recovery must retain the original cause")
                     }
-                    else -> assertIs<InstallResult.DownloadFailed>(api.installFromFile(incoming.path))
+                    else -> assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
                 }
                 assertContentEquals(previousBytes, original.readBytes())
                 assertEquals("previous signature", signature.readText())
@@ -509,6 +516,87 @@ class PluginInstallerLeaseApiTest {
             assertEquals(1, delegate.unloads)
             assertEquals(2, delegate.loads, "one failed replacement load, then one rollback load")
             assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertFalse(File(plugins, "incoming.jar").exists())
+        }
+    }
+
+    @Test
+    fun `failed store update reloads the previous plugin immediately`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            val replacement = jar("2.0.0")
+            connection = { url ->
+                when {
+                    url.endsWith("/download/2.0.0") -> MemoryConnection(
+                        """{"downloadUrl":"https://fixture.invalid/store.jar","version":"2.0.0"}""".toByteArray())
+                    url == "https://fixture.invalid/store.jar" -> MemoryConnection(replacement)
+                    else -> error("Unexpected request $url")
+                }
+            }
+            delegate.failLoadFor = { it.endsWith("test_plugin_2.0.0.jar") }
+
+            val result = assertIs<InstallResult.LoadFailed>(api.installVersion(ID, "2.0.0"))
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertEquals(2, delegate.loads)
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertFalse(File(plugins, "test_plugin_2.0.0.jar").exists())
+        }
+    }
+
+    @Test
+    fun `thrown replacement load reloads the previous plugin immediately`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.loadFailureFor = {
+                if (it.endsWith("incoming.jar")) IOException("fixture replacement failure") else null
+            }
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertEquals(2, delegate.loads)
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertFalse(File(plugins, "incoming.jar").exists())
+        }
+    }
+
+    @Test
+    fun `failed update does not start a plugin that was not running`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            delegate.loaded = emptyList()
+            api.refreshInstalledPlugins()
+            github(jar("2.0.0"))
+            delegate.failLoadFor = { it.endsWith("incoming.jar") }
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertFalse(result.error.contains("previous version was restored"))
+            assertEquals(1, delegate.loads)
+            assertTrue(delegate.loaded.isEmpty())
+            assertFalse(File(plugins, "incoming.jar").exists())
+        }
+    }
+
+    @Test
+    fun `failed rollback does not claim the previous version was restored`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.failLoad = true
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertFalse(result.error.contains("previous version was restored"))
+            assertEquals(2, delegate.loads)
             assertFalse(File(plugins, "incoming.jar").exists())
         }
     }
