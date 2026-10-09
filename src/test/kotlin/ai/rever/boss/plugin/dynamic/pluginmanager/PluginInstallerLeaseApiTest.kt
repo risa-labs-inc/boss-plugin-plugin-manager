@@ -642,6 +642,65 @@ class PluginInstallerLeaseApiTest {
     }
 
     @Test
+    fun `local refused half-loaded cleanup preserves the registered plugin jar`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            val incoming = File(directory, "incoming.jar").apply { writeBytes(jar("2.0.0")) }
+            delegate.loadFailureFor = { path ->
+                if (path.endsWith("incoming.jar")) {
+                    delegate.loaded = listOf(info("2.0.0", File(path)))
+                    delegate.allowUnload = false
+                    IOException("fixture failure after registration")
+                } else null
+            }
+
+            val result = assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
+            val installed = File(plugins, "incoming.jar")
+
+            assertTrue(result.error.contains("failed copy remains on disk"), result.error)
+            assertEquals(2, delegate.unloads)
+            assertEquals(1, delegate.loads)
+            assertEquals(installed.absolutePath, delegate.loaded.single().jarPath)
+            assertTrue(installed.exists(), "cleanup must not delete a JAR still registered by the host")
+        }
+    }
+
+    @Test
+    fun `half-registered fresh and same-path installs are unloaded safely`() = runBlocking {
+        fixture {
+            delegate.loaded = emptyList()
+            api.refreshInstalledPlugins()
+            github(jar("2.0.0"))
+            delegate.loadFailureFor = { path ->
+                delegate.loaded = listOf(info("2.0.0", File(path)))
+                IOException("fixture fresh half-registration")
+            }
+
+            assertIs<InstallResult.LoadFailed>(api.installFromGitHub("https://github.com/fixture/plugin"))
+
+            assertEquals(1, delegate.unloads, "the half-registered fresh copy must be detached")
+            assertTrue(delegate.loaded.isEmpty())
+            assertTrue(File(plugins, "incoming.jar").exists())
+        }
+        fixture {
+            val onlyJar = File(plugins, "incoming.jar").apply { writeBytes(jar("2.0.0")) }
+            delegate.loaded = listOf(info("2.0.0", onlyJar))
+            api.refreshInstalledPlugins()
+            github(jar("2.0.0", payload = "repair"))
+            delegate.loadFailureFor = { path ->
+                delegate.loaded = listOf(info("2.0.0", File(path)))
+                IOException("fixture same-path half-registration")
+            }
+
+            assertIs<InstallResult.LoadFailed>(api.installFromGitHub("https://github.com/fixture/plugin"))
+
+            assertEquals(2, delegate.unloads, "old unload plus half-registered replacement cleanup")
+            assertTrue(delegate.loaded.isEmpty())
+            assertTrue(onlyJar.exists(), "same-path cleanup must preserve the only JAR")
+        }
+    }
+
+    @Test
     fun `replacement linkage failure is recovered as a load failure`() = runBlocking {
         fixture {
             original.writeBytes(jar("1.0.0"))
@@ -820,7 +879,7 @@ class PluginInstallerLeaseApiTest {
             assertTrue(delegate.loaded.isEmpty())
             assertTrue(
                 File(plugins, "incoming.jar").exists(),
-                "a fresh failed install has no distinct previous artifact that makes deletion safe",
+                "without loaded-plugin metadata there is no rollback path that makes deletion safe",
             )
         }
     }
@@ -874,6 +933,51 @@ class PluginInstallerLeaseApiTest {
             assertEquals(0, delegate.loads)
             assertFalse(plugins.listFiles()!!.any { it.name.endsWith(".part") })
             PluginUpdateLease.acquire(plugins, ID).getOrThrow().close()
+        }
+    }
+
+    @Test
+    fun `failed promotion restores the previous runtime on every replacement route`() = runBlocking {
+        for (route in listOf("store", "github", "local")) fixture {
+            original.writeBytes(jar("1.0.0"))
+            val destinationName = if (route == "store") "test_plugin_2.0.0.jar" else "incoming.jar"
+            File(plugins, destinationName).apply {
+                mkdirs()
+                File(this, "blocker").writeText("force atomic promotion failure")
+            }
+            val replacement = jar("2.0.0")
+            val result = when (route) {
+                "store" -> {
+                    connection = { url ->
+                        when {
+                            url.endsWith("/download/2.0.0") -> MemoryConnection(
+                                """{"downloadUrl":"https://fixture.invalid/store.jar","version":"2.0.0"}""".toByteArray())
+                            url == "https://fixture.invalid/store.jar" -> MemoryConnection(replacement)
+                            else -> error("Unexpected request $url")
+                        }
+                    }
+                    api.installVersion(ID, "2.0.0")
+                }
+                "github" -> {
+                    github(replacement)
+                    api.installFromGitHub("https://github.com/fixture/plugin")
+                }
+                else -> {
+                    val incoming = File(directory, destinationName).apply { writeBytes(replacement) }
+                    api.installFromFile(incoming.path)
+                }
+            }
+
+            val failed = assertIs<InstallResult.DownloadFailed>(result, route)
+            assertTrue(failed.error.contains("previous version was restored"), "$route: ${failed.error}")
+            assertEquals(1, delegate.unloads, route)
+            assertEquals(1, delegate.loads, "$route must reload the previous runtime")
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath, route)
+            assertTrue(original.exists(), route)
+            assertFalse(
+                plugins.listFiles()!!.any { it.name.endsWith(".part") },
+                "$route must clean its staged download",
+            )
         }
     }
 

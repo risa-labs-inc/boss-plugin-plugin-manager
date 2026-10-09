@@ -930,13 +930,15 @@ class PluginManagerAPIImpl private constructor(
                 return InstallResult.LoadFailed("could not replace the installed version - $reason")
             }
 
-            // Promote the verified bytes. The old JAR at this path (a same-version reinstall) is
-            // gone by now via the unload, but delete defensively so the rename cannot fail on a
-            // platform that refuses to overwrite.
-            if (destFile.exists()) destFile.delete()
-            if (!partFile.renameTo(destFile)) {
+            // Promote in one filesystem operation so a same-version failure leaves the old JAR
+            // available for immediate runtime recovery.
+            if (!promoteJar(partFile, destFile)) {
                 partFile.delete()
-                return InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
+                return promotionFailureResult(
+                    "Could not move the downloaded JAR into place",
+                    previousJarPath,
+                    replacement.wasLoaded,
+                )
             }
 
             // Persist the store signature as a `<jar>.sig` sidecar so the host
@@ -1075,8 +1077,9 @@ class PluginManagerAPIImpl private constructor(
 
     /**
      * Load a promoted replacement and put the previously running version back after failure.
-     * Before rollback, the delegate is queried for a replacement that registered and then threw;
-     * it must be unloaded successfully or the old JAR is not loaded beside it.
+     * After any failed load, the delegate is queried for a replacement that registered and then
+     * threw. That copy is unloaded even for fresh and same-path installs. When a distinct previous
+     * JAR exists, it is loaded only after that cleanup succeeds.
      */
     private suspend fun loadReplacementOrRestore(
         pluginId: String,
@@ -1150,9 +1153,6 @@ class PluginManagerAPIImpl private constructor(
         restoreRuntime: Boolean,
     ): ReplacementRecovery {
         val delegate = loaderDelegate ?: return ReplacementRecovery()
-        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File)
-            ?: return ReplacementRecovery()
-        if (!previous.exists() || sameFile(previous, failedJar)) return ReplacementRecovery()
 
         // A delegate can throw after registering the replacement. Loading the old JAR while
         // that copy remains registered recreates the duplicate-plugin state rollback prevents.
@@ -1162,6 +1162,10 @@ class PluginManagerAPIImpl private constructor(
             )
             return ReplacementRecovery(failedArtifactRemaining = failedJar.exists())
         }
+
+        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File)
+            ?: return ReplacementRecovery()
+        if (!previous.exists() || sameFile(previous, failedJar)) return ReplacementRecovery()
 
         var failedArtifactRemaining = false
         if (removeFailedArtifact && failedJar.exists()) {
@@ -1207,6 +1211,44 @@ class PluginManagerAPIImpl private constructor(
             }
         }
         return ReplacementRecovery(restored, failedArtifactRemaining)
+    }
+
+    /** Restore the runtime after an atomic promotion failed and left the previous bytes intact. */
+    private suspend fun promotionFailureResult(
+        message: String,
+        previousJarPath: String?,
+        restoreRuntime: Boolean,
+    ): InstallResult.DownloadFailed {
+        if (!restoreRuntime) return InstallResult.DownloadFailed(message)
+        val delegate = loaderDelegate ?: return InstallResult.DownloadFailed(message)
+        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File)
+            ?.takeIf { it.exists() }
+            ?: return InstallResult.DownloadFailed(message)
+        val restored = try {
+            delegate.loadPlugin(previous.absolutePath) != null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (linkage: LinkageError) {
+            logReplacementFailure("rollback after promotion failure", previous, linkage)
+            false
+        } catch (failure: Exception) {
+            logReplacementFailure("rollback after promotion failure", previous, failure)
+            false
+        }
+        if (restored) {
+            try {
+                refreshInstalledPlugins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: LinkageError) {
+                logReplacementFailure("installed-state refresh after promotion rollback", previous, failure)
+            } catch (failure: Exception) {
+                logReplacementFailure("installed-state refresh after promotion rollback", previous, failure)
+            }
+        }
+        return InstallResult.DownloadFailed(
+            message + if (restored) "; the previous version was restored" else "",
+        )
     }
 
     private fun loadFailureMessage(base: String, load: ReplacementLoad): String = buildString {
@@ -1362,12 +1404,14 @@ class PluginManagerAPIImpl private constructor(
                     return@withIncomingLease InstallResult.LoadFailed("could not replace the installed version - $reason")
                 }
 
-                // Promote the downloaded bytes. Delete first so the rename cannot fail on a platform
-                // that refuses to overwrite; the unload above has already released any handle.
-                if (destFile.exists()) destFile.delete()
-                if (!partFile.renameTo(destFile)) {
+                // Promote atomically so a same-version failure leaves the old bytes available.
+                if (!promoteJar(partFile, destFile)) {
                     partFile.delete()
-                    return@withIncomingLease InstallResult.DownloadFailed("Could not move the downloaded JAR into place")
+                    return@withIncomingLease promotionFailureResult(
+                        "Could not move the downloaded JAR into place",
+                        previousJarPath,
+                        replacement.wasLoaded,
+                    )
                 }
 
                 // GitHub installs carry no store signature — clear any stale
@@ -1441,6 +1485,7 @@ class PluginManagerAPIImpl private constructor(
                 val destinationExisted = destFile.exists()
                 var createdArtifact = false
                 var loaded = false
+                var replacementLoadAttempted = false
                 var staged: File? = null
                 try {
                     if (jarFile.absolutePath != destFile.absolutePath) {
@@ -1456,10 +1501,15 @@ class PluginManagerAPIImpl private constructor(
                         return@withUpdateLease InstallResult.LoadFailed("could not replace the installed version - $reason")
                     }
                     if (staged != null && !promoteJar(staged, destFile)) {
-                        return@withUpdateLease InstallResult.DownloadFailed("Could not put the local JAR in place")
+                        return@withUpdateLease promotionFailureResult(
+                            "Could not put the local JAR in place",
+                            previousJarPath,
+                            replacement.wasLoaded,
+                        )
                     }
                     createdArtifact = staged != null && !destinationExisted
                     persistSignatureSidecar(destFile, null)
+                    replacementLoadAttempted = true
                     val load = loadReplacementOrRestore(
                         pluginId = pluginId,
                         previousJarPath = previousJarPath,
@@ -1482,13 +1532,14 @@ class PluginManagerAPIImpl private constructor(
                     InstallResult.Success(pluginInfo)
                 } finally {
                     staged?.delete()
-                    if (!loaded && createdArtifact) {
+                    if (!loaded && createdArtifact && (!replacementLoadAttempted || loaderDelegate == null)) {
                         val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
                         if (previous != null && previous.exists() && !sameFile(previous, destFile)) {
                             // Only remove a failed artifact this attempt created; an in-directory
                             // source or preexisting user file remains theirs even when loading fails.
-                            // The rollback helper normally did this already; this finally also
-                            // covers throws between promotion and the replacement load.
+                            // Once a delegate load starts, its rollback owns cleanup because the
+                            // host may still have the replacement registered. This branch covers
+                            // throws before that attempt and the no-delegate case.
                             try {
                                 if (deleteFailedArtifact(destFile)) deleteSignatureSidecar(destFile)
                             } catch (failure: Exception) {
