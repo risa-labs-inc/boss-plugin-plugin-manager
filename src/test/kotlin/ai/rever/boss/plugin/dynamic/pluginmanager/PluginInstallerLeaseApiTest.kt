@@ -69,6 +69,7 @@ class PluginInstallerLeaseApiTest {
         var onRead: (() -> Unit)? = null
         var allowUnload = true
         var failLoad = false
+        var failLoadFor: ((String) -> Boolean)? = null
         var loadFailure: Throwable? = null
         var onLoad: ((String) -> Unit)? = null
         override fun getLoadedPlugins(): List<LoadedPluginInfo> {
@@ -80,7 +81,7 @@ class PluginInstallerLeaseApiTest {
             loads++
             onLoad?.invoke(jarPath)
             loadFailure?.let { throw it }
-            if (failLoad) return null
+            if (failLoad || failLoadFor?.invoke(jarPath) == true) return null
             return LoadedPluginInfo(ID, "Fixture", "2.0.0", jarPath = jarPath).also { loaded = listOf(it) }
         }
         override suspend fun unloadPlugin(pluginId: String): Boolean {
@@ -490,6 +491,25 @@ class PluginInstallerLeaseApiTest {
             assertEquals(1, delegate.unloads)
             assertEquals(1, delegate.loads)
             assertContentEquals(incoming, File(plugins, "incoming.jar").readBytes())
+        }
+    }
+
+    @Test
+    fun `failed github update reloads the previous plugin immediately`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.failLoadFor = { it.endsWith("incoming.jar") }
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertEquals(1, delegate.unloads)
+            assertEquals(2, delegate.loads, "one failed replacement load, then one rollback load")
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertFalse(File(plugins, "incoming.jar").exists())
         }
     }
 

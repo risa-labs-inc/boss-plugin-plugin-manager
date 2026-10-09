@@ -950,14 +950,11 @@ class PluginManagerAPIImpl private constructor(
                 //
                 // Unless they are the same file: re-installing the version already present
                 // resolves to one path, so deleting it would leave the plugin with no JAR at all.
-                val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
-                if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
-                    runCatching { destFile.delete() }
-                    deleteSignatureSidecar(destFile)
-                }
+                val restored = restorePreviousAfterFailedLoad(pluginId, previousJarPath, destFile)
                 return InstallResult.LoadFailed(
                     if (loaderDelegate == null) "No plugin loader available"
-                    else "Failed to load plugin '$pluginId' (see app logs for details)"
+                    else "Failed to load plugin '$pluginId' (see app logs for details)" +
+                        if (restored) "; the previous version was restored" else ""
                 )
             }
 
@@ -1064,6 +1061,23 @@ class PluginManagerAPIImpl private constructor(
         if (delegate.isPluginLoaded(pluginId)) {
             delegate.unloadPlugin(pluginId)
         }
+    }
+
+    /**
+     * Put the previously running version back immediately when its replacement will not load.
+     * The old JAR is deliberately kept until a successful load, so an update failure must not
+     * leave the plugin absent until the whole application restarts.
+     */
+    private suspend fun restorePreviousAfterFailedLoad(
+        pluginId: String,
+        previousJarPath: String?,
+        failedJar: File,
+    ): Boolean {
+        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File) ?: return false
+        if (!previous.exists() || previous.absolutePath == failedJar.absolutePath) return false
+        if (failedJar.exists() && !runCatching { failedJar.delete() }.getOrDefault(false)) return false
+        deleteSignatureSidecar(failedJar)
+        return runCatching { loaderDelegate?.loadPlugin(previous.absolutePath) != null }.getOrDefault(false)
     }
 
     /**
@@ -1220,14 +1234,11 @@ class PluginManagerAPIImpl private constructor(
                     // Two JARs declaring one pluginId means the startup scan can pick either, which
                     // is how a restart silently comes back on the old version. Drop the one that does
                     // not work - unless they are the same file, which would leave no JAR at all.
-                    val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
-                    if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
-                        runCatching { destFile.delete() }
-                        deleteSignatureSidecar(destFile)
-                    }
+                    val restored = restorePreviousAfterFailedLoad(incomingPluginId, previousJarPath, destFile)
                     return@withIncomingLease InstallResult.LoadFailed(
                         if (loaderDelegate == null) "No plugin loader available"
-                        else "Failed to load plugin from ${destFile.name} (see app logs for details)"
+                        else "Failed to load plugin from ${destFile.name} (see app logs for details)" +
+                            if (restored) "; the previous version was restored" else ""
                     )
                 }
 
