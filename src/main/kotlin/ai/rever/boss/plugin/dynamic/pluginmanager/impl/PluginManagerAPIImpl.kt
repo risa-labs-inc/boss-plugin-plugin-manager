@@ -930,8 +930,8 @@ class PluginManagerAPIImpl private constructor(
                 return InstallResult.LoadFailed("could not replace the installed version - $reason")
             }
 
-            // Promote in one filesystem operation so a same-version failure leaves the old JAR
-            // available for immediate runtime recovery.
+            // Use the shared replacement move (atomic where supported) instead of deleting first;
+            // on the usual same-filesystem path, a failed move leaves the old JAR recoverable.
             if (!promoteJar(partFile, destFile)) {
                 partFile.delete()
                 return promotionFailureResult(
@@ -1068,18 +1068,20 @@ class PluginManagerAPIImpl private constructor(
         val info: LoadedPluginInfo?,
         val restored: Boolean = false,
         val failedArtifactRemaining: Boolean = false,
+        val runtimeCleanupWarning: String? = null,
     )
 
     private data class ReplacementRecovery(
         val restored: Boolean = false,
         val failedArtifactRemaining: Boolean = false,
+        val runtimeCleanupWarning: String? = null,
     )
 
     /**
      * Load a promoted replacement and put the previously running version back after failure.
      * After any failed load, the delegate is queried for a replacement that registered and then
-     * threw. That copy is unloaded even for fresh and same-path installs. When a distinct previous
-     * JAR exists, it is loaded only after that cleanup succeeds.
+     * threw. Cleanup is attempted even for fresh and same-path installs. When a distinct previous
+     * JAR exists, it is loaded only after the host confirms that cleanup succeeded.
      */
     private suspend fun loadReplacementOrRestore(
         pluginId: String,
@@ -1122,6 +1124,7 @@ class PluginManagerAPIImpl private constructor(
             info = null,
             restored = restored.restored,
             failedArtifactRemaining = restored.failedArtifactRemaining,
+            runtimeCleanupWarning = restored.runtimeCleanupWarning,
         )
     }
 
@@ -1156,11 +1159,36 @@ class PluginManagerAPIImpl private constructor(
 
         // A delegate can throw after registering the replacement. Loading the old JAR while
         // that copy remains registered recreates the duplicate-plugin state rollback prevents.
-        if (delegate.isPluginLoaded(pluginId) && !delegate.unloadPlugin(pluginId)) {
-            System.err.println(
-                "[plugin-manager] rollback skipped because the failed replacement remains loaded: $pluginId",
+        try {
+            if (delegate.isPluginLoaded(pluginId) && !delegate.unloadPlugin(pluginId)) {
+                System.err.println(
+                    "[plugin-manager] rollback skipped because the failed replacement remains loaded: $pluginId",
+                )
+                refreshAfterIncompleteRollback(failedJar)
+                return ReplacementRecovery(
+                    failedArtifactRemaining = failedJar.exists(),
+                    runtimeCleanupWarning =
+                        "the replacement remains partially loaded; restart BOSS before changing its files",
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (linkage: LinkageError) {
+            logReplacementFailure("half-loaded replacement cleanup", failedJar, linkage)
+            refreshAfterIncompleteRollback(failedJar)
+            return ReplacementRecovery(
+                failedArtifactRemaining = failedJar.exists(),
+                runtimeCleanupWarning =
+                    "the replacement may remain partially loaded because cleanup failed; restart BOSS before changing its files",
             )
-            return ReplacementRecovery(failedArtifactRemaining = failedJar.exists())
+        } catch (failure: Exception) {
+            logReplacementFailure("half-loaded replacement cleanup", failedJar, failure)
+            refreshAfterIncompleteRollback(failedJar)
+            return ReplacementRecovery(
+                failedArtifactRemaining = failedJar.exists(),
+                runtimeCleanupWarning =
+                    "the replacement may remain partially loaded because cleanup failed; restart BOSS before changing its files",
+            )
         }
 
         val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File)
@@ -1213,7 +1241,7 @@ class PluginManagerAPIImpl private constructor(
         return ReplacementRecovery(restored, failedArtifactRemaining)
     }
 
-    /** Restore the runtime after an atomic promotion failed and left the previous bytes intact. */
+    /** Restore the runtime after a promotion attempt failed while the previous bytes remain. */
     private suspend fun promotionFailureResult(
         message: String,
         previousJarPath: String?,
@@ -1254,8 +1282,22 @@ class PluginManagerAPIImpl private constructor(
     private fun loadFailureMessage(base: String, load: ReplacementLoad): String = buildString {
         append(base)
         if (load.restored) append("; the previous version was restored")
-        if (load.failedArtifactRemaining) {
+        if (load.runtimeCleanupWarning != null) {
+            append("; ").append(load.runtimeCleanupWarning)
+        } else if (load.failedArtifactRemaining) {
             append("; the failed copy remains on disk and may need manual cleanup before restart")
+        }
+    }
+
+    private suspend fun refreshAfterIncompleteRollback(jar: File) {
+        try {
+            refreshInstalledPlugins()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (linkage: LinkageError) {
+            logReplacementFailure("installed-state refresh after incomplete rollback", jar, linkage)
+        } catch (failure: Exception) {
+            logReplacementFailure("installed-state refresh after incomplete rollback", jar, failure)
         }
     }
 
@@ -1404,7 +1446,8 @@ class PluginManagerAPIImpl private constructor(
                     return@withIncomingLease InstallResult.LoadFailed("could not replace the installed version - $reason")
                 }
 
-                // Promote atomically so a same-version failure leaves the old bytes available.
+                // Use the shared replacement move (atomic where supported) instead of deleting
+                // first, so a failed same-filesystem move normally leaves old bytes recoverable.
                 if (!promoteJar(partFile, destFile)) {
                     partFile.delete()
                     return@withIncomingLease promotionFailureResult(

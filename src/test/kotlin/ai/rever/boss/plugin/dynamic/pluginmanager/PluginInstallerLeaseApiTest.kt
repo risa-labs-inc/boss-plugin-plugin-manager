@@ -73,6 +73,8 @@ class PluginInstallerLeaseApiTest {
         var failLoadFor: ((String) -> Boolean)? = null
         var loadFailure: Throwable? = null
         var loadFailureFor: ((String) -> Throwable?)? = null
+        var loadedProbeFailure: Throwable? = null
+        var unloadFailure: Throwable? = null
         var onLoad: ((String) -> Unit)? = null
         override fun getLoadedPlugins(): List<LoadedPluginInfo> {
             reads++
@@ -89,11 +91,15 @@ class PluginInstallerLeaseApiTest {
         }
         override suspend fun unloadPlugin(pluginId: String): Boolean {
             unloads++
+            unloadFailure?.let { throw it }
             if (allowUnload) loaded = loaded.filterNot { it.pluginId == pluginId }
             return allowUnload
         }
         override suspend fun reloadPlugin(pluginId: String): LoadedPluginInfo? = null
-        override fun isPluginLoaded(pluginId: String) = loaded.any { it.pluginId == pluginId }
+        override fun isPluginLoaded(pluginId: String): Boolean {
+            loadedProbeFailure?.let { throw it }
+            return loaded.any { it.pluginId == pluginId }
+        }
         override fun getPluginsDirectory() = directory.path
         override fun getBundledPluginsDirectory() = directory.path
         override fun isCurrentUserAdmin() = false
@@ -633,11 +639,13 @@ class PluginInstallerLeaseApiTest {
             )
 
             assertFalse(result.error.contains("previous version was restored"))
-            assertTrue(result.error.contains("failed copy remains on disk"), result.error)
+            assertTrue(result.error.contains("replacement remains partially loaded"), result.error)
+            assertTrue(result.error.contains("restart BOSS"), result.error)
             assertEquals(2, delegate.unloads)
             assertEquals(1, delegate.loads, "rollback must not load beside the registered replacement")
             assertEquals(File(plugins, "incoming.jar").absolutePath, delegate.loaded.single().jarPath)
             assertTrue(File(plugins, "incoming.jar").exists())
+            assertEquals("2.0.0", api.getInstalledPlugin(ID)?.version)
         }
     }
 
@@ -657,11 +665,50 @@ class PluginInstallerLeaseApiTest {
             val result = assertIs<InstallResult.LoadFailed>(api.installFromFile(incoming.path))
             val installed = File(plugins, "incoming.jar")
 
-            assertTrue(result.error.contains("failed copy remains on disk"), result.error)
+            assertTrue(result.error.contains("replacement remains partially loaded"), result.error)
+            assertTrue(result.error.contains("restart BOSS"), result.error)
             assertEquals(2, delegate.unloads)
             assertEquals(1, delegate.loads)
             assertEquals(installed.absolutePath, delegate.loaded.single().jarPath)
             assertTrue(installed.exists(), "cleanup must not delete a JAR still registered by the host")
+            assertEquals("2.0.0", api.getInstalledPlugin(ID)?.version)
+        }
+    }
+
+    @Test
+    fun `rollback probe failures remain load failures and preserve the possibly loaded jar`() = runBlocking {
+        for (probe in listOf("is-loaded", "unload")) fixture {
+            original.writeBytes(jar("1.0.0"))
+            val replacement = jar("2.0.0")
+            connection = { url ->
+                when {
+                    url.endsWith("/download/2.0.0") -> MemoryConnection(
+                        """{"downloadUrl":"https://fixture.invalid/store.jar","version":"2.0.0"}""".toByteArray())
+                    url == "https://fixture.invalid/store.jar" -> MemoryConnection(replacement)
+                    else -> error("Unexpected request $url")
+                }
+            }
+            delegate.loadFailureFor = { path ->
+                if (path.endsWith("test_plugin_2.0.0.jar")) {
+                    delegate.loaded = listOf(info("2.0.0", File(path)))
+                    val failure = IOException("fixture $probe probe failure")
+                    if (probe == "is-loaded") delegate.loadedProbeFailure = failure
+                    else delegate.unloadFailure = failure
+                    IOException("fixture failure after registration")
+                } else null
+            }
+
+            lateinit var result: InstallResult.LoadFailed
+            val logged = captureStderr {
+                result = assertIs(api.installVersion(ID, "2.0.0"), probe)
+            }
+
+            assertTrue(result.error.contains("may remain partially loaded"), "$probe: ${result.error}")
+            assertTrue(result.error.contains("restart BOSS"), "$probe: ${result.error}")
+            assertTrue(logged.contains("half-loaded replacement cleanup"), "$probe: $logged")
+            assertEquals(1, delegate.loads, probe)
+            assertEquals("2.0.0", delegate.loaded.single().version, probe)
+            assertTrue(File(plugins, "test_plugin_2.0.0.jar").exists(), probe)
         }
     }
 
