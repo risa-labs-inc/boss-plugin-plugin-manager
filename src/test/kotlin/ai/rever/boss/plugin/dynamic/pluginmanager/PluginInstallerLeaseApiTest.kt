@@ -592,6 +592,103 @@ class PluginInstallerLeaseApiTest {
     }
 
     @Test
+    fun `half-loaded replacement is unloaded before restoring the previous plugin`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.loadFailureFor = { path ->
+                if (path.endsWith("incoming.jar")) {
+                    delegate.loaded = listOf(info("2.0.0", File(path)))
+                    IOException("fixture failure after registration")
+                } else null
+            }
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertEquals(2, delegate.unloads, "initial old unload plus half-loaded replacement cleanup")
+            assertEquals(2, delegate.loads)
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertFalse(File(plugins, "incoming.jar").exists())
+        }
+    }
+
+    @Test
+    fun `refused half-loaded cleanup never loads a second plugin copy`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.loadFailureFor = { path ->
+                if (path.endsWith("incoming.jar")) {
+                    delegate.loaded = listOf(info("2.0.0", File(path)))
+                    delegate.allowUnload = false
+                    IOException("fixture failure after registration")
+                } else null
+            }
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertFalse(result.error.contains("previous version was restored"))
+            assertTrue(result.error.contains("failed copy remains on disk"), result.error)
+            assertEquals(2, delegate.unloads)
+            assertEquals(1, delegate.loads, "rollback must not load beside the registered replacement")
+            assertEquals(File(plugins, "incoming.jar").absolutePath, delegate.loaded.single().jarPath)
+            assertTrue(File(plugins, "incoming.jar").exists())
+        }
+    }
+
+    @Test
+    fun `replacement linkage failure is recovered as a load failure`() = runBlocking {
+        fixture {
+            original.writeBytes(jar("1.0.0"))
+            github(jar("2.0.0"))
+            delegate.loadFailureFor = {
+                if (it.endsWith("incoming.jar")) NoClassDefFoundError("fixture linkage failure") else null
+            }
+
+            val result = assertIs<InstallResult.LoadFailed>(
+                api.installFromGitHub("https://github.com/fixture/plugin"),
+            )
+
+            assertTrue(result.error.contains("previous version was restored"))
+            assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+            assertEquals(2, delegate.loads)
+        }
+    }
+
+    @Test
+    fun `cancellation and fatal replacement failures restore then preserve the original throwable`() = runBlocking {
+        for (failure in listOf(CancellationException("fixture cancellation"), AssertionError("fixture fatal"))) {
+            fixture {
+                original.writeBytes(jar("1.0.0"))
+                github(jar("2.0.0"))
+                delegate.loadFailureFor = {
+                    if (it.endsWith("incoming.jar")) failure else null
+                }
+
+                val caught = if (failure is CancellationException) {
+                    assertFailsWith<CancellationException> {
+                        api.installFromGitHub("https://github.com/fixture/plugin")
+                    }
+                } else {
+                    assertFailsWith<AssertionError> {
+                        api.installFromGitHub("https://github.com/fixture/plugin")
+                    }
+                }
+
+                assertTrue(caught === failure || caught.cause === failure)
+                assertEquals(2, delegate.loads, "rollback load must succeed before propagation")
+                assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
+                assertFalse(File(plugins, "incoming.jar").exists())
+            }
+        }
+    }
+
+    @Test
     fun `failed same-version github repair keeps its only jar`() = runBlocking {
         fixture {
             val onlyJar = File(plugins, "incoming.jar").apply { writeBytes(jar("2.0.0")) }
@@ -648,6 +745,7 @@ class PluginInstallerLeaseApiTest {
             )
 
             assertTrue(result.error.contains("previous version was restored"))
+            assertTrue(result.error.contains("failed copy remains on disk"), result.error)
             assertEquals(original.absolutePath, delegate.loaded.single().jarPath)
             assertTrue(File(plugins, "incoming.jar").exists(), "fixture must exercise failed deletion")
             assertTrue(

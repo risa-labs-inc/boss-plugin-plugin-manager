@@ -948,6 +948,7 @@ class PluginManagerAPIImpl private constructor(
 
             // Load the plugin via delegate
             val load = loadReplacementOrRestore(
+                pluginId = pluginId,
                 previousJarPath = previousJarPath,
                 replacementJar = destFile,
                 wasLoaded = replacement.wasLoaded,
@@ -956,8 +957,8 @@ class PluginManagerAPIImpl private constructor(
             if (loadedInfo == null) {
                 return InstallResult.LoadFailed(
                     if (loaderDelegate == null) "No plugin loader available"
-                    else "Failed to load plugin '$pluginId' (see app logs for details)" +
-                        if (load.restored) "; the previous version was restored" else ""
+                    else loadFailureMessage(
+                        "Failed to load plugin '$pluginId' (see app logs for details)", load)
                 )
             }
 
@@ -1031,28 +1032,18 @@ class PluginManagerAPIImpl private constructor(
             InstallResult.LoadFailed("Destination JAR belongs to a different plugin")
         }
 
-    /**
-     * Make plugin loading idempotent: if a plugin with the same id is already
-     * loaded, unload it first so install/update *replaces* it instead of the
-     * host throwing "Plugin already loaded" (which surfaces here as a null load
-     * result). No-op when nothing matching is loaded or the id can't be read.
-     *
-     * Unloading only detaches the plugin from the runtime — it does not delete
-     * the JAR — so the freshly-downloaded JAR we're about to load is untouched.
-     */
+    private data class ReplacementUnload(val wasLoaded: Boolean, val refusal: String? = null)
+
     /**
      * Unload the installed copy so a freshly downloaded one can take its place.
      *
-     * Returns null when there was nothing to unload or the unload succeeded, and a reason when
-     * the host refused. [unloadIfAlreadyLoaded] cannot be used for this: it drops the delegate's
-     * Boolean, so a refusal reads as success and the caller then loads a second copy on top of a
-     * plugin that is still running.
+     * [ReplacementUnload.wasLoaded] records whether this operation actually detached a running
+     * plugin, which is the authority for restoring it after failure. [ReplacementUnload.refusal]
+     * is non-null when the host refused; callers must stop rather than load a second copy.
      *
      * The delegate hands back a bare Boolean, so the host's own reasons cannot reach here - it
      * logs them as "Plugin unload refused". Say where they are rather than inventing them.
      */
-    private data class ReplacementUnload(val wasLoaded: Boolean, val refusal: String? = null)
-
     private suspend fun unloadForReplacement(pluginId: String): ReplacementUnload {
         val delegate = loaderDelegate ?: return ReplacementUnload(wasLoaded = false)
         if (!delegate.isPluginLoaded(pluginId)) return ReplacementUnload(wasLoaded = false)
@@ -1071,18 +1062,24 @@ class PluginManagerAPIImpl private constructor(
         }
     }
 
-    /**
-     * Put the previously running version back immediately when its replacement will not load.
-     * The old JAR is deliberately kept until a successful load, so an update failure must not
-     * leave the plugin absent until the whole application restarts.
-     */
     private data class ReplacementLoad(
         val info: LoadedPluginInfo?,
         val restored: Boolean = false,
+        val failedArtifactRemaining: Boolean = false,
     )
 
-    /** Load a promoted replacement and put the prior running version back after any load failure. */
+    private data class ReplacementRecovery(
+        val restored: Boolean = false,
+        val failedArtifactRemaining: Boolean = false,
+    )
+
+    /**
+     * Load a promoted replacement and put the previously running version back after failure.
+     * Before rollback, the delegate is queried for a replacement that registered and then threw;
+     * it must be unloaded successfully or the old JAR is not loaded beside it.
+     */
     private suspend fun loadReplacementOrRestore(
+        pluginId: String,
         previousJarPath: String?,
         replacementJar: File,
         wasLoaded: Boolean,
@@ -1095,13 +1092,15 @@ class PluginManagerAPIImpl private constructor(
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
                 restoreWithoutReplacingPrimaryFailure(
-                    previousJarPath, replacementJar, removeFailedArtifact, wasLoaded)
+                    pluginId, previousJarPath, replacementJar, removeFailedArtifact, wasLoaded, cancelled)
             }
             throw cancelled
+        } catch (linkage: LinkageError) {
+            logReplacementFailure("replacement load", replacementJar, linkage)
         } catch (fatal: Error) {
             withContext(NonCancellable) {
                 restoreWithoutReplacingPrimaryFailure(
-                    previousJarPath, replacementJar, removeFailedArtifact, wasLoaded)
+                    pluginId, previousJarPath, replacementJar, removeFailedArtifact, wasLoaded, fatal)
             }
             throw fatal
         } catch (failure: Exception) {
@@ -1110,37 +1109,61 @@ class PluginManagerAPIImpl private constructor(
         }
 
         val restored = restorePreviousAfterFailedLoad(
+            pluginId,
             previousJarPath,
             replacementJar,
             removeFailedArtifact,
             wasLoaded,
         )
-        return ReplacementLoad(info = null, restored = restored)
+        return ReplacementLoad(
+            info = null,
+            restored = restored.restored,
+            failedArtifactRemaining = restored.failedArtifactRemaining,
+        )
     }
 
     /** A rollback is secondary to the cancellation/fatal error that triggered it. */
     private suspend fun restoreWithoutReplacingPrimaryFailure(
+        pluginId: String,
         previousJarPath: String?,
         failedJar: File,
         removeFailedArtifact: Boolean,
         restoreRuntime: Boolean,
+        primaryFailure: Throwable,
     ) {
         try {
             restorePreviousAfterFailedLoad(
-                previousJarPath, failedJar, removeFailedArtifact, restoreRuntime)
+                pluginId, previousJarPath, failedJar, removeFailedArtifact, restoreRuntime)
         } catch (rollbackFailure: Throwable) {
+            if (rollbackFailure !== primaryFailure) {
+                primaryFailure.addSuppressed(rollbackFailure)
+            }
             logReplacementFailure("rollback after interrupted replacement", failedJar, rollbackFailure)
         }
     }
 
     private suspend fun restorePreviousAfterFailedLoad(
+        pluginId: String,
         previousJarPath: String?,
         failedJar: File,
         removeFailedArtifact: Boolean,
         restoreRuntime: Boolean,
-    ): Boolean {
-        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File) ?: return false
-        if (!previous.exists() || sameFile(previous, failedJar)) return false
+    ): ReplacementRecovery {
+        val delegate = loaderDelegate ?: return ReplacementRecovery()
+        val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let(::File)
+            ?: return ReplacementRecovery()
+        if (!previous.exists() || sameFile(previous, failedJar)) return ReplacementRecovery()
+
+        // A delegate can throw after registering the replacement. Loading the old JAR while
+        // that copy remains registered recreates the duplicate-plugin state rollback prevents.
+        if (delegate.isPluginLoaded(pluginId) && !delegate.unloadPlugin(pluginId)) {
+            System.err.println(
+                "[plugin-manager] rollback skipped because the failed replacement remains loaded: $pluginId",
+            )
+            return ReplacementRecovery(failedArtifactRemaining = failedJar.exists())
+        }
+
+        var failedArtifactRemaining = false
         if (removeFailedArtifact && failedJar.exists()) {
             val removed = try {
                 deleteFailedArtifact(failedJar)
@@ -1151,17 +1174,21 @@ class PluginManagerAPIImpl private constructor(
             if (removed) {
                 deleteSignatureSidecar(failedJar)
             } else {
+                failedArtifactRemaining = true
                 // A locked failed JAR is less harmful than leaving the previously running
                 // plugin absent. Keep its matching sidecar and restore the known old path;
                 // the next successful install cleans duplicate versions.
                 System.err.println("[plugin-manager] failed replacement remains on disk: ${failedJar.absolutePath}")
             }
         }
-        if (!restoreRuntime) return false
+        if (!restoreRuntime) return ReplacementRecovery(failedArtifactRemaining = failedArtifactRemaining)
         val restored = try {
-            loaderDelegate?.loadPlugin(previous.absolutePath) != null
+            delegate.loadPlugin(previous.absolutePath) != null
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (linkage: LinkageError) {
+            logReplacementFailure("rollback load", previous, linkage)
+            false
         } catch (failure: Exception) {
             logReplacementFailure("rollback load", previous, failure)
             false
@@ -1171,13 +1198,23 @@ class PluginManagerAPIImpl private constructor(
                 refreshInstalledPlugins()
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (failure: Throwable) {
+            } catch (failure: LinkageError) {
+                logReplacementFailure("installed-state refresh after rollback", previous, failure)
+            } catch (failure: Exception) {
                 // Runtime recovery succeeded. A stale Toolbox list must not replace that
                 // outcome with a download failure or mask an original cancellation/Error.
                 logReplacementFailure("installed-state refresh after rollback", previous, failure)
             }
         }
-        return restored
+        return ReplacementRecovery(restored, failedArtifactRemaining)
+    }
+
+    private fun loadFailureMessage(base: String, load: ReplacementLoad): String = buildString {
+        append(base)
+        if (load.restored) append("; the previous version was restored")
+        if (load.failedArtifactRemaining) {
+            append("; the failed copy remains on disk and may need manual cleanup before restart")
+        }
     }
 
     private fun sameFile(left: File, right: File): Boolean =
@@ -1340,6 +1377,7 @@ class PluginManagerAPIImpl private constructor(
 
                 // Load the plugin via delegate
                 val load = loadReplacementOrRestore(
+                    pluginId = incomingPluginId,
                     previousJarPath = previousJarPath,
                     replacementJar = destFile,
                     wasLoaded = replacement.wasLoaded,
@@ -1348,8 +1386,8 @@ class PluginManagerAPIImpl private constructor(
                 if (loadedInfo == null) {
                     return@withIncomingLease InstallResult.LoadFailed(
                         if (loaderDelegate == null) "No plugin loader available"
-                        else "Failed to load plugin from ${destFile.name} (see app logs for details)" +
-                            if (load.restored) "; the previous version was restored" else ""
+                        else loadFailureMessage(
+                            "Failed to load plugin from ${destFile.name} (see app logs for details)", load)
                     )
                 }
 
@@ -1423,6 +1461,7 @@ class PluginManagerAPIImpl private constructor(
                     createdArtifact = staged != null && !destinationExisted
                     persistSignatureSidecar(destFile, null)
                     val load = loadReplacementOrRestore(
+                        pluginId = pluginId,
                         previousJarPath = previousJarPath,
                         replacementJar = destFile,
                         wasLoaded = replacement.wasLoaded,
@@ -1431,8 +1470,8 @@ class PluginManagerAPIImpl private constructor(
                     val loadedInfo = load.info
                         ?: return@withUpdateLease InstallResult.LoadFailed(
                             if (loaderDelegate == null) "No plugin loader available"
-                            else "Failed to load plugin from ${destFile.name} (see app logs for details)" +
-                                if (load.restored) "; the previous version was restored" else ""
+                            else loadFailureMessage(
+                                "Failed to load plugin from ${destFile.name} (see app logs for details)", load)
                         )
                     loaded = true
                     cleanupOldVersionJars(pluginId, destFile, previousJarPath)
@@ -1445,7 +1484,7 @@ class PluginManagerAPIImpl private constructor(
                     staged?.delete()
                     if (!loaded && createdArtifact) {
                         val previous = previousJarPath?.takeIf { it.isNotBlank() }?.let { File(it) }
-                        if (previous != null && previous.exists() && previous.absolutePath != destFile.absolutePath) {
+                        if (previous != null && previous.exists() && !sameFile(previous, destFile)) {
                             // Only remove a failed artifact this attempt created; an in-directory
                             // source or preexisting user file remains theirs even when loading fails.
                             // The rollback helper normally did this already; this finally also
