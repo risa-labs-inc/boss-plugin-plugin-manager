@@ -1,19 +1,20 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.api
 
 /**
- * Whether this host can load a published version, across **both** floors it has to clear.
+ * Whether this host can load a published version, across all three declared floors.
  *
- * One function rather than a condition in the row that renders it, because the two floors are
- * checked in four places (this row, the store card, the update filter, the download gate) and a
+ * One function rather than a condition in the row that renders it, because compatibility gates are
+ * checked in several places (this row, the store card, the update filter, the download gate) and a
  * predicate that lives in a composable is one nobody can test. The version sheet's copy checked
  * only the IPC floor and so showed an Install button for versions `DynamicPluginLoader` refuses.
  *
  * The floors fail differently:
  * - [IpcCompat] governs whether a plugin's out-of-process half can speak to this host.
  * - [BossCompat] governs whether the jar loads at all, so it is the stricter consequence.
+ * - The optional API floor requires an installed API layer new enough to load the jar.
  *
- * Both fail open on UNKNOWN, which is what keeps the store usable on hosts that publish neither
- * property.
+ * All fail open on UNKNOWN, which keeps the store usable on hosts that do not publish the
+ * corresponding version property.
  */
 fun PluginVersionInfo.isLoadableHere(): Boolean =
     // `compatibility`, NOT `IpcCompat.isInstallable(minIpcVersion)`. The two are built from

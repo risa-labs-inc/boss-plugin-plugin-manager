@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.api.LoadedPluginInfo
+import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.NotificationDuration
 import ai.rever.boss.plugin.api.NotificationProvider
 import ai.rever.boss.plugin.api.NotificationType
@@ -17,15 +18,21 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import java.lang.reflect.Proxy
 import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Real Postgrest responses pass through the API and production prompt service. */
 class UpdatePromptStoreFailureTest {
@@ -33,6 +40,10 @@ class UpdatePromptStoreFailureTest {
         val directory = Files.createTempDirectory("prompt-store-failure").toFile()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         var failingTable: String? = null
+        var storeCount = 2
+        var extraInstalled = emptyList<LoadedPluginInfo>()
+        var omitVersionFor: String? = null
+        private fun ids() = listOf("a", "b") + (3..storeCount).map { "p$it" }
         val requests = mutableListOf<String>()
         val client = createSupabaseClient("https://fixture.invalid", "fixture-key") {
             httpEngine = MockEngine { request ->
@@ -43,18 +54,15 @@ class UpdatePromptStoreFailureTest {
                         headersOf(HttpHeaders.ContentType, "application/json"))
                 } else {
                     val body = when (table) {
-                        "plugins_with_latest_version" -> """[
-                            {"plugin_id":"a","latest_version":"2"},
-                            {"plugin_id":"b","latest_version":"2"}]
-                        """.trimIndent()
-                        "plugins" -> """[
-                            {"id":"uuid-a","plugin_id":"a","display_name":"A"},
-                            {"id":"uuid-b","plugin_id":"b","display_name":"B"}]
-                        """.trimIndent()
-                        "plugin_versions" -> """[
-                            {"id":"version-a","plugin_id":"uuid-a","version":"2"},
-                            {"id":"version-b","plugin_id":"uuid-b","version":"2"}]
-                        """.trimIndent()
+                        "plugins_with_latest_version" -> ids().joinToString(",", "[", "]") {
+                            """{"plugin_id":"$it","latest_version":"2"}"""
+                        }
+                        "plugins" -> ids().joinToString(",", "[", "]") {
+                            """{"id":"uuid-$it","plugin_id":"$it","display_name":"$it"}"""
+                        }
+                        "plugin_versions" -> ids().filterNot { it == omitVersionFor }.joinToString(",", "[", "]") {
+                            """{"id":"version-$it","plugin_id":"uuid-$it","version":"2"}"""
+                        }
                         else -> error("Unexpected store table: $table")
                     }
                     respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
@@ -65,7 +73,7 @@ class UpdatePromptStoreFailureTest {
         private val loader = Proxy.newProxyInstance(PluginLoaderDelegate::class.java.classLoader,
             arrayOf(PluginLoaderDelegate::class.java)) { _, method, _ ->
             when (method.name) {
-                "getLoadedPlugins" -> listOf(LoadedPluginInfo("a", "A", "1"), LoadedPluginInfo("b", "B", "1"))
+                "getLoadedPlugins" -> ids().map { LoadedPluginInfo(it, it.uppercase(), "1") } + extraInstalled
                 "getPluginsDirectory" -> directory.path
                 else -> error("Unexpected loader call: ${method.name}")
             }
@@ -80,6 +88,27 @@ class UpdatePromptStoreFailureTest {
         }
         val api = PluginManagerAPIImpl(scope, loader, reporter, client)
         suspend fun close() { scope.cancel(); client.close(); directory.deleteRecursively() }
+    }
+
+    @Test
+    fun `MCP checks 36 store plugins plus sideload in three batched queries`() = runBlocking {
+        val f = Fixture()
+        try {
+            f.storeCount = 36
+            f.extraInstalled = listOf(LoadedPluginInfo("sideload", "Sideload", "1"))
+            f.omitVersionFor = "b"
+            val tool = PluginManagerMcpToolProvider("toolbox", f.api, f.api::currentInstalledPlugins)
+                .tools().single { it.name == "plugin_check_updates" }
+            val result = tool.handler.call(McpToolArgs(emptyMap()))
+            assertFalse(result.isError)
+            val rows = Json.parseToJsonElement(result.text).jsonObject["plugins"]!!.jsonArray
+            assertEquals(37, rows.size)
+            assertEquals(35, rows.count { it.jsonObject["status"]!!.jsonPrimitive.content == "checked" })
+            assertEquals("lookup_failed", rows[1].jsonObject["status"]!!.jsonPrimitive.content)
+            assertEquals("not_in_store", rows.last().jsonObject["status"]!!.jsonPrimitive.content)
+            assertTrue(rows.first().jsonObject["update_available"]!!.jsonPrimitive.boolean)
+            assertEquals(listOf("plugins_with_latest_version", "plugins", "plugin_versions"), f.requests)
+        } finally { f.close() }
     }
 
     private class Notes : NotificationProvider {

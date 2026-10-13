@@ -102,35 +102,51 @@ build.gradle.kts   → Build config + version (single source of truth)
 
 The `processResources` task automatically syncs the version into `plugin.json` at build time. Never manually edit the version in `plugin.json` - only change it in `build.gradle.kts`.
 
-## The two version floors
+## The three version floors
 
-A published plugin version declares two floors, they fail differently, and until now the Toolbox
-only judged one of them.
+A published plugin version can declare three floors. They fail differently; store version rows
+and downloaded manifests now carry the API floor as well as the existing IPC and app floors.
 
 | Floor | Source | Enforced by | Consequence of a miss |
 |---|---|---|---|
 | `minIpcVersion` | `plugin_versions.min_ipc_version` | `IpcCompat` (reads `boss.ipc.version`) | a plugin's out-of-process half cannot speak to this host |
-| `minBossVersion` | `plugin_versions.min_boss_version` | `BossCompat` (reads `boss.app.version`) | `DynamicPluginLoader` **refuses the jar** - the plugin does not exist |
+| `minBossVersion` | `plugin_versions.min_boss_version` and manifest | `BossCompat` (reads `boss.app.version`) | `DynamicPluginLoader` **refuses the jar** - the plugin does not exist |
+| `minApiVersion` | optional `plugin_versions.min_api_version` and manifest | `apiFloorReason` (reads `boss.api.version`), plus host loader | `DynamicPluginLoader` refuses a jar requiring a newer API layer |
 
-The second is the stricter one and was unchecked, because the host published `boss.api.version` and
-`boss.ipc.version` but never its own app version - so there was nothing to compare `minBossVersion`
+The app floor is stricter than IPC compatibility and was originally unchecked, because the host
+published `boss.api.version` and `boss.ipc.version` but never its own app version - so there was nothing to compare `minBossVersion`
 against and every published version looked installable. The failure was silent: Install downloaded
 the jar, the host refused it, and the only trace was one ERROR line in the host log. fluck-browser
 1.2.22 (`minBossVersion` 9.4.23) on a 9.4.22 host is the case that prompted this, and there the
 missing plugin *is* the browser.
 
-Four call sites now apply it, and all four matter separately:
+The gates apply at these call sites; each has different metadata available:
 
 - **`AvailablePluginCard`** - the store card. Judges the LATEST version, because that is what its
   Install button fetches. `PluginStoreItem.minBossVersion` is the view's `latest_min_boss_version`.
 - **`VersionRow`** - the version sheet, per row, via `PluginVersionInfo.blockedReason()`. This one
-  checks both floors; the card cannot, because the IPC floor is not projected into the store list.
+  checks all three floors; the card only has the latest app floor, because IPC/API floors are
+  not projected into the store list.
 - **`loadableUpdates`** - the Updates tab. The panel's list comes from `checkForUpdatesResult`,
   which filtered on "is it newer" and nothing else. Taking such an update is destructive rather
   than merely useless: the update path downloads *over* the installed jar, so a refused version
   removes a working plugin.
-- **both download paths**, through one shared `bossFloorRefusal` - belt and braces, for a deep link
-  or a stale list that reaches install without passing a UI filter.
+- **both store download paths** apply `bossFloorRefusal` to download metadata, then
+  `manifestFloorRefusal` to the verified downloaded JAR's app/API floors before replacement.
+  This covers a deep link, a stale list, or a version pick without trusting catalogue metadata.
+  Host loading remains the signature and binary/API compatibility authority.
+- **MCP `plugin_check_updates`** batch-resolves all installed IDs through the same catalogue
+  query as `checkForUpdatesResult`, plus `fetchCandidateVersionRows`, including current and
+  host-blocked versions. `PluginVersionInfo.blockedReason()` judges all three floors once per row.
+  Missing catalogue IDs report `not_in_store`; missing version metadata or query failures report
+  `lookup_failed`. Mixed results retain checked rows; only a nonempty list with no checked row
+  sets the MCP error flag.
+- **MCP mutations** preflight the selected store version's three floors and use the version
+  picker's shared installer. `installStoreVersion` rechecks intent and latest-request downgrade
+  protection inside the lease; its interface default refuses unsupported implementations.
+  `InstallResult.Success.needsRestart` comes from the actual staging path, never a pre-lease
+  snapshot. `plugin_update` refuses terminal-tab and Toolbox so the response channel survives.
+  Explicit same-version MCP requests report `already_installed`; the UI picker still permits repair.
 
 **A hidden update still gets said out loud.** `loadableUpdates` returns what it held back as well as
 what it kept, and the Updates tab renders "N updates need a newer BOSS" naming each one. Filtering
@@ -153,8 +169,8 @@ Two things about `PluginVersionInfo` that were wrong first and are worth not re-
 which is every BOSS up to 9.4.22 - and a version with no declared floor both stay installable. That
 is not laziness: this plugin has to keep working on those hosts, and refusing every install there to
 prevent the subset that would fail would be a worse bug than the one being fixed. The corollary is
-that **the fix is inert until the host publishes the property**; it narrows what is offered on new
-hosts and changes nothing on old ones.
+that **each floor check is inert until the host publishes its corresponding property**. Optional
+store API metadata can be absent; downloaded manifest checks remain authoritative at install time.
 
 The floor arrives as a **system property** rather than an API member on purpose: plugins load in
 separate classloaders and cannot see `AppVersion`, and a property needs no `boss-plugin-api`

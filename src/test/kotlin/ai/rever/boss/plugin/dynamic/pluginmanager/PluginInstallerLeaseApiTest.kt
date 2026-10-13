@@ -31,6 +31,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
+// Compatibility tests set global System properties and restore them in finally. Keep tests
+// serial within each JVM if test parallelism is configured in the future.
 /** Exercise real API routes against isolated disk/delegate state and in-memory HTTP responses. */
 class PluginInstallerLeaseApiTest {
     private companion object { const val ID = "test.plugin" }
@@ -208,6 +210,24 @@ class PluginInstallerLeaseApiTest {
             assertEquals(if (update) 1 else 0, delegate.unloads)
             assertTrue(requests.first().endsWith("/download/2.0.0"))
             assertFalse(requests.any { it.contains("github.com") })
+        }
+    }
+
+    @Test
+    fun `store mutation reports actual locked path and permits explicit downgrade`() = runBlocking {
+        for (locked in listOf(false, true)) fixture {
+            api.refreshInstalledPlugins() // cache reports the old unloadability before the lease
+            delegate.loaded = listOf(info("3.0.0", locked = locked))
+            connection = { url ->
+                if (url == "https://fixture.invalid/incoming.jar") MemoryConnection(jar())
+                else MemoryConnection("""{"downloadUrl":"https://fixture.invalid/incoming.jar","version":"2.0.0"}""".toByteArray())
+            }
+            val result = assertIs<InstallResult.Success>(
+                api.installStoreVersion(ID, "2.0.0", update = true, allowDowngrade = true))
+            assertEquals("2.0.0", result.plugin.version)
+            assertEquals(locked, result.needsRestart)
+            assertEquals(if (locked) 0 else 1, delegate.loads)
+            assertEquals(if (locked) 0 else 1, delegate.unloads)
         }
     }
 

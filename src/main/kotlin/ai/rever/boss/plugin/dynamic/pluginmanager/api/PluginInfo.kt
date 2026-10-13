@@ -152,7 +152,11 @@ data class UpdateInfo(
  * Result of a plugin installation attempt.
  */
 sealed class InstallResult {
-    data class Success(val plugin: PluginInfo) : InstallResult()
+    data class Success(
+        val plugin: PluginInfo,
+        /** True only when the installer staged the JAR instead of loading it live. */
+        val needsRestart: Boolean = false,
+    ) : InstallResult()
     data class AlreadyInstalled(val currentVersion: String) : InstallResult()
     data class DownloadFailed(val error: String) : InstallResult()
     data class LoadFailed(val error: String) : InstallResult()
@@ -357,11 +361,12 @@ data class PluginVersionRow(
  * A single published version of a plugin, with its compatibility resolved against this host.
  * Surfaced in the version-history / downgrade UI.
  *
- * TWO floors, because they fail differently and only one of them used to be here. The IPC contract
+ * Three floors, because they fail differently. The IPC contract
  * governs whether a plugin's out-of-process half can talk to this host; `minBossVersion` governs
  * whether `DynamicPluginLoader` will load the jar AT ALL. Carrying only the first meant a version
  * above the app floor rendered as installable, and Install then downloaded something the loader
- * refused - visible only as a plugin that did not appear.
+ * refused - visible only as a plugin that did not appear. The optional `minApiVersion`
+ * additionally gates the installed API layer, and downloaded manifests enforce it too.
  */
 data class PluginVersionInfo(
     val version: String,

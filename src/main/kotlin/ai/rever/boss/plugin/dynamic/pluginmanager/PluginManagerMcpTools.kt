@@ -4,9 +4,17 @@ import ai.rever.boss.plugin.api.McpToolDefinition
 import ai.rever.boss.plugin.api.McpToolHandler
 import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
-import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.blockedReason
 import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * Toolbox MCP tools: live installed state, compatibility checks and store mutations.
@@ -15,7 +23,8 @@ import kotlinx.serialization.json.*
  *
  * Guards: refuses to disable the terminal-tab plugin (it hosts the MCP server —
  * disabling it would kill this very tool channel), the Plugin Manager itself,
- * and any non-unloadable/system plugin.
+ * and any non-unloadable/system plugin. Updates to either MCP channel plugin
+ * are also refused so the handler can finish its response.
  */
 internal class PluginManagerMcpToolProvider(
     override val providerId: String,
@@ -74,38 +83,39 @@ internal class PluginManagerMcpToolProvider(
         ),
         McpToolDefinition(
             name = "plugin_check_updates",
-            description = "Check installed BOSS plugins against the latest store release. Returns JSON with installed_version, latest_version, update_available, installable and blocked_reason. Optionally filter by plugin_id. Store failures are errors, never 'up to date'. Unknown host floors fail open, as in Toolbox.",
+            description = "Check installed BOSS plugins against the latest store release. Returns JSON with installed_version, latest_version, update_available, installable and blocked_reason. Optionally filter by plugin_id. Rows report checked, not_in_store or lookup_failed; the call is an error only when no installed plugin could be checked. Unknown host floors fail open, as in Toolbox.",
             inputSchema = CHECK_SCHEMA,
             handler = McpToolHandler { args ->
                 val id = args.string("plugin_id")
                 val installed = installedSnapshot().filter { id == null || it.pluginId == id }
                 if (id != null && installed.isEmpty()) return@McpToolHandler error(id, "Plugin not installed: $id")
-                var lookupFailed = false
+                val batch = api.fetchLatestStoreVersions(installed.map { it.pluginId })
+                var checked = 0
                 val rows = installed.map { plugin ->
-                    val lookup = target(plugin.pluginId, null)
-                    val target = lookup.getOrNull()
-                    if (target == null) {
-                        lookupFailed = true
-                        return@map buildJsonObject {
-                            put("plugin_id", plugin.pluginId)
-                            put("installed_version", plugin.version)
-                            put("latest_version", JsonNull)
-                            put("update_available", JsonNull)
-                            put("installable", JsonNull)
-                            put("blocked_reason", JsonNull)
-                            put("error", lookup.exceptionOrNull()?.message ?: "Store lookup failed")
-                        }
+                    val lookup = batch.getOrNull()?.get(plugin.pluginId)
+                    val target = lookup?.getOrNull()
+                    val reason = target?.blockedReason()
+                    val status = when {
+                        target != null -> "checked"
+                        batch.isFailure || lookup?.isFailure == true -> "lookup_failed"
+                        else -> "not_in_store"
                     }
+                    if (target != null) checked++
                     buildJsonObject {
                         put("plugin_id", plugin.pluginId)
                         put("installed_version", plugin.version)
-                        put("latest_version", target.version)
-                        put("update_available", isVersionNewer(target.version, plugin.version))
-                        put("installable", target.blockedReason() == null)
-                        put("blocked_reason", target.blockedReason()?.let(::JsonPrimitive) ?: JsonNull)
+                        put("status", status)
+                        put("latest_version", target?.version?.let(::JsonPrimitive) ?: JsonNull)
+                        put("update_available", target?.let { JsonPrimitive(isVersionNewer(it.version, plugin.version)) } ?: JsonNull)
+                        put("installable", target?.let { JsonPrimitive(reason == null) } ?: JsonNull)
+                        put("blocked_reason", reason?.let(::JsonPrimitive) ?: JsonNull)
+                        if (status == "lookup_failed") {
+                            put("error", (batch.exceptionOrNull() ?: lookup?.exceptionOrNull())?.message ?: "Store lookup failed")
+                        }
                     }
                 }
-                McpToolResult(buildJsonObject { put("plugins", JsonArray(rows)) }.toString(), isError = lookupFailed)
+                McpToolResult(buildJsonObject { put("plugins", JsonArray(rows)) }.toString(),
+                    isError = installed.isNotEmpty() && checked == 0)
             },
         ),
         mutationTool("plugin_update", update = true),
@@ -113,20 +123,20 @@ internal class PluginManagerMcpToolProvider(
     )
 
     private suspend fun target(id: String, version: String?): Result<PluginVersionInfo> {
-        val latest = if (version == null) {
+        val resolved = if (version == null) {
             val details = api.fetchPluginDetails(id).getOrElse { return Result.failure(it) }
             details.latestVersion ?: details.version
                 ?: return Result.failure(IllegalStateException("No published version for $id"))
         } else version
         val versions = api.fetchPluginVersions(id).getOrElse { return Result.failure(it) }
-        return versions.firstOrNull { it.version == latest }?.let { Result.success(it) }
-            ?: Result.failure(IllegalArgumentException("Store version not found: $id $latest"))
+        return versions.firstOrNull { it.version == resolved }?.let { Result.success(it) }
+            ?: Result.failure(IllegalArgumentException("Store version not found: $id $resolved"))
     }
 
     private fun mutationTool(name: String, update: Boolean) = McpToolDefinition.withRbac(
         name = name,
         description = if (update)
-            "Update an installed BOSS plugin from the store to latest or an explicit version (including downgrade). Uses Toolbox's version installer: host compatibility gates, download integrity and host signature verification, persistence and live load. Locked plugins are staged for restart. Returns JSON status, from_version, to_version and needs_restart. Admin only."
+            "Update an installed BOSS plugin from the store to latest or an explicit version (including downgrade). Uses Toolbox's version installer: host compatibility gates, download integrity and host signature verification, persistence and live load. Locked plugins are staged for restart. Refuses terminal-tab and Toolbox to preserve the active MCP call; update those in the UI. Explicit same-version requests report already_installed. Returns JSON status, from_version, to_version and needs_restart. Admin only."
         else
             "Install a BOSS store plugin that is not installed, at latest or an explicit version. Uses Toolbox's installer and host loader, including dependency handling, compatibility gates and signature verification. Returns JSON outcome. Admin only; use plugin_update for installed plugins.",
         inputSchema = VERSION_SCHEMA,
@@ -135,6 +145,9 @@ internal class PluginManagerMcpToolProvider(
         handler = McpToolHandler { args ->
             val id = args.string("plugin_id")?.takeIf { it.isNotBlank() }
                 ?: return@McpToolHandler error(null, "Missing required argument: plugin_id")
+            if (update && id in PROTECTED_IDS) {
+                return@McpToolHandler error(id, "Refusing to update MCP channel plugin $id during a tool call; use Toolbox UI")
+            }
             val version = args.string("version")
             if (version != null && version.isBlank()) return@McpToolHandler error(id, "version must not be blank")
             val existing = installedSnapshot().firstOrNull { it.pluginId == id }
@@ -145,7 +158,7 @@ internal class PluginManagerMcpToolProvider(
             }
             if (existing != null && (target.version == existing.version ||
                     (version == null && !isVersionNewer(target.version, existing.version)))) {
-                return@McpToolHandler outcome(id, "already_latest", existing.version, existing.version, false)
+                return@McpToolHandler outcome(id, if (version == null) "already_latest" else "already_installed", existing.version, existing.version, false)
             }
             target.blockedReason()?.let { return@McpToolHandler error(id, it) }
             // Pin the resolved store version. This is the UI version picker's shared path,
@@ -154,8 +167,8 @@ internal class PluginManagerMcpToolProvider(
             when (result) {
                 is InstallResult.Success -> outcome(id, if (update) "updated" else "installed",
                     existing?.version, result.plugin.version,
-                    existing != null && (existing.isSystemPlugin || !existing.canUnload))
-                is InstallResult.AlreadyInstalled -> outcome(id, "already_latest", result.currentVersion, result.currentVersion, false)
+                    result.needsRestart)
+                is InstallResult.AlreadyInstalled -> outcome(id, if (version == null) "already_latest" else "already_installed", result.currentVersion, result.currentVersion, false)
                 is InstallResult.DownloadFailed -> error(id, result.error)
                 is InstallResult.LoadFailed -> error(id, result.error)
                 is InstallResult.VersionConflict -> error(id, "Requires ${result.required}; available ${result.available}")

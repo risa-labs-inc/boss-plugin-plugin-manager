@@ -1,11 +1,30 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager
 
 import ai.rever.boss.plugin.api.McpToolArgs
-import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
-import java.lang.reflect.Proxy
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.ExtractedManifest
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.InstallResult
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.IpcCompat
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginEvent
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.UninstallResult
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.*
-import kotlin.test.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlin.test.Test
+import kotlin.test.assertContains
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class PluginManagerMcpToolsTest {
     private class Fixture {
@@ -13,22 +32,33 @@ class PluginManagerMcpToolsTest {
         var versions = listOf(PluginVersionInfo("2.0.0", "1.0.0", compatibility = IpcCompat.Status.UNKNOWN))
         var latest = "2.0.0"
         var lookupFails = false
-        var calls = mutableListOf<List<Any?>>()
+        var calls = mutableListOf<MutationCall>()
+        var batchCalls = 0
+        var detailCalls = 0
+        var notInStore = emptySet<String>()
+        var failingIds = emptySet<String>()
         var result: InstallResult = InstallResult.Success(PluginInfo("fixture", "Fixture", "2.0.0"))
-        // Suspend functions returning inline Result expose its unboxed representation to Java.
-        private fun unbox(result: Result<*>): Any? =
-            Result::class.java.getDeclaredMethod("unbox-impl").invoke(result)
-        val api = Proxy.newProxyInstance(PluginManagerAPI::class.java.classLoader,
-            arrayOf(PluginManagerAPI::class.java)) { _, method, args ->
-            when (method.name.substringBefore('-')) {
-                "getInstalledPlugins" -> installed
-                "fetchPluginDetails" -> if (lookupFails) unbox(Result.failure<PluginStoreItem>(Exception("Store unavailable")))
-                    else PluginStoreItem(pluginId = "fixture", latestVersion = latest)
-                "fetchPluginVersions" -> versions
-                "installStoreVersion" -> { calls += args.take(3); result }
-                else -> error("Unexpected API call ${method.name}")
+        val api = object : UnusedApi() {
+            override fun getInstalledPlugins() = installed
+            override suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem> {
+                detailCalls++
+                return if (lookupFails) Result.failure(Exception("Store unavailable"))
+                else Result.success(PluginStoreItem(pluginId = pluginId, latestVersion = latest))
             }
-        } as PluginManagerAPI
+            override suspend fun fetchPluginVersions(pluginId: String) = Result.success(versions)
+            override suspend fun fetchLatestStoreVersions(pluginIds: List<String>): Result<Map<String, Result<PluginVersionInfo>>> {
+                batchCalls++
+                if (lookupFails) return Result.failure(Exception("Store unavailable"))
+                return Result.success(pluginIds.filterNot { it in notInStore }.associateWith {
+                    if (it in failingIds) Result.failure(Exception("Version lookup failed"))
+                    else Result.success(versions.first { it.version == latest })
+                })
+            }
+            override suspend fun installStoreVersion(pluginId: String, version: String, update: Boolean, allowDowngrade: Boolean): InstallResult {
+                calls += MutationCall(pluginId, version, update, allowDowngrade)
+                return result
+            }
+        }
         val tools = PluginManagerMcpToolProvider("toolbox", api).tools().associateBy { it.name }
         suspend fun call(name: String, vararg args: Pair<String, Any?>) =
             tools.getValue(name).handler.call(McpToolArgs(mapOf(*args)))
@@ -75,13 +105,17 @@ class PluginManagerMcpToolsTest {
         assertEquals("1.0.0", row["from_version"]!!.jsonPrimitive.content)
         assertEquals("2.0.0", row["to_version"]!!.jsonPrimitive.content)
         assertFalse(row["needs_restart"]!!.jsonPrimitive.boolean)
-        assertEquals(listOf("fixture", "2.0.0", true), f.calls.single())
-        f.installed = f.installed.map { it.copy(canUnload = false) }
+        assertEquals(MutationCall("fixture", "2.0.0", true, false), f.calls.single())
+        // The handler snapshot says unloadable; the installer reports staging under the lease.
+        f.result = InstallResult.Success(PluginInfo("fixture", "Fixture", "2.0.0"), needsRestart = true)
         assertContains(f.call("plugin_update", "plugin_id" to "fixture", "version" to "2.0.0").text, "\"needs_restart\":true")
+        f.installed = f.installed.map { it.copy(canUnload = false) }
+        f.result = InstallResult.Success(PluginInfo("fixture", "Fixture", "2.0.0"), needsRestart = false)
+        assertContains(f.call("plugin_update", "plugin_id" to "fixture").text, "\"needs_restart\":false")
         f.installed = emptyList()
         val installed = f.call("plugin_install", "plugin_id" to "fixture", "version" to "2.0.0")
         assertContains(installed.text, "\"status\":\"installed\"")
-        assertEquals(listOf("fixture", "2.0.0", false), f.calls.last())
+        assertEquals(MutationCall("fixture", "2.0.0", false, true), f.calls.last())
     }
 
     @Test fun `unknown ids invalid versions and store failures are errors`() = runBlocking {
@@ -120,9 +154,123 @@ class PluginManagerMcpToolsTest {
         assertFalse(tools.getValue("plugin_check_updates").requiresAdmin)
     }
 
+    @Test fun `protected MCP plugins cannot update even when unloadable`() = runBlocking {
+        for (id in listOf("ai.rever.boss.plugin.dynamic.terminaltab", TOOLBOX_PLUGIN_ID)) {
+            val f = Fixture()
+            f.installed = listOf(PluginInfo(id, "Protected", "1.0.0", canUnload = true))
+            for (version in listOf(null, "2.0.0")) {
+                val args = mutableListOf<Pair<String, Any?>>("plugin_id" to id)
+                if (version != null) args += "version" to version
+                val result = f.call("plugin_update", *args.toTypedArray())
+                assertTrue(result.isError)
+                assertContains(result.text, "Refusing to update MCP channel")
+            }
+            assertTrue(f.calls.isEmpty())
+            assertEquals(0, f.detailCalls)
+        }
+    }
+
+    @Test fun `mixed checks preserve checked rows without flagging the call as an error`() = runBlocking {
+        for (missing in listOf(true, false)) {
+            val f = Fixture()
+            f.installed += PluginInfo("sideload", "Sideload", "1.0.0")
+            if (missing) f.notInStore = setOf("sideload") else f.failingIds = setOf("sideload")
+            val result = f.call("plugin_check_updates")
+            assertFalse(result.isError)
+            val rows = Json.parseToJsonElement(result.text).jsonObject["plugins"]!!.jsonArray
+            assertEquals("checked", rows[0].jsonObject["status"]!!.jsonPrimitive.content)
+            assertEquals("2.0.0", rows[0].jsonObject["latest_version"]!!.jsonPrimitive.content)
+            assertEquals(if (missing) "not_in_store" else "lookup_failed", rows[1].jsonObject["status"]!!.jsonPrimitive.content)
+            assertEquals(1, f.batchCalls)
+            assertEquals(0, f.detailCalls)
+        }
+        val f = Fixture()
+        f.notInStore = setOf("fixture")
+        assertTrue(f.call("plugin_check_updates").isError)
+    }
+
+    @Test fun `explicit downgrade passes allowDowngrade and same version reports already installed`() = runBlocking {
+        val f = Fixture()
+        f.installed = f.installed.map { it.copy(version = "3.0.0") }
+        assertFalse(f.call("plugin_update", "plugin_id" to "fixture", "version" to "2.0.0").isError)
+        assertEquals(MutationCall("fixture", "2.0.0", true, true), f.calls.single())
+        f.installed = f.installed.map { it.copy(version = "2.0.0") }
+        assertContains(f.call("plugin_update", "plugin_id" to "fixture", "version" to "2.0.0").text, "already_installed")
+        // Also exercise the no-op discovered by the installer after acquiring the lease.
+        f.installed = f.installed.map { it.copy(version = "1.0.0") }
+        f.result = InstallResult.AlreadyInstalled("2.0.0")
+        assertContains(f.call("plugin_update", "plugin_id" to "fixture", "version" to "2.0.0").text, "already_installed")
+    }
+
+    @Test fun `default store mutation fails loudly instead of dropping intent flags`() = runBlocking {
+        val api = object : UnusedApi() {}
+        for (update in listOf(true, false)) for (downgrade in listOf(true, false)) {
+            val result = assertIs<InstallResult.DownloadFailed>(api.installStoreVersion("fixture", "1.0.0", update, downgrade))
+            assertContains(result.error, "unsupported")
+        }
+    }
+
+    private data class MutationCall(val id: String, val version: String, val update: Boolean, val allowDowngrade: Boolean)
+
+    // These tests mutate process-wide host properties. Keep test execution serial within a JVM;
+    // restore every property in finally before another compatibility test can run.
     private suspend fun withProperty(key: String, value: String, block: suspend () -> Unit) {
         val previous = System.getProperty(key)
         try { System.setProperty(key, value); block() }
         finally { if (previous == null) System.clearProperty(key) else System.setProperty(key, previous) }
+    }
+
+    /** Fail on any unexpected API route; no reflection or Kotlin ABI assumptions. */
+    private open class UnusedApi : PluginManagerAPI {
+        override fun getInstalledPlugins(): List<PluginInfo> = notUsed()
+        override fun isPluginInstalled(pluginId: String): Boolean = notUsed()
+        override fun getInstalledPlugin(pluginId: String): PluginInfo? = notUsed()
+        override fun observeInstalledPlugins(): StateFlow<List<PluginInfo>> = notUsed()
+        override suspend fun fetchPluginDetails(pluginId: String): Result<PluginStoreItem> = notUsed()
+        override suspend fun installPlugin(pluginId: String): InstallResult = notUsed()
+        override suspend fun fetchStorePlugins(query: String?, category: String?) = notUsed()
+        override suspend fun fetchPluginVersions(pluginId: String): Result<List<PluginVersionInfo>> = notUsed()
+        override suspend fun installVersion(pluginId: String, version: String): InstallResult = notUsed()
+        override suspend fun checkForUpdates(): Map<String, String> = notUsed()
+        override suspend fun checkForCompatibleUpdates(): List<UpdateInfo> = notUsed()
+        override suspend fun installFromGitHub(githubUrl: String): InstallResult = notUsed()
+        override suspend fun installFromFile(jarPath: String): InstallResult = notUsed()
+        override suspend fun uninstallPlugin(pluginId: String): UninstallResult = notUsed()
+        override suspend fun updatePlugin(pluginId: String): InstallResult = notUsed()
+        override suspend fun enablePlugin(pluginId: String): Boolean = notUsed()
+        override suspend fun disablePlugin(pluginId: String): Boolean = notUsed()
+        override fun observeEvents(): Flow<PluginEvent> = notUsed()
+        override suspend fun deleteFromStore(pluginId: String): Result<Unit> = notUsed()
+        override suspend fun fetchFromGitHubForPublish(
+            url: String,
+            onProgress: (Float) -> Unit,
+            onStatus: (String) -> Unit,
+            onSuccess: (String, ExtractedManifest) -> Unit,
+            onError: (String) -> Unit,
+        ) = notUsed()
+
+        override suspend fun browseForPluginJar(onResult: (String?) -> Unit) = notUsed()
+        override suspend fun extractManifest(jarPath: String, onResult: (ExtractedManifest?) -> Unit) = notUsed()
+        override suspend fun publishPlugin(
+            jarPath: String,
+            pluginId: String,
+            displayName: String,
+            version: String,
+            homepageUrl: String,
+            authorName: String,
+            description: String?,
+            changelog: String?,
+            tags: List<String>,
+            iconUrl: String?,
+            pluginType: String,
+            apiVersion: String,
+            minBossVersion: String,
+            orgId: String?,
+            onProgress: (Float) -> Unit,
+            onSuccess: (String) -> Unit,
+            onError: (String) -> Unit,
+        ) = notUsed()
+
+        private fun notUsed(): Nothing = error("not expected in this test")
     }
 }

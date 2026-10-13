@@ -49,13 +49,18 @@ including external hot reloads, rather than a cached version or a staged JAR.
 
 The three store tools return JSON. Checks return a `plugins` array with `plugin_id`,
 `installed_version`, `latest_version`, `update_available`, `installable` and
-`blocked_reason`. A store lookup failure leaves that row's store fields null and adds
-`error`; the call is flagged as an error while retaining the other plugins' results.
+`blocked_reason` and `status` (`checked`, `not_in_store`, `lookup_failed`). Unchecked rows
+have null store fields; lookup failures also include `error`. Checks use up to three batched
+queries for the installed set. Mixed results retain successful rows without the MCP
+error flag; a nonempty installed set with no checked row sets the error flag.
 
 Mutations return `plugin_id`, `status` (`updated`, `installed`, `already_latest`),
-`from_version`, `to_version` and `needs_restart`. Refusals return `status: "refused"`
+`from_version`, `to_version` and `needs_restart`. Explicit same-version requests return
+`already_installed` instead of `already_latest`. Refusals return `status: "refused"`
 and `reason` with the MCP error flag. Locked/system plugin updates are staged for a
-BOSS restart; the tool never restarts the app or its own MCP channel.
+BOSS restart, with `needs_restart` reported by the path taken inside the lease. MCP
+updates to terminal-tab and Toolbox are refused to preserve the active call; update
+those in the UI. The tool never restarts the app or its own MCP channel.
 
 Both mutations use the UI version picker's installer, pinned to a published store
 version, including the host loader's dependency handling and signature verification,

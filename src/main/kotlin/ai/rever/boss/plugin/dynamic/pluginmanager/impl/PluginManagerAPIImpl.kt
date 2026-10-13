@@ -649,13 +649,7 @@ class PluginManagerAPIImpl private constructor(
         val installedVersionMap = installed.associate { it.pluginId to it.version }
 
         try {
-            val rows = supabaseClient.from("plugins_with_latest_version")
-                .select(Columns.raw("plugin_id, latest_version, latest_min_boss_version")) {
-                    filter {
-                        isIn("plugin_id", installedIds)
-                    }
-                }
-                .decodeList<PluginUpdateRow>()
+            val rows = fetchUpdateRows(installedIds)
 
             Result.success(loadableUpdates(rows, installedVersionMap))
         } catch (e: CancellationException) {
@@ -664,6 +658,43 @@ class PluginManagerAPIImpl private constructor(
             throw e
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /** Shared batch catalogue lookup for UI update candidates and MCP's full installed list. */
+    private suspend fun fetchUpdateRows(pluginIds: List<String>): List<PluginUpdateRow> =
+        supabaseClient.from("plugins_with_latest_version")
+            .select(Columns.raw("plugin_id, latest_version, latest_min_boss_version")) {
+                filter { isIn("plugin_id", pluginIds) }
+            }
+            .decodeList<PluginUpdateRow>()
+
+    override suspend fun fetchLatestStoreVersions(
+        pluginIds: List<String>
+    ): Result<Map<String, Result<PluginVersionInfo>>> = withContext(Dispatchers.IO) {
+        if (pluginIds.isEmpty()) return@withContext Result.success(emptyMap())
+        try {
+            val rows = fetchUpdateRows(pluginIds)
+            val candidates = rows.mapNotNull { row ->
+                row.latestVersion?.takeIf { it.isNotBlank() }?.let { row.pluginId to it }
+            }.toMap()
+            val versions = if (candidates.isEmpty()) emptyMap() else fetchCandidateVersionRows(candidates)
+            Result.success(rows.associate { row ->
+                val version = versions[row.pluginId]
+                row.pluginId to if (version == null) {
+                    Result.failure(IllegalStateException("Latest store version metadata missing: ${row.pluginId}"))
+                } else Result.success(PluginVersionInfo(
+                    version = version.version,
+                    minIpcVersion = version.minIpcVersion ?: "1.0.0",
+                    compatibility = IpcCompat.status(version.minIpcVersion),
+                    minBossVersion = version.minBossVersion ?: row.latestMinBossVersion.orEmpty(),
+                    minApiVersion = version.minApiVersion.orEmpty(),
+                ))
+            })
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            Result.failure(failure)
         }
     }
 
@@ -1651,7 +1682,7 @@ class PluginManagerAPIImpl private constructor(
             }
             _installedPlugins.value = currentList
 
-            return InstallResult.Success(pluginInfo)
+            return InstallResult.Success(pluginInfo, needsRestart = true)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
@@ -1747,7 +1778,7 @@ class PluginManagerAPIImpl private constructor(
                 pluginId = "",
                 displayName = "",
                 version = "latest"
-            ))
+            ), needsRestart = true)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
