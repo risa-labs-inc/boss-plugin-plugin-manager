@@ -43,6 +43,8 @@ class UpdatePromptStoreFailureTest {
         var storeCount = 2
         var extraInstalled = emptyList<LoadedPluginInfo>()
         var omitVersionFor: String? = null
+        var unpublished: String? = null
+        var loaderThrows = false
         private fun ids() = listOf("a", "b") + (3..storeCount).map { "p$it" }
         val requests = mutableListOf<String>()
         val client = createSupabaseClient("https://fixture.invalid", "fixture-key") {
@@ -55,7 +57,8 @@ class UpdatePromptStoreFailureTest {
                 } else {
                     val body = when (table) {
                         "plugins_with_latest_version" -> ids().joinToString(",", "[", "]") {
-                            """{"plugin_id":"$it","latest_version":"2"}"""
+                            if (it == unpublished) """{"plugin_id":"$it","latest_version":null}"""
+                            else """{"plugin_id":"$it","latest_version":"2"}"""
                         }
                         "plugins" -> ids().joinToString(",", "[", "]") {
                             """{"id":"uuid-$it","plugin_id":"$it","display_name":"$it"}"""
@@ -73,7 +76,7 @@ class UpdatePromptStoreFailureTest {
         private val loader = Proxy.newProxyInstance(PluginLoaderDelegate::class.java.classLoader,
             arrayOf(PluginLoaderDelegate::class.java)) { _, method, _ ->
             when (method.name) {
-                "getLoadedPlugins" -> ids().map { LoadedPluginInfo(it, it.uppercase(), "1") } + extraInstalled
+                "getLoadedPlugins" -> if (loaderThrows) throw IllegalStateException("hot swap in progress") else ids().map { LoadedPluginInfo(it, it.uppercase(), "1") } + extraInstalled
                 "getPluginsDirectory" -> directory.path
                 else -> error("Unexpected loader call: ${method.name}")
             }
@@ -108,6 +111,38 @@ class UpdatePromptStoreFailureTest {
             assertEquals("not_in_store", rows.last().jsonObject["status"]!!.jsonPrimitive.content)
             assertTrue(rows.first().jsonObject["update_available"]!!.jsonPrimitive.boolean)
             assertEquals(listOf("plugins_with_latest_version", "plugins", "plugin_versions"), f.requests)
+        } finally { f.close() }
+    }
+
+    @Test
+    fun `a published row without a latest version is not in the store`() = runBlocking {
+        val f = Fixture()
+        try {
+            f.unpublished = "b"
+            val tool = PluginManagerMcpToolProvider("toolbox", f.api, f.api::currentInstalledPlugins)
+                .tools().single { it.name == "plugin_check_updates" }
+            val rows = Json.parseToJsonElement(tool.handler.call(McpToolArgs(emptyMap())).text)
+                .jsonObject["plugins"]!!.jsonArray
+            assertEquals("checked", rows[0].jsonObject["status"]!!.jsonPrimitive.content)
+            assertEquals("not_in_store", rows[1].jsonObject["status"]!!.jsonPrimitive.content)
+        } finally { f.close() }
+    }
+
+    @Test
+    fun `MCP reads degrade to the cached list when the loader delegate throws`() = runBlocking {
+        val f = Fixture()
+        try {
+            f.api.refreshInstalledPlugins()
+            f.loaderThrows = true
+            assertEquals(listOf("a", "b"), f.api.currentInstalledPlugins().map { it.pluginId })
+            val tools = PluginManagerMcpToolProvider("toolbox", f.api, f.api::currentInstalledPlugins)
+                .tools().associateBy { it.name }
+            val listed = tools.getValue("plugins_list").handler.call(McpToolArgs(emptyMap()))
+            assertFalse(listed.isError)
+            assertTrue(listed.text.lines().size == 2 && listed.text.startsWith("a "), listed.text)
+            val checked = tools.getValue("plugin_check_updates").handler.call(McpToolArgs(emptyMap()))
+            assertFalse(checked.isError)
+            assertEquals(2, Json.parseToJsonElement(checked.text).jsonObject["plugins"]!!.jsonArray.size)
         } finally { f.close() }
     }
 

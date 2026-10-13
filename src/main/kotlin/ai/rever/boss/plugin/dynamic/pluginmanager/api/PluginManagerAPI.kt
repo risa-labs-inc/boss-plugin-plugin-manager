@@ -85,7 +85,8 @@ interface PluginManagerAPI {
 
     /**
      * Batch latest-version lookup, including current and host-blocked versions.
-     * Absent IDs are not in the store; per-ID failures mean missing version metadata.
+     * Absent IDs are not in the store or have no published version; per-ID failures mean a
+     * published latest version whose version metadata could not be read.
      * An outer failure means the batch lookup failed, not that plugins are up to date.
      */
     suspend fun fetchLatestStoreVersions(pluginIds: List<String>): Result<Map<String, Result<PluginVersionInfo>>> =

@@ -210,6 +210,65 @@ class PluginManagerMcpToolsTest {
         }
     }
 
+    private fun status(result: ai.rever.boss.plugin.api.McpToolResult) =
+        Json.parseToJsonElement(result.text).jsonObject["status"]!!.jsonPrimitive.content
+
+    @Test fun `errors distinguish refusals, installer failures and a busy lease`() = runBlocking {
+        val f = Fixture()
+        f.installed = emptyList()
+        val cases = listOf(
+            InstallResult.DownloadFailed(UPDATE_INSTALL_BUSY) to "busy",
+            InstallResult.DownloadFailed("Connection reset") to "failed",
+            InstallResult.LoadFailed("Signature verification failed") to "failed",
+            InstallResult.VersionConflict("1.0.90", "1.0.85") to "failed",
+        )
+        for ((installResult, expected) in cases) {
+            f.result = installResult
+            val result = f.call("plugin_install", "plugin_id" to "fixture")
+            assertTrue(result.isError)
+            assertEquals(expected, status(result), installResult.toString())
+        }
+        f.installed = listOf(PluginInfo("fixture", "Fixture", "1.0.0"))
+        assertEquals("refused", status(f.call("plugin_install", "plugin_id" to "fixture")))
+        assertEquals("refused", status(f.call("plugin_update", "plugin_id" to "fixture", "version" to "9.9.9")))
+        f.lookupFails = true
+        assertEquals("failed", status(f.call("plugin_update", "plugin_id" to "fixture")))
+    }
+
+    @Test fun `host-blocked latest is refused with a loadable alternative that installs explicitly`() = runBlocking {
+        withProperty("boss.app.version", "9.4.22") {
+            for (update in listOf(false, true)) {
+                val f = Fixture()
+                f.installed = if (update) listOf(PluginInfo("fixture", "Fixture", "1.0.0")) else emptyList()
+                f.versions = listOf(
+                    PluginVersionInfo("2.0.0", "1.0.0", compatibility = IpcCompat.Status.UNKNOWN, minBossVersion = "9.4.23"),
+                    PluginVersionInfo("1.5.0", "1.0.0", compatibility = IpcCompat.Status.UNKNOWN, minBossVersion = "9.4.0"),
+                    PluginVersionInfo("1.0.0", "1.0.0", compatibility = IpcCompat.Status.UNKNOWN),
+                )
+                val tool = if (update) "plugin_update" else "plugin_install"
+                val refused = f.call(tool, "plugin_id" to "fixture")
+                assertTrue(refused.isError)
+                assertEquals("refused", status(refused))
+                assertContains(refused.text, "9.4.23")
+                assertContains(refused.text, "newest version loadable here is 1.5.0")
+                assertTrue(f.calls.isEmpty())
+                f.result = InstallResult.Success(PluginInfo("fixture", "Fixture", "1.5.0"))
+                val explicit = f.call(tool, "plugin_id" to "fixture", "version" to "1.5.0")
+                assertFalse(explicit.isError)
+                assertEquals(if (update) "updated" else "installed", status(explicit))
+                assertEquals(MutationCall("fixture", "1.5.0", update, true), f.calls.single())
+            }
+        }
+    }
+
+    @Test fun `blank plugin id checks every installed plugin`() = runBlocking {
+        val f = Fixture()
+        f.installed += PluginInfo("other", "Other", "2.0.0")
+        val result = f.call("plugin_check_updates", "plugin_id" to "  ")
+        assertFalse(result.isError)
+        assertEquals(2, Json.parseToJsonElement(result.text).jsonObject["plugins"]!!.jsonArray.size)
+    }
+
     private data class MutationCall(val id: String, val version: String, val update: Boolean, val allowDowngrade: Boolean)
 
     // These tests mutate process-wide host properties. Keep test execution serial within a JVM;

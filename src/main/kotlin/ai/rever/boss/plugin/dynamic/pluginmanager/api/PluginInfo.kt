@@ -152,6 +152,11 @@ data class UpdateInfo(
  * Result of a plugin installation attempt.
  */
 sealed class InstallResult {
+    /**
+     * [needsRestart] was added after this type was exported through `registerPluginAPI`. The
+     * default keeps source compatibility, but a consumer compiled against the old one-argument
+     * shape (constructor, `copy`, `component1`) would need recompiling against this one.
+     */
     data class Success(
         val plugin: PluginInfo,
         /** True only when the installer staged the JAR instead of loading it live. */

@@ -67,7 +67,8 @@ data class BlockedUpdateNotice(
 /** Optional API floor; older hosts with no published API version remain usable. */
 internal fun apiFloorReason(minApiVersion: String?): String? {
     val floor = minApiVersion?.let(SemVer::parse) ?: return null
-    val host = System.getProperty("boss.api.version")?.let(SemVer::parse) ?: return null
+    val hostVersion = System.getProperty("boss.api.version") ?: return null
+    val host = SemVer.parse(hostVersion) ?: return null
     val order = compareValuesBy(host, floor, { it.first }, { it.second }, { it.third })
-    return if (order < 0) "Needs BOSS API $minApiVersion (host ${System.getProperty("boss.api.version")})" else null
+    return if (order < 0) "Needs BOSS API $minApiVersion (host $hostVersion)" else null
 }

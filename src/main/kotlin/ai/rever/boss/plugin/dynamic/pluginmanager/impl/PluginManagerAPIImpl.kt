@@ -151,9 +151,12 @@ class PluginManagerAPIImpl private constructor(
     // ========================================
 
     /** Live host snapshot for MCP: another installer/reload can change versions at any time.
-     * Never read the on-disk manifest here: a staged update is not the loaded version. */
+     * Never read the on-disk manifest here: a staged update is not the loaded version.
+     * A delegate that throws (for example mid hot-swap) degrades to the cached list. */
     internal fun currentInstalledPlugins(): List<PluginInfo> =
-        loaderDelegate?.getLoadedPlugins()?.map { it.toPluginInfo() } ?: getInstalledPlugins()
+        runCatching { loaderDelegate?.getLoadedPlugins()?.map { it.toPluginInfo() } }
+            .onFailure { System.err.println("Toolbox: live plugin snapshot failed, using cached list: $it") }
+            .getOrNull() ?: getInstalledPlugins()
 
     override fun getInstalledPlugins(): List<PluginInfo> = _installedPlugins.value
 
@@ -679,7 +682,9 @@ class PluginManagerAPIImpl private constructor(
                 row.latestVersion?.takeIf { it.isNotBlank() }?.let { row.pluginId to it }
             }.toMap()
             val versions = if (candidates.isEmpty()) emptyMap() else fetchCandidateVersionRows(candidates)
-            Result.success(rows.associate { row ->
+            // A catalogue row with no published version is omitted, so callers report it as not
+            // in the store; only a published version whose row cannot be read is a lookup failure.
+            Result.success(rows.filter { it.pluginId in candidates }.associate { row ->
                 val version = versions[row.pluginId]
                 row.pluginId to if (version == null) {
                     Result.failure(IllegalStateException("Latest store version metadata missing: ${row.pluginId}"))

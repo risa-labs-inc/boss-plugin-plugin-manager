@@ -54,13 +54,31 @@ have null store fields; lookup failures also include `error`. Checks use up to t
 queries for the installed set. Mixed results retain successful rows without the MCP
 error flag; a nonempty installed set with no checked row sets the error flag.
 
-Mutations return `plugin_id`, `status` (`updated`, `installed`, `already_latest`),
-`from_version`, `to_version` and `needs_restart`. Explicit same-version requests return
-`already_installed` instead of `already_latest`. Refusals return `status: "refused"`
-and `reason` with the MCP error flag. Locked/system plugin updates are staged for a
-BOSS restart, with `needs_restart` reported by the path taken inside the lease. MCP
-updates to terminal-tab and Toolbox are refused to preserve the active call; update
-those in the UI. The tool never restarts the app or its own MCP channel.
+A blank `plugin_id` checks every installed plugin. A catalogue entry with no published
+version reports `not_in_store`; `lookup_failed` means the store query failed or a published
+version's metadata could not be read.
+
+Mutations return `plugin_id`, `status`, `from_version`, `to_version` and `needs_restart`.
+Success statuses:
+
+- `updated` / `installed`: the store version was applied.
+- `already_latest`: no version given and nothing newer exists.
+- `already_installed`: the explicit version requested is already the installed one.
+
+Errors set the MCP error flag and return `status` plus `reason`:
+
+- `refused`: policy, will not work as asked (host floors, protected plugins, wrong
+  install/update intent, unknown version). Without `version`, a latest release this host
+  cannot load is refused and the reason names the newest loadable version to pass instead.
+- `failed`: store lookup or installer outcome (network, integrity, signature, load); may
+  succeed on retry.
+- `busy`: another installer holds this plugin's update lease; retry later.
+
+Locked/system plugin updates are staged for a BOSS restart, with `needs_restart` reported
+by the path taken inside the lease. MCP updates to terminal-tab and Toolbox are refused to
+preserve the active call; update those in the UI. The tool never restarts the app or its
+own MCP channel. MCP reads use the live host snapshot and fall back to the cached
+installed list if the host loader throws (for example mid hot-swap).
 
 Both mutations use the UI version picker's installer, pinned to a published store
 version, including the host loader's dependency handling and signature verification,

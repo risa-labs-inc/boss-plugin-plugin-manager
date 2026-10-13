@@ -138,15 +138,21 @@ The gates apply at these call sites; each has different metadata available:
 - **MCP `plugin_check_updates`** batch-resolves all installed IDs through the same catalogue
   query as `checkForUpdatesResult`, plus `fetchCandidateVersionRows`, including current and
   host-blocked versions. `PluginVersionInfo.blockedReason()` judges all three floors once per row.
-  Missing catalogue IDs report `not_in_store`; missing version metadata or query failures report
-  `lookup_failed`. Mixed results retain checked rows; only a nonempty list with no checked row
-  sets the MCP error flag.
+  Missing catalogue IDs, and catalogue rows with no published latest version, report
+  `not_in_store`; unreadable metadata for a published version or query failures report
+  `lookup_failed`. A blank `plugin_id` means all. Mixed results retain checked rows; only a
+  nonempty list with no checked row sets the MCP error flag.
 - **MCP mutations** preflight the selected store version's three floors and use the version
   picker's shared installer. `installStoreVersion` rechecks intent and latest-request downgrade
   protection inside the lease; its interface default refuses unsupported implementations.
   `InstallResult.Success.needsRestart` comes from the actual staging path, never a pre-lease
   snapshot. `plugin_update` refuses terminal-tab and Toolbox so the response channel survives.
   Explicit same-version MCP requests report `already_installed`; the UI picker still permits repair.
+  Error statuses separate `refused` (policy: floors, protected IDs, intent, unknown version) from
+  `failed` (store lookup or installer outcome) and `busy` (`InstallResult.wasBusy()`, the lease
+  protocol's neutral contention result). A host-blocked latest is refused with the newest loadable
+  version named in the reason, since MCP callers cannot see the Updates tab's notice.
+  `currentInstalledPlugins()` falls back to the cached list when the loader delegate throws.
 
 **A hidden update still gets said out loud.** `loadableUpdates` returns what it held back as well as
 what it kept, and the Updates tab renders "N updates need a newer BOSS" naming each one. Filtering
