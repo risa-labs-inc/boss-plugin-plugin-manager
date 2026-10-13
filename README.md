@@ -36,10 +36,36 @@ Create only when you may publish.
 | `plugins_list` | List installed plugins with id, version, enabled and system flags |
 | `plugin_enable` | Enable an installed plugin by id |
 | `plugin_disable` | Disable an installed plugin by id |
+| `plugin_check_updates` | Check all installed plugins, or one `plugin_id`, against the latest store release and host compatibility |
+| `plugin_update` | Update an installed `plugin_id` to latest or an explicit `version` from the store |
+| `plugin_install` | Install a new store `plugin_id` at latest or an explicit `version` |
 
-`plugin_enable` and `plugin_disable` both require admin. `plugin_disable` additionally refuses
+`plugin_enable`, `plugin_disable`, `plugin_update` and `plugin_install` require admin. `plugin_disable` additionally refuses
 to disable `terminal-tab` (it hosts the MCP server, so disabling it would cut the channel the
 call arrived on), itself, and any system or non-unloadable plugin.
+
+`plugins_list` reads a fresh host snapshot, so its version reflects what is loaded,
+including external hot reloads, rather than a cached version or a staged JAR.
+
+The three store tools return JSON. Checks return a `plugins` array with `plugin_id`,
+`installed_version`, `latest_version`, `update_available`, `installable` and
+`blocked_reason`. A store lookup failure leaves that row's store fields null and adds
+`error`; the call is flagged as an error while retaining the other plugins' results.
+
+Mutations return `plugin_id`, `status` (`updated`, `installed`, `already_latest`),
+`from_version`, `to_version` and `needs_restart`. Refusals return `status: "refused"`
+and `reason` with the MCP error flag. Locked/system plugin updates are staged for a
+BOSS restart; the tool never restarts the app or its own MCP channel.
+
+Both mutations use the UI version picker's installer, pinned to a published store
+version, including the host loader's dependency handling and signature verification,
+SHA-256 checks, persistence, and the shared installation lease. Install/update intent
+is checked again inside the lease; a latest request cannot downgrade a version that
+another installer just updated. Explicit versions permit downgrades. The existing
+BOSS and IPC floors and the optional API floor apply; downloaded manifests are also
+checked before replacing installed files. Unknown host floors retain the UI's
+fail-open behavior. API compatibility in checks uses store metadata when supplied;
+the manifest and host loader remain authoritative at install time.
 
 ## Permissions
 

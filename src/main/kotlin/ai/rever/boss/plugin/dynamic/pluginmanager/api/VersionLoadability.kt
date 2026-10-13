@@ -22,7 +22,8 @@ fun PluginVersionInfo.isLoadableHere(): Boolean =
     // IPC floor resolves to UNKNOWN (the badge shows nothing) while the string "1.0.0" would read
     // as MAJOR_MISMATCH on any host whose IPC major is not 1 - a row with no badge and no action.
     // Latent while host IPC stays on 1.x, and a divergence from the badge either way.
-    compatibility != IpcCompat.Status.REQUIRES_HOST_UPDATE &&
+    apiFloorReason(minApiVersion) == null &&
+        compatibility != IpcCompat.Status.REQUIRES_HOST_UPDATE &&
         compatibility != IpcCompat.Status.MAJOR_MISMATCH &&
         bossCompatibility != BossCompat.Status.REQUIRES_HOST_UPDATE
 
@@ -35,7 +36,7 @@ fun PluginVersionInfo.isLoadableHere(): Boolean =
 fun PluginVersionInfo.blockedReason(): String? =
     when {
         isLoadableHere() -> null
-        else -> BossCompat.requirement(minBossVersion) ?: "Needs newer BOSS"
+        else -> BossCompat.requirement(minBossVersion) ?: apiFloorReason(minApiVersion) ?: "Needs newer BOSS"
     }
 
 /**
@@ -61,3 +62,11 @@ data class BlockedUpdateNotice(
     val newVersion: String,
     val requiredBossVersion: String,
 )
+
+/** Optional API floor; older hosts with no published API version remain usable. */
+internal fun apiFloorReason(minApiVersion: String?): String? {
+    val floor = minApiVersion?.let(SemVer::parse) ?: return null
+    val host = System.getProperty("boss.api.version")?.let(SemVer::parse) ?: return null
+    val order = compareValuesBy(host, floor, { it.first }, { it.second }, { it.third })
+    return if (order < 0) "Needs BOSS API $minApiVersion (host ${System.getProperty("boss.api.version")})" else null
+}

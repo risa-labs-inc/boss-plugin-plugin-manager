@@ -4,11 +4,13 @@ import ai.rever.boss.plugin.api.McpToolDefinition
 import ai.rever.boss.plugin.api.McpToolHandler
 import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
-import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
+import ai.rever.boss.plugin.dynamic.pluginmanager.api.*
+import ai.rever.boss.plugin.dynamic.pluginmanager.impl.isVersionNewer
+import kotlinx.serialization.json.*
 
 /**
- * MCP tools contributed by the Plugin Manager: list installed plugins and
- * enable/disable them. Registered in [PluginManagerDynamicPlugin.register];
+ * Toolbox MCP tools: live installed state, compatibility checks and store mutations.
+ * Registered in [PluginManagerDynamicPlugin.register];
  * removed automatically on disable/unload.
  *
  * Guards: refuses to disable the terminal-tab plugin (it hosts the MCP server —
@@ -18,6 +20,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI
 internal class PluginManagerMcpToolProvider(
     override val providerId: String,
     private val api: PluginManagerAPI,
+    private val installedSnapshot: () -> List<PluginInfo> = api::getInstalledPlugins,
 ) : McpToolProvider {
 
     override fun tools(): List<McpToolDefinition> = listOf(
@@ -25,7 +28,7 @@ internal class PluginManagerMcpToolProvider(
             name = "plugins_list",
             description = "List installed BOSS plugins (id, version, enabled, system).",
             handler = McpToolHandler {
-                val plugins = api.getInstalledPlugins()
+                val plugins = installedSnapshot()
                 if (plugins.isEmpty()) McpToolResult("No plugins installed.")
                 else McpToolResult(plugins.joinToString("\n") { p ->
                     val flags = buildList {
@@ -36,7 +39,8 @@ internal class PluginManagerMcpToolProvider(
                 })
             },
         ),
-        McpToolDefinition(
+        McpToolDefinition.withRbac(
+            requiresAdmin = true,
             name = "plugin_enable",
             description = "Enable an installed plugin by id.",
             inputSchema = ID_SCHEMA,
@@ -48,7 +52,8 @@ internal class PluginManagerMcpToolProvider(
                 else McpToolResult("Could not enable $id.", isError = true)
             },
         ),
-        McpToolDefinition(
+        McpToolDefinition.withRbac(
+            requiresAdmin = true,
             name = "plugin_disable",
             description = "Disable an installed plugin by id (cannot disable terminal-tab, plugin-manager, or system plugins).",
             inputSchema = ID_SCHEMA,
@@ -59,7 +64,7 @@ internal class PluginManagerMcpToolProvider(
                 if (id in PROTECTED_IDS) {
                     return@McpToolHandler McpToolResult("Refusing to disable protected plugin $id.", isError = true)
                 }
-                val info = api.getInstalledPlugins().firstOrNull { it.pluginId == id }
+                val info = installedSnapshot().firstOrNull { it.pluginId == id }
                 if (info != null && (info.isSystemPlugin || !info.canUnload)) {
                     return@McpToolHandler McpToolResult("Refusing to disable system/non-unloadable plugin $id.", isError = true)
                 }
@@ -67,9 +72,116 @@ internal class PluginManagerMcpToolProvider(
                 else McpToolResult("Could not disable $id.", isError = true)
             },
         ),
-    ).onEach { it.requiresAdmin = it.name == "plugin_enable" || it.name == "plugin_disable" }
+        McpToolDefinition(
+            name = "plugin_check_updates",
+            description = "Check installed BOSS plugins against the latest store release. Returns JSON with installed_version, latest_version, update_available, installable and blocked_reason. Optionally filter by plugin_id. Store failures are errors, never 'up to date'. Unknown host floors fail open, as in Toolbox.",
+            inputSchema = CHECK_SCHEMA,
+            handler = McpToolHandler { args ->
+                val id = args.string("plugin_id")
+                val installed = installedSnapshot().filter { id == null || it.pluginId == id }
+                if (id != null && installed.isEmpty()) return@McpToolHandler error(id, "Plugin not installed: $id")
+                var lookupFailed = false
+                val rows = installed.map { plugin ->
+                    val lookup = target(plugin.pluginId, null)
+                    val target = lookup.getOrNull()
+                    if (target == null) {
+                        lookupFailed = true
+                        return@map buildJsonObject {
+                            put("plugin_id", plugin.pluginId)
+                            put("installed_version", plugin.version)
+                            put("latest_version", JsonNull)
+                            put("update_available", JsonNull)
+                            put("installable", JsonNull)
+                            put("blocked_reason", JsonNull)
+                            put("error", lookup.exceptionOrNull()?.message ?: "Store lookup failed")
+                        }
+                    }
+                    buildJsonObject {
+                        put("plugin_id", plugin.pluginId)
+                        put("installed_version", plugin.version)
+                        put("latest_version", target.version)
+                        put("update_available", isVersionNewer(target.version, plugin.version))
+                        put("installable", target.blockedReason() == null)
+                        put("blocked_reason", target.blockedReason()?.let(::JsonPrimitive) ?: JsonNull)
+                    }
+                }
+                McpToolResult(buildJsonObject { put("plugins", JsonArray(rows)) }.toString(), isError = lookupFailed)
+            },
+        ),
+        mutationTool("plugin_update", update = true),
+        mutationTool("plugin_install", update = false),
+    )
+
+    private suspend fun target(id: String, version: String?): Result<PluginVersionInfo> {
+        val latest = if (version == null) {
+            val details = api.fetchPluginDetails(id).getOrElse { return Result.failure(it) }
+            details.latestVersion ?: details.version
+                ?: return Result.failure(IllegalStateException("No published version for $id"))
+        } else version
+        val versions = api.fetchPluginVersions(id).getOrElse { return Result.failure(it) }
+        return versions.firstOrNull { it.version == latest }?.let { Result.success(it) }
+            ?: Result.failure(IllegalArgumentException("Store version not found: $id $latest"))
+    }
+
+    private fun mutationTool(name: String, update: Boolean) = McpToolDefinition.withRbac(
+        name = name,
+        description = if (update)
+            "Update an installed BOSS plugin from the store to latest or an explicit version (including downgrade). Uses Toolbox's version installer: host compatibility gates, download integrity and host signature verification, persistence and live load. Locked plugins are staged for restart. Returns JSON status, from_version, to_version and needs_restart. Admin only."
+        else
+            "Install a BOSS store plugin that is not installed, at latest or an explicit version. Uses Toolbox's installer and host loader, including dependency handling, compatibility gates and signature verification. Returns JSON outcome. Admin only; use plugin_update for installed plugins.",
+        inputSchema = VERSION_SCHEMA,
+        readOnly = false,
+        requiresAdmin = true,
+        handler = McpToolHandler { args ->
+            val id = args.string("plugin_id")?.takeIf { it.isNotBlank() }
+                ?: return@McpToolHandler error(null, "Missing required argument: plugin_id")
+            val version = args.string("version")
+            if (version != null && version.isBlank()) return@McpToolHandler error(id, "version must not be blank")
+            val existing = installedSnapshot().firstOrNull { it.pluginId == id }
+            if (update && existing == null) return@McpToolHandler error(id, "Plugin not installed: $id")
+            if (!update && existing != null) return@McpToolHandler error(id, "Plugin already installed; use plugin_update")
+            val target = target(id, version).getOrElse {
+                return@McpToolHandler error(id, it.message ?: "Store lookup failed")
+            }
+            if (existing != null && (target.version == existing.version ||
+                    (version == null && !isVersionNewer(target.version, existing.version)))) {
+                return@McpToolHandler outcome(id, "already_latest", existing.version, existing.version, false)
+            }
+            target.blockedReason()?.let { return@McpToolHandler error(id, it) }
+            // Pin the resolved store version. This is the UI version picker's shared path,
+            // so a GitHub-origin install cannot redirect an MCP store update to GitHub.
+            val result = api.installStoreVersion(id, target.version, update, allowDowngrade = version != null)
+            when (result) {
+                is InstallResult.Success -> outcome(id, if (update) "updated" else "installed",
+                    existing?.version, result.plugin.version,
+                    existing != null && (existing.isSystemPlugin || !existing.canUnload))
+                is InstallResult.AlreadyInstalled -> outcome(id, "already_latest", result.currentVersion, result.currentVersion, false)
+                is InstallResult.DownloadFailed -> error(id, result.error)
+                is InstallResult.LoadFailed -> error(id, result.error)
+                is InstallResult.VersionConflict -> error(id, "Requires ${result.required}; available ${result.available}")
+            }
+        },
+    )
+
+    private fun outcome(id: String, status: String, from: String?, to: String, restart: Boolean) = McpToolResult(
+        buildJsonObject {
+            put("plugin_id", id)
+            put("status", status)
+            put("from_version", from?.let(::JsonPrimitive) ?: JsonNull)
+            put("to_version", to)
+            put("needs_restart", restart)
+        }.toString()
+    )
+
+    private fun error(id: String?, reason: String) = McpToolResult(buildJsonObject {
+        put("plugin_id", id?.let(::JsonPrimitive) ?: JsonNull)
+        put("status", "refused")
+        put("reason", reason)
+    }.toString(), isError = true)
 
     private companion object {
+        const val CHECK_SCHEMA = """{"type":"object","properties":{"plugin_id":{"type":"string","description":"Optional installed plugin id; omit to check all installed plugins."}}}"""
+        const val VERSION_SCHEMA = """{"type":"object","properties":{"plugin_id":{"type":"string","minLength":1},"version":{"type":"string","minLength":1,"description":"Published store version; omit for latest."}},"required":["plugin_id"]}"""
         val PROTECTED_IDS = setOf(
             "ai.rever.boss.plugin.dynamic.terminaltab",
             "ai.rever.boss.plugin.dynamic.pluginmanager",

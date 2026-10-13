@@ -347,6 +347,7 @@ data class PluginVersionRow(
     val version: String,
     val changelog: String? = null,
     @SerialName("min_boss_version") val minBossVersion: String? = null,
+    @SerialName("min_api_version") val minApiVersion: String? = null,
     @SerialName("min_ipc_version") val minIpcVersion: String? = null,
     @SerialName("jar_path") val jarPath: String? = null,
     @SerialName("published_at") val publishedAt: String? = null
@@ -370,6 +371,7 @@ data class PluginVersionInfo(
     val compatibility: IpcCompat.Status,
     /** The app version this build declares it needs, as published to the store. */
     val minBossVersion: String = "",
+    val minApiVersion: String = "",
 ) {
     /**
      * Whether THIS host meets [minBossVersion]. See [BossCompat].

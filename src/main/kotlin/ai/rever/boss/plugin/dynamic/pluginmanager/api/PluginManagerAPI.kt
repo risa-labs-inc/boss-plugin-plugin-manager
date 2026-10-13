@@ -79,6 +79,10 @@ interface PluginManagerAPI {
      */
     suspend fun installVersion(pluginId: String, version: String): InstallResult
 
+    /** Store-only MCP operation. Implementations recheck install/update intent inside the lease. */
+    suspend fun installStoreVersion(pluginId: String, version: String, update: Boolean, allowDowngrade: Boolean = false): InstallResult =
+        installVersion(pluginId, version)
+
     /**
      * Check for updates for installed plugins.
      *

@@ -150,6 +150,11 @@ class PluginManagerAPIImpl private constructor(
     // INSTALLED PLUGINS
     // ========================================
 
+    /** Live host snapshot for MCP: another installer/reload can change versions at any time.
+     * Never read the on-disk manifest here: a staged update is not the loaded version. */
+    internal fun currentInstalledPlugins(): List<PluginInfo> =
+        loaderDelegate?.getLoadedPlugins()?.map { it.toPluginInfo() } ?: getInstalledPlugins()
+
     override fun getInstalledPlugins(): List<PluginInfo> = _installedPlugins.value
 
     override fun observeInstalledPlugins(): StateFlow<List<PluginInfo>> = _installedPlugins.asStateFlow()
@@ -553,6 +558,7 @@ class PluginManagerAPIImpl private constructor(
                     publishedAt = v.publishedAt ?: "",
                     compatibility = IpcCompat.status(v.minIpcVersion),
                     minBossVersion = v.minBossVersion ?: "",
+                    minApiVersion = v.minApiVersion ?: "",
                 )
             })
         } catch (e: Exception) {
@@ -569,6 +575,25 @@ class PluginManagerAPIImpl private constructor(
             }
         }
     }
+
+    override suspend fun installStoreVersion(pluginId: String, version: String, update: Boolean, allowDowngrade: Boolean): InstallResult =
+        withContext(Dispatchers.IO) {
+            withUpdateLease(pluginId) {
+                val existing = getInstalledPlugin(pluginId)
+                if (update && existing == null) {
+                    return@withUpdateLease InstallResult.DownloadFailed("Plugin not installed: $pluginId")
+                }
+                if (!update && existing != null) {
+                    return@withUpdateLease InstallResult.DownloadFailed("Plugin already installed; use plugin_update")
+                }
+                if (existing != null && (existing.version == version || (!allowDowngrade && !isVersionNewer(version, existing.version)))) {
+                    return@withUpdateLease InstallResult.AlreadyInstalled(existing.version)
+                }
+                withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), update) {
+                    installVersionInternal(pluginId, version, existing, pluginId)
+                }
+            }
+        }
 
     private suspend fun installVersionInternal(
         pluginId: String,
@@ -904,6 +929,10 @@ class PluginManagerAPIImpl private constructor(
                 }
             }
 
+            manifestFloorRefusal(partFile)?.let {
+                partFile.delete()
+                return it
+            }
             if (readPluginIdFromJar(partFile) != pluginId) {
                 partFile.delete()
                 return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
@@ -1563,6 +1592,10 @@ class PluginManagerAPIImpl private constructor(
                 }
             }
 
+            manifestFloorRefusal(tempFile)?.let {
+                tempFile.delete()
+                return it
+            }
             if (readPluginIdFromJar(tempFile) != pluginId) {
                 tempFile.delete()
                 return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
@@ -2278,6 +2311,12 @@ class PluginManagerAPIImpl private constructor(
     // HELPERS
     // ========================================
 
+
+    private fun manifestFloorRefusal(jar: File): InstallResult? {
+        val reason = BossCompat.requirement(readPluginManifestField(jar, "minBossVersion"))
+            ?: apiFloorReason(readPluginManifestField(jar, "minApiVersion"))
+        return reason?.let { InstallResult.DownloadFailed(it) }
+    }
 
     /**
      * Refuse a download whose app floor this host cannot meet, or null to proceed.

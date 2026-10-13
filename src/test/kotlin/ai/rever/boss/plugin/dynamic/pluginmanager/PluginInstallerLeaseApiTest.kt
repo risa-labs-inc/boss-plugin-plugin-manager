@@ -141,11 +141,11 @@ class PluginInstallerLeaseApiTest {
         try { f.block() } finally { f.scope.cancel(); directory.deleteRecursively() }
     }
 
-    private fun jar(version: String = "2.0.0", id: String = ID, payload: String? = null): ByteArray =
+    private fun jar(version: String = "2.0.0", id: String = ID, payload: String? = null, floors: String = ""): ByteArray =
         ByteArrayOutputStream().also { bytes ->
             ZipOutputStream(bytes).use { zip ->
                 zip.putNextEntry(ZipEntry("META-INF/boss-plugin/plugin.json"))
-                zip.write("""{"pluginId":"$id","version":"$version","displayName":"Fixture"}""".toByteArray())
+                zip.write("""{"pluginId":"$id","version":"$version","displayName":"Fixture"$floors}""".toByteArray())
                 zip.closeEntry()
                 if (payload != null) {
                     zip.putNextEntry(ZipEntry("implementation.txt"))
@@ -154,6 +154,86 @@ class PluginInstallerLeaseApiTest {
                 }
             }
         }.toByteArray()
+
+    @Test
+    fun `MCP list reads actual host version after an external hot reload`() = runBlocking {
+        fixture {
+            api.refreshInstalledPlugins()
+            val tools = PluginManagerMcpToolProvider("toolbox", api, api::currentInstalledPlugins).tools()
+            val list = tools.single { it.name == "plugins_list" }
+            assertTrue(list.handler.call(ai.rever.boss.plugin.api.McpToolArgs(emptyMap())).text.contains("1.0.0"))
+            delegate.loaded = listOf(info("1.0.1"))
+            // Deliberately leave the Toolbox cache stale, as after a host/other-plugin reload.
+            assertEquals("1.0.0", api.getInstalledPlugins().single().version)
+            val result = list.handler.call(ai.rever.boss.plugin.api.McpToolArgs(emptyMap()))
+            assertTrue(result.text.contains("1.0.1"), result.text)
+            assertFalse(result.text.contains("1.0.0"), result.text)
+            // Reading an updated on-disk manifest must not misreport a staged update as loaded.
+            original.writeBytes(jar("9.0.0"))
+            assertTrue(list.handler.call(ai.rever.boss.plugin.api.McpToolArgs(emptyMap())).text.contains("1.0.1"))
+        }
+    }
+
+    @Test
+    fun `store MCP mutation rechecks intent within lease`() = runBlocking {
+        fixture {
+            assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = false))
+            delegate.loaded = emptyList()
+            assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = true))
+            delegate.loaded = listOf(info("3.0.0"))
+            assertIs<InstallResult.AlreadyInstalled>(api.installStoreVersion(ID, "2.0.0", update = true))
+            assertTrue(requests.isEmpty())
+            assertNoMutation()
+        }
+    }
+
+    @Test
+    fun `store MCP install and update use verified version download and host load`() = runBlocking {
+        for (update in listOf(false, true)) fixture {
+            if (!update) delegate.loaded = emptyList()
+            val bytes = jar()
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it) }
+            connection = { url ->
+                if (url == "https://fixture.invalid/incoming.jar") MemoryConnection(bytes)
+                else MemoryConnection("""{"downloadUrl":"https://fixture.invalid/incoming.jar","version":"2.0.0","sha256":"$digest","signature":"fixture-signature"}""".toByteArray())
+            }
+            delegate.onLoad = { path ->
+                assertEquals("fixture-signature", File("$path.sig").readText())
+                assertContentEquals(bytes, File(path).readBytes())
+            }
+            val result = assertIs<InstallResult.Success>(api.installStoreVersion(ID, "2.0.0", update))
+            assertEquals("2.0.0", result.plugin.version)
+            assertEquals(1, delegate.loads)
+            assertEquals(if (update) 1 else 0, delegate.unloads)
+            assertTrue(requests.first().endsWith("/download/2.0.0"))
+            assertFalse(requests.any { it.contains("github.com") })
+        }
+    }
+
+    @Test
+    fun `store manifest floors refuse before replacing regular or locked jars`() = runBlocking {
+        for (locked in listOf(false, true)) for (apiFloor in listOf(false, true)) {
+            fixture {
+                delegate.loaded = listOf(info("1.0.0", locked = locked))
+                val property = if (apiFloor) "boss.api.version" else "boss.app.version"
+                val old = System.getProperty(property)
+                try {
+                    System.setProperty(property, if (apiFloor) "1.0.85" else "9.4.22")
+                    val floors = if (apiFloor) ",\"minApiVersion\":\"1.0.86\"" else ",\"minBossVersion\":\"9.4.23\""
+                    connection = { url ->
+                        if (url == "https://fixture.invalid/incoming.jar") MemoryConnection(jar(floors = floors))
+                        else MemoryConnection("""{"downloadUrl":"https://fixture.invalid/incoming.jar","version":"2.0.0"}""".toByteArray())
+                    }
+                    val result = assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = true))
+                    assertTrue(result.error.contains(if (apiFloor) "1.0.86" else "9.4.23"), result.error)
+                    assertNoMutation()
+                } finally {
+                    if (old == null) System.clearProperty(property) else System.setProperty(property, old)
+                }
+            }
+        }
+    }
 
     @Test
     fun `successful local install removes prior same identity jars and signatures but keeps unrelated plugins`() = runBlocking {
