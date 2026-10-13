@@ -64,7 +64,11 @@ data class BlockedUpdateNotice(
     val requiredBossVersion: String,
 )
 
-/** Optional API floor; older hosts with no published API version remain usable. */
+/**
+ * Optional API floor; older hosts with no published API version remain usable. Pre-release and
+ * build suffixes are dropped by [SemVer.parse], as for the app floor in `BossCompat`. The host
+ * property is read once so the message names the value that was compared.
+ */
 internal fun apiFloorReason(minApiVersion: String?): String? {
     val floor = minApiVersion?.let(SemVer::parse) ?: return null
     val hostVersion = System.getProperty("boss.api.version") ?: return null

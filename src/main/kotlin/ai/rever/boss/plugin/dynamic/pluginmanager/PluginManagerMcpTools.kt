@@ -186,7 +186,11 @@ internal class PluginManagerMcpToolProvider(
                     existing?.version, result.plugin.version,
                     result.needsRestart)
                 is InstallResult.AlreadyInstalled -> outcome(id, if (version == null) "already_latest" else "already_installed", result.currentVersion, result.currentVersion, false)
-                is InstallResult.DownloadFailed -> error(id, result.error, if (result.wasBusy()) "busy" else "failed")
+                is InstallResult.DownloadFailed -> error(id, result.error, when {
+                    result.wasBusy() -> "busy"
+                    result.wasRefused() -> "refused"
+                    else -> "failed"
+                })
                 is InstallResult.LoadFailed -> error(id, result.error, "failed")
                 is InstallResult.VersionConflict -> error(id, "Requires ${result.required}; available ${result.available}", "failed")
             }
@@ -205,7 +209,8 @@ internal class PluginManagerMcpToolProvider(
 
     /**
      * [status] separates "will never work" from "try again": `refused` for policy (floors,
-     * protected IDs, wrong intent), `failed` for store lookups and installer outcomes (network,
+     * protected IDs, wrong intent, including the installer's own [wasRefused] floor and in-lease
+     * intent checks), `failed` for store lookups and installer outcomes (network,
      * integrity, signature, load), `busy` when another installer holds the update lease.
      */
     private fun error(id: String?, reason: String, status: String = "refused") = McpToolResult(buildJsonObject {

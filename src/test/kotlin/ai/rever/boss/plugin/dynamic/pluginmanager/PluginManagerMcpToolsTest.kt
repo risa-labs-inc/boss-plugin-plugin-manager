@@ -11,6 +11,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UninstallResult
 import ai.rever.boss.plugin.dynamic.pluginmanager.api.UpdateInfo
+import java.util.zip.ZipInputStream
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
@@ -219,6 +220,8 @@ class PluginManagerMcpToolsTest {
         val cases = listOf(
             InstallResult.DownloadFailed(UPDATE_INSTALL_BUSY) to "busy",
             InstallResult.DownloadFailed("Connection reset") to "failed",
+            // A manifest floor or in-lease intent refusal from the installer is deterministic.
+            policyRefusal("Needs BOSS API 1.0.86 (host 1.0.85)") to "refused",
             InstallResult.LoadFailed("Signature verification failed") to "failed",
             InstallResult.VersionConflict("1.0.90", "1.0.85") to "failed",
         )
@@ -267,6 +270,57 @@ class PluginManagerMcpToolsTest {
         val result = f.call("plugin_check_updates", "plugin_id" to "  ")
         assertFalse(result.isError)
         assertEquals(2, Json.parseToJsonElement(result.text).jsonObject["plugins"]!!.jsonArray.size)
+    }
+
+    @Test fun `compiled MCP provider registers admin tools against the actual API 1_0_73 factory`() {
+        val parent = javaClass.classLoader
+        val baseline = mutableMapOf<String, ByteArray>()
+        ZipInputStream(checkNotNull(parent.getResourceAsStream("compat/mcp-tool-definition-1.0.73.zip"))).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                baseline[entry.name.removeSuffix(".class").replace('/', '.')] = zip.readBytes()
+            }
+        }
+        val providerName = PluginManagerMcpToolProvider::class.java.name
+        val loader = object : ClassLoader(parent) {
+            override fun loadClass(name: String, resolve: Boolean): Class<*> = synchronized(getClassLoadingLock(name)) {
+                if (name !in baseline && name != providerName && !name.startsWith(providerName + "$")) {
+                    return@synchronized super.loadClass(name, resolve)
+                }
+                val loaded = findLoadedClass(name) ?: run {
+                    val bytes = baseline[name] ?: checkNotNull(parent.getResourceAsStream(name.replace('.', '/') + ".class"))
+                        .use { it.readBytes() }
+                    defineClass(name, bytes, 0, bytes.size)
+                }
+                if (resolve) resolveClass(loaded)
+                loaded
+            }
+        }
+        val f = Fixture()
+        val snapshot: () -> List<PluginInfo> = { f.installed }
+        val type = loader.loadClass(providerName)
+        val provider = type.declaredConstructors.single { it.parameterCount == 3 }
+            .newInstance("toolbox", f.api, snapshot)
+        val tools = type.getMethod("tools").invoke(provider) as List<*>
+        assertEquals(6, tools.size)
+        val adminNames = tools.filter { tool -> tool!!.javaClass.getMethod("getRequiresAdmin").invoke(tool) == true }
+            .map { tool -> tool!!.javaClass.getMethod("getName").invoke(tool) }.toSet()
+        assertEquals(setOf("plugin_enable", "plugin_disable", "plugin_update", "plugin_install"), adminNames)
+    }
+
+    @Test fun `legacy Success constructor and component retain their JVM descriptors`() {
+        val plugin = PluginInfo("fixture", "Fixture", "1.0.0")
+        val result = InstallResult.Success::class.java.getConstructor(PluginInfo::class.java).newInstance(plugin)
+        assertFalse(result.needsRestart)
+        assertEquals(plugin, InstallResult.Success::class.java.getMethod("component1").invoke(result))
+    }
+
+    @Test fun `policy marks do not classify unrelated equal failures as refused`() {
+        val refused = policyRefusal("same text")
+        val failed = InstallResult.DownloadFailed("same text")
+        assertEquals(refused, failed)
+        assertTrue(refused.wasRefused())
+        assertFalse(failed.wasRefused())
     }
 
     private data class MutationCall(val id: String, val version: String, val update: Boolean, val allowDowngrade: Boolean)

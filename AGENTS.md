@@ -12,6 +12,10 @@ Toolbox - self-contained plugin store with install, uninstall, and update capabi
   `minBossVersion` **9.4.2** - deliberately, so one build runs on every host. `plugin.json`
   is the authority; keep this line reconciled with it (it had drifted to 1.0.57 once, and
   then sat at 1.0.73).
+- `McpToolDefinition.withRbac` is available at that floor: verified in the API's `v1.0.73`
+  tag (`9b4e4a0`), introduced by `41294ed` for 1.0.52. The MCP provider regression test loads
+  the actual published 1.0.73 factory classfiles from the provenance-documented compatibility
+  fixture, so compiling against a newer local API cannot hide a factory linkage regression.
 
 ## Reporting downloads on a host that may not have a download center
 
@@ -144,7 +148,8 @@ The gates apply at these call sites; each has different metadata available:
   nonempty list with no checked row sets the MCP error flag.
 - **MCP mutations** preflight the selected store version's three floors and use the version
   picker's shared installer. `installStoreVersion` rechecks intent and latest-request downgrade
-  protection inside the lease; its interface default refuses unsupported implementations.
+  protection inside the lease using `currentInstalledPlugins()`, including its delegate-throws
+  cache fallback; its interface default refuses unsupported implementations.
   `InstallResult.Success.needsRestart` comes from the actual staging path, never a pre-lease
   snapshot. `plugin_update` refuses terminal-tab and Toolbox so the response channel survives.
   Explicit same-version MCP requests report `already_installed`; the UI picker still permits repair.
@@ -153,6 +158,11 @@ The gates apply at these call sites; each has different metadata available:
   protocol's neutral contention result). A host-blocked latest is refused with the newest loadable
   version named in the reason, since MCP callers cannot see the Updates tab's notice.
   `currentInstalledPlugins()` falls back to the cached list when the loader delegate throws.
+  Installer floors and intent refusals use `policyRefusal`, which marks the individual
+  `DownloadFailed` instance without changing its exported constructor. MCP preserves `refused`
+  even when only the downloaded manifest revealed the floor; identical failure text alone is
+  never used to infer policy. Tests restore host System properties in `finally`; Gradle fixes
+  the fork count at one and explicitly disables JUnit parallel execution.
 
 **A hidden update still gets said out loud.** `loadableUpdates` returns what it held back as well as
 what it kept, and the Updates tab renders "N updates need a newer BOSS" naming each one. Filtering

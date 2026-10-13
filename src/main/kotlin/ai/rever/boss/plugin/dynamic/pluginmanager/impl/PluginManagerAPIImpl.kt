@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.CompatibleUpdateSource
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
+import ai.rever.boss.plugin.dynamic.pluginmanager.policyRefusal
 import ai.rever.boss.plugin.dynamic.pluginmanager.UPDATE_INSTALL_BUSY
 import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLeaseBusyException
 import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLease
@@ -582,12 +583,15 @@ class PluginManagerAPIImpl private constructor(
     override suspend fun installStoreVersion(pluginId: String, version: String, update: Boolean, allowDowngrade: Boolean): InstallResult =
         withContext(Dispatchers.IO) {
             withUpdateLease(pluginId) {
-                val existing = getInstalledPlugin(pluginId)
+                // Live host state, not the Toolbox cache: another installer may have changed this
+                // plugin since any snapshot, and the intent, downgrade and locked-path decisions
+                // below must all see the version the host actually has loaded now.
+                val existing = currentInstalledPlugins().firstOrNull { it.pluginId == pluginId }
                 if (update && existing == null) {
-                    return@withUpdateLease InstallResult.DownloadFailed("Plugin not installed: $pluginId")
+                    return@withUpdateLease policyRefusal("Plugin not installed: $pluginId")
                 }
                 if (!update && existing != null) {
-                    return@withUpdateLease InstallResult.DownloadFailed("Plugin already installed; use plugin_update")
+                    return@withUpdateLease policyRefusal("Plugin already installed; use plugin_update")
                 }
                 if (existing != null && (existing.version == version || (!allowDowngrade && !isVersionNewer(version, existing.version)))) {
                     return@withUpdateLease InstallResult.AlreadyInstalled(existing.version)
@@ -693,6 +697,8 @@ class PluginManagerAPIImpl private constructor(
                     minIpcVersion = version.minIpcVersion ?: "1.0.0",
                     compatibility = IpcCompat.status(version.minIpcVersion),
                     minBossVersion = version.minBossVersion ?: row.latestMinBossVersion.orEmpty(),
+                    // No catalogue fallback for the API floor: the view does not project one. The
+                    // downloaded manifest's floor is checked before replacement regardless.
                     minApiVersion = version.minApiVersion.orEmpty(),
                 ))
             })
@@ -914,7 +920,7 @@ class PluginManagerAPIImpl private constructor(
 
             // IPC-compat gate: never load a version the host can't speak.
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
-                return InstallResult.DownloadFailed(
+                return policyRefusal(
                     "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
                 )
             }
@@ -1589,7 +1595,7 @@ class PluginManagerAPIImpl private constructor(
             // IPC-compat gate: never replace the JAR with a version the host
             // can't speak.
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
-                return InstallResult.DownloadFailed(
+                return policyRefusal(
                     "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
                 )
             }
@@ -2351,7 +2357,7 @@ class PluginManagerAPIImpl private constructor(
     private fun manifestFloorRefusal(jar: File): InstallResult? {
         val reason = BossCompat.requirement(readPluginManifestField(jar, "minBossVersion"))
             ?: apiFloorReason(readPluginManifestField(jar, "minApiVersion"))
-        return reason?.let { InstallResult.DownloadFailed(it) }
+        return reason?.let(::policyRefusal)
     }
 
     /**
@@ -2364,7 +2370,7 @@ class PluginManagerAPIImpl private constructor(
      */
     private fun bossFloorRefusal(downloadInfo: DownloadInfoResponse): InstallResult? =
         BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
-            InstallResult.DownloadFailed(
+            policyRefusal(
                 "Version ${downloadInfo.version} cannot be installed: " +
                     requirement.replaceFirstChar { it.lowercaseChar() } + "."
             )

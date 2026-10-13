@@ -179,13 +179,74 @@ class PluginInstallerLeaseApiTest {
     @Test
     fun `store MCP mutation rechecks intent within lease`() = runBlocking {
         fixture {
-            assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = false))
+            assertTrue(assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = false)).wasRefused())
             delegate.loaded = emptyList()
-            assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = true))
+            assertTrue(assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = true)).wasRefused())
             delegate.loaded = listOf(info("3.0.0"))
             assertIs<InstallResult.AlreadyInstalled>(api.installStoreVersion(ID, "2.0.0", update = true))
             assertTrue(requests.isEmpty())
             assertNoMutation()
+        }
+    }
+
+    @Test
+    fun `store MCP intent recheck reads live host state, not the cache refreshed at lease entry`() = runBlocking {
+        fixture {
+            // The cache holds 1.0.0 after the lease-entry refresh; the host has 3.0.0 by the
+            // recheck. Latest 2.0.0 must not be installed over it.
+            val leaseRefresh = delegate.reads + 1 // the init refresh has already read once
+            delegate.onRead = { if (delegate.reads > leaseRefresh) delegate.loaded = listOf(info("3.0.0")) }
+            val result = assertIs<InstallResult.AlreadyInstalled>(api.installStoreVersion(ID, "2.0.0", update = true))
+            assertEquals("3.0.0", result.currentVersion)
+            assertTrue(requests.isEmpty(), requests.toString())
+            assertNoMutation()
+        }
+    }
+
+    @Test
+    fun `store MCP intent refuses live appearance or disappearance after the cache refresh`() = runBlocking {
+        for (update in listOf(false, true)) fixture {
+            delegate.loaded = if (update) listOf(info("1.0.0")) else emptyList()
+            val leaseRefresh = delegate.reads + 1
+            delegate.onRead = {
+                if (delegate.reads > leaseRefresh) {
+                    delegate.loaded = if (update) emptyList() else listOf(info("1.0.0"))
+                }
+            }
+            val result = api.installStoreVersion(ID, "2.0.0", update)
+            assertTrue(result.wasRefused())
+            assertTrue(requests.isEmpty())
+            assertNoMutation()
+        }
+    }
+
+    @Test
+    fun `store MCP intent recheck falls back to the leased refresh when the delegate throws`() = runBlocking {
+        fixture {
+            delegate.loaded = listOf(info("3.0.0"))
+            val leaseRefresh = delegate.reads + 1
+            delegate.onRead = { if (delegate.reads > leaseRefresh) throw IllegalStateException("mid hot-swap") }
+            val result = assertIs<InstallResult.AlreadyInstalled>(api.installStoreVersion(ID, "2.0.0", update = true))
+            assertEquals("3.0.0", result.currentVersion)
+            assertTrue(requests.isEmpty(), requests.toString())
+            assertNoMutation()
+        }
+    }
+
+    @Test
+    fun `store IPC floor refusal is marked refused before any jar download`() = runBlocking {
+        fixture {
+            val old = System.getProperty("boss.ipc.version")
+            try {
+                System.setProperty("boss.ipc.version", "1.0.0")
+                connection = { MemoryConnection("""{"downloadUrl":"https://fixture.invalid/incoming.jar","version":"2.0.0","minIpcVersion":"1.1.0"}""".toByteArray()) }
+                val result = assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = true))
+                assertTrue(result.wasRefused(), result.error)
+                assertFalse(requests.any { it == "https://fixture.invalid/incoming.jar" })
+                assertNoMutation()
+            } finally {
+                if (old == null) System.clearProperty("boss.ipc.version") else System.setProperty("boss.ipc.version", old)
+            }
         }
     }
 
@@ -247,6 +308,21 @@ class PluginInstallerLeaseApiTest {
                     }
                     val result = assertIs<InstallResult.DownloadFailed>(api.installStoreVersion(ID, "2.0.0", update = true))
                     assertTrue(result.error.contains(if (apiFloor) "1.0.86" else "9.4.23"), result.error)
+                    assertTrue(result.wasRefused(), "a floor refusal must not read as a retryable failure")
+                    // Store metadata omits the floor, so only the actual downloaded manifest
+                    // discovers this refusal. Verify the complete MCP result as well.
+                    val mcpApi = object : ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginManagerAPI by api {
+                        override suspend fun fetchPluginDetails(pluginId: String) = Result.success(
+                            ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginStoreItem(pluginId = ID, latestVersion = "2.0.0"))
+                        override suspend fun fetchPluginVersions(pluginId: String) = Result.success(listOf(
+                            ai.rever.boss.plugin.dynamic.pluginmanager.api.PluginVersionInfo("2.0.0", "1.0.0",
+                                compatibility = ai.rever.boss.plugin.dynamic.pluginmanager.api.IpcCompat.Status.UNKNOWN)))
+                    }
+                    val tool = PluginManagerMcpToolProvider("toolbox", mcpApi, api::currentInstalledPlugins)
+                        .tools().single { it.name == "plugin_update" }
+                    val response = tool.handler.call(ai.rever.boss.plugin.api.McpToolArgs(mapOf("plugin_id" to ID)))
+                    assertTrue(response.isError)
+                    assertTrue(response.text.contains("\"status\":\"refused\""), response.text)
                     assertNoMutation()
                 } finally {
                     if (old == null) System.clearProperty(property) else System.setProperty(property, old)

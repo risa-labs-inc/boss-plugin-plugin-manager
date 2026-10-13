@@ -154,16 +154,22 @@ data class UpdateInfo(
 sealed class InstallResult {
     /**
      * [needsRestart] was added after this type was exported through `registerPluginAPI`. The
-     * default keeps source compatibility, but a consumer compiled against the old one-argument
-     * shape (constructor, `copy`, `component1`) would need recompiling against this one.
+     * secondary one-argument constructor keeps the old `<init>(PluginInfo)` descriptor, so a
+     * consumer compiled against the old shape still constructs it; only the old one-argument
+     * `copy` is gone (`component1` is unchanged).
      */
     data class Success(
         val plugin: PluginInfo,
         /** True only when the installer staged the JAR instead of loading it live. */
-        val needsRestart: Boolean = false,
-    ) : InstallResult()
+        val needsRestart: Boolean,
+    ) : InstallResult() {
+        constructor(plugin: PluginInfo) : this(plugin, needsRestart = false)
+    }
     data class AlreadyInstalled(val currentVersion: String) : InstallResult()
-    data class DownloadFailed(val error: String) : InstallResult()
+    data class DownloadFailed(val error: String) : InstallResult() {
+        /** Installer-only classification; excluded from the exported constructor and value shape. */
+        internal var policyRefused: Boolean = false
+    }
     data class LoadFailed(val error: String) : InstallResult()
     data class VersionConflict(val required: String, val available: String) : InstallResult()
 }
