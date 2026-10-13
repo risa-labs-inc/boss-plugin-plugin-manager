@@ -152,9 +152,24 @@ data class UpdateInfo(
  * Result of a plugin installation attempt.
  */
 sealed class InstallResult {
-    data class Success(val plugin: PluginInfo) : InstallResult()
+    /**
+     * [needsRestart] was added after this type was exported through `registerPluginAPI`. The
+     * secondary one-argument constructor keeps the old `<init>(PluginInfo)` descriptor, so a
+     * consumer compiled against the old shape still constructs it; only the old one-argument
+     * `copy` is gone (`component1` is unchanged).
+     */
+    data class Success(
+        val plugin: PluginInfo,
+        /** True only when the installer staged the JAR instead of loading it live. */
+        val needsRestart: Boolean,
+    ) : InstallResult() {
+        constructor(plugin: PluginInfo) : this(plugin, needsRestart = false)
+    }
     data class AlreadyInstalled(val currentVersion: String) : InstallResult()
-    data class DownloadFailed(val error: String) : InstallResult()
+    data class DownloadFailed(val error: String) : InstallResult() {
+        /** Installer-only classification; excluded from the exported constructor and value shape. */
+        internal var policyRefused: Boolean = false
+    }
     data class LoadFailed(val error: String) : InstallResult()
     data class VersionConflict(val required: String, val available: String) : InstallResult()
 }
@@ -347,6 +362,7 @@ data class PluginVersionRow(
     val version: String,
     val changelog: String? = null,
     @SerialName("min_boss_version") val minBossVersion: String? = null,
+    @SerialName("min_api_version") val minApiVersion: String? = null,
     @SerialName("min_ipc_version") val minIpcVersion: String? = null,
     @SerialName("jar_path") val jarPath: String? = null,
     @SerialName("published_at") val publishedAt: String? = null
@@ -356,11 +372,12 @@ data class PluginVersionRow(
  * A single published version of a plugin, with its compatibility resolved against this host.
  * Surfaced in the version-history / downgrade UI.
  *
- * TWO floors, because they fail differently and only one of them used to be here. The IPC contract
+ * Three floors, because they fail differently. The IPC contract
  * governs whether a plugin's out-of-process half can talk to this host; `minBossVersion` governs
  * whether `DynamicPluginLoader` will load the jar AT ALL. Carrying only the first meant a version
  * above the app floor rendered as installable, and Install then downloaded something the loader
- * refused - visible only as a plugin that did not appear.
+ * refused - visible only as a plugin that did not appear. The optional `minApiVersion`
+ * additionally gates the installed API layer, and downloaded manifests enforce it too.
  */
 data class PluginVersionInfo(
     val version: String,
@@ -370,6 +387,7 @@ data class PluginVersionInfo(
     val compatibility: IpcCompat.Status,
     /** The app version this build declares it needs, as published to the store. */
     val minBossVersion: String = "",
+    val minApiVersion: String = "",
 ) {
     /**
      * Whether THIS host meets [minBossVersion]. See [BossCompat].

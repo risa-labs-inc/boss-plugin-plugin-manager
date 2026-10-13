@@ -36,10 +36,59 @@ Create only when you may publish.
 | `plugins_list` | List installed plugins with id, version, enabled and system flags |
 | `plugin_enable` | Enable an installed plugin by id |
 | `plugin_disable` | Disable an installed plugin by id |
+| `plugin_check_updates` | Check all installed plugins, or one `plugin_id`, against the latest store release and host compatibility |
+| `plugin_update` | Update an installed `plugin_id` to latest or an explicit `version` from the store |
+| `plugin_install` | Install a new store `plugin_id` at latest or an explicit `version` |
 
-`plugin_enable` and `plugin_disable` both require admin. `plugin_disable` additionally refuses
+`plugin_enable`, `plugin_disable`, `plugin_update` and `plugin_install` require admin. `plugin_disable` additionally refuses
 to disable `terminal-tab` (it hosts the MCP server, so disabling it would cut the channel the
 call arrived on), itself, and any system or non-unloadable plugin.
+
+`plugins_list` reads a fresh host snapshot, so its version reflects what is loaded,
+including external hot reloads, rather than a cached version or a staged JAR.
+
+The three store tools return JSON. Checks return a `plugins` array with `plugin_id`,
+`installed_version`, `latest_version`, `update_available`, `installable` and
+`blocked_reason` and `status` (`checked`, `not_in_store`, `lookup_failed`). Unchecked rows
+have null store fields; lookup failures also include `error`. Checks use up to three batched
+queries for the installed set. Mixed results retain successful rows without the MCP
+error flag; a nonempty installed set with no checked row sets the error flag.
+
+A blank `plugin_id` checks every installed plugin. A catalogue entry with no published
+version reports `not_in_store`; `lookup_failed` means the store query failed or a published
+version's metadata could not be read.
+
+Mutations return `plugin_id`, `status`, `from_version`, `to_version` and `needs_restart`.
+Success statuses:
+
+- `updated` / `installed`: the store version was applied.
+- `already_latest`: no version given and nothing newer exists.
+- `already_installed`: the explicit version requested is already the installed one.
+
+Errors set the MCP error flag and return `status` plus `reason`:
+
+- `refused`: policy, will not work as asked (host floors, protected plugins, wrong
+  install/update intent, unknown version). Without `version`, a latest release this host
+  cannot load is refused and the reason names the newest loadable version to pass instead.
+- `failed`: store lookup or installer outcome (network, integrity, signature, load); may
+  succeed on retry.
+- `busy`: another installer holds this plugin's update lease; retry later.
+
+Locked/system plugin updates are staged for a BOSS restart, with `needs_restart` reported
+by the path taken inside the lease. MCP updates to terminal-tab and Toolbox are refused to
+preserve the active call; update those in the UI. The tool never restarts the app or its
+own MCP channel. MCP reads use the live host snapshot and fall back to the cached
+installed list if the host loader throws (for example mid hot-swap).
+
+Both mutations use the UI version picker's installer, pinned to a published store
+version, including the host loader's dependency handling and signature verification,
+SHA-256 checks, persistence, and the shared installation lease. Install/update intent
+is checked again inside the lease; a latest request cannot downgrade a version that
+another installer just updated. Explicit versions permit downgrades. The existing
+BOSS and IPC floors and the optional API floor apply; downloaded manifests are also
+checked before replacing installed files. Unknown host floors retain the UI's
+fail-open behavior. API compatibility in checks uses store metadata when supplied;
+the manifest and host loader remain authoritative at install time.
 
 ## Permissions
 

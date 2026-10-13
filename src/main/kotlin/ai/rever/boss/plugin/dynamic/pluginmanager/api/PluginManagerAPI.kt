@@ -79,6 +79,19 @@ interface PluginManagerAPI {
      */
     suspend fun installVersion(pluginId: String, version: String): InstallResult
 
+    /** Store-only MCP operation. Implementations recheck install/update intent inside the lease. */
+    suspend fun installStoreVersion(pluginId: String, version: String, update: Boolean, allowDowngrade: Boolean = false): InstallResult =
+        InstallResult.DownloadFailed("Store install/update with lease intent checks is unsupported")
+
+    /**
+     * Batch latest-version lookup, including current and host-blocked versions.
+     * Absent IDs are not in the store or have no published version; per-ID failures mean a
+     * published latest version whose version metadata could not be read.
+     * An outer failure means the batch lookup failed, not that plugins are up to date.
+     */
+    suspend fun fetchLatestStoreVersions(pluginIds: List<String>): Result<Map<String, Result<PluginVersionInfo>>> =
+        Result.failure(UnsupportedOperationException("Batch store version lookup is unsupported"))
+
     /**
      * Check for updates for installed plugins.
      *

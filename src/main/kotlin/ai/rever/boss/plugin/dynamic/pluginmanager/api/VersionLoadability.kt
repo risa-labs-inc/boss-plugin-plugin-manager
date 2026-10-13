@@ -1,19 +1,20 @@
 package ai.rever.boss.plugin.dynamic.pluginmanager.api
 
 /**
- * Whether this host can load a published version, across **both** floors it has to clear.
+ * Whether this host can load a published version, across all three declared floors.
  *
- * One function rather than a condition in the row that renders it, because the two floors are
- * checked in four places (this row, the store card, the update filter, the download gate) and a
+ * One function rather than a condition in the row that renders it, because compatibility gates are
+ * checked in several places (this row, the store card, the update filter, the download gate) and a
  * predicate that lives in a composable is one nobody can test. The version sheet's copy checked
  * only the IPC floor and so showed an Install button for versions `DynamicPluginLoader` refuses.
  *
  * The floors fail differently:
  * - [IpcCompat] governs whether a plugin's out-of-process half can speak to this host.
  * - [BossCompat] governs whether the jar loads at all, so it is the stricter consequence.
+ * - The optional API floor requires an installed API layer new enough to load the jar.
  *
- * Both fail open on UNKNOWN, which is what keeps the store usable on hosts that publish neither
- * property.
+ * All fail open on UNKNOWN, which keeps the store usable on hosts that do not publish the
+ * corresponding version property.
  */
 fun PluginVersionInfo.isLoadableHere(): Boolean =
     // `compatibility`, NOT `IpcCompat.isInstallable(minIpcVersion)`. The two are built from
@@ -22,7 +23,8 @@ fun PluginVersionInfo.isLoadableHere(): Boolean =
     // IPC floor resolves to UNKNOWN (the badge shows nothing) while the string "1.0.0" would read
     // as MAJOR_MISMATCH on any host whose IPC major is not 1 - a row with no badge and no action.
     // Latent while host IPC stays on 1.x, and a divergence from the badge either way.
-    compatibility != IpcCompat.Status.REQUIRES_HOST_UPDATE &&
+    apiFloorReason(minApiVersion) == null &&
+        compatibility != IpcCompat.Status.REQUIRES_HOST_UPDATE &&
         compatibility != IpcCompat.Status.MAJOR_MISMATCH &&
         bossCompatibility != BossCompat.Status.REQUIRES_HOST_UPDATE
 
@@ -35,7 +37,7 @@ fun PluginVersionInfo.isLoadableHere(): Boolean =
 fun PluginVersionInfo.blockedReason(): String? =
     when {
         isLoadableHere() -> null
-        else -> BossCompat.requirement(minBossVersion) ?: "Needs newer BOSS"
+        else -> BossCompat.requirement(minBossVersion) ?: apiFloorReason(minApiVersion) ?: "Needs newer BOSS"
     }
 
 /**
@@ -61,3 +63,16 @@ data class BlockedUpdateNotice(
     val newVersion: String,
     val requiredBossVersion: String,
 )
+
+/**
+ * Optional API floor; older hosts with no published API version remain usable. Pre-release and
+ * build suffixes are dropped by [SemVer.parse], as for the app floor in `BossCompat`. The host
+ * property is read once so the message names the value that was compared.
+ */
+internal fun apiFloorReason(minApiVersion: String?): String? {
+    val floor = minApiVersion?.let(SemVer::parse) ?: return null
+    val hostVersion = System.getProperty("boss.api.version") ?: return null
+    val host = SemVer.parse(hostVersion) ?: return null
+    val order = compareValuesBy(host, floor, { it.first }, { it.second }, { it.third })
+    return if (order < 0) "Needs BOSS API $minApiVersion (host $hostVersion)" else null
+}

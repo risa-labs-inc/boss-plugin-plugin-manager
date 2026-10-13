@@ -6,6 +6,7 @@ import ai.rever.boss.plugin.dynamic.pluginmanager.CompatibleUpdateSource
 import ai.rever.boss.plugin.dynamic.pluginmanager.DOWNLOAD_CANCELLED
 import ai.rever.boss.plugin.dynamic.pluginmanager.DownloadCancelledException
 import ai.rever.boss.plugin.dynamic.pluginmanager.wasCancelled
+import ai.rever.boss.plugin.dynamic.pluginmanager.policyRefusal
 import ai.rever.boss.plugin.dynamic.pluginmanager.UPDATE_INSTALL_BUSY
 import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLeaseBusyException
 import ai.rever.boss.plugin.dynamic.pluginmanager.PluginUpdateLease
@@ -149,6 +150,14 @@ class PluginManagerAPIImpl private constructor(
     // ========================================
     // INSTALLED PLUGINS
     // ========================================
+
+    /** Live host snapshot for MCP: another installer/reload can change versions at any time.
+     * Never read the on-disk manifest here: a staged update is not the loaded version.
+     * A delegate that throws (for example mid hot-swap) degrades to the cached list. */
+    internal fun currentInstalledPlugins(): List<PluginInfo> =
+        runCatching { loaderDelegate?.getLoadedPlugins()?.map { it.toPluginInfo() } }
+            .onFailure { System.err.println("Toolbox: live plugin snapshot failed, using cached list: $it") }
+            .getOrNull() ?: getInstalledPlugins()
 
     override fun getInstalledPlugins(): List<PluginInfo> = _installedPlugins.value
 
@@ -553,6 +562,7 @@ class PluginManagerAPIImpl private constructor(
                     publishedAt = v.publishedAt ?: "",
                     compatibility = IpcCompat.status(v.minIpcVersion),
                     minBossVersion = v.minBossVersion ?: "",
+                    minApiVersion = v.minApiVersion ?: "",
                 )
             })
         } catch (e: Exception) {
@@ -569,6 +579,28 @@ class PluginManagerAPIImpl private constructor(
             }
         }
     }
+
+    override suspend fun installStoreVersion(pluginId: String, version: String, update: Boolean, allowDowngrade: Boolean): InstallResult =
+        withContext(Dispatchers.IO) {
+            withUpdateLease(pluginId) {
+                // Live host state, not the Toolbox cache: another installer may have changed this
+                // plugin since any snapshot, and the intent, downgrade and locked-path decisions
+                // below must all see the version the host actually has loaded now.
+                val existing = currentInstalledPlugins().firstOrNull { it.pluginId == pluginId }
+                if (update && existing == null) {
+                    return@withUpdateLease policyRefusal("Plugin not installed: $pluginId")
+                }
+                if (!update && existing != null) {
+                    return@withUpdateLease policyRefusal("Plugin already installed; use plugin_update")
+                }
+                if (existing != null && (existing.version == version || (!allowDowngrade && !isVersionNewer(version, existing.version)))) {
+                    return@withUpdateLease InstallResult.AlreadyInstalled(existing.version)
+                }
+                withDownloadTracking(pluginId, existing?.displayName ?: fallbackDisplayName(pluginId), update) {
+                    installVersionInternal(pluginId, version, existing, pluginId)
+                }
+            }
+        }
 
     private suspend fun installVersionInternal(
         pluginId: String,
@@ -624,13 +656,7 @@ class PluginManagerAPIImpl private constructor(
         val installedVersionMap = installed.associate { it.pluginId to it.version }
 
         try {
-            val rows = supabaseClient.from("plugins_with_latest_version")
-                .select(Columns.raw("plugin_id, latest_version, latest_min_boss_version")) {
-                    filter {
-                        isIn("plugin_id", installedIds)
-                    }
-                }
-                .decodeList<PluginUpdateRow>()
+            val rows = fetchUpdateRows(installedIds)
 
             Result.success(loadableUpdates(rows, installedVersionMap))
         } catch (e: CancellationException) {
@@ -639,6 +665,47 @@ class PluginManagerAPIImpl private constructor(
             throw e
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /** Shared batch catalogue lookup for UI update candidates and MCP's full installed list. */
+    private suspend fun fetchUpdateRows(pluginIds: List<String>): List<PluginUpdateRow> =
+        supabaseClient.from("plugins_with_latest_version")
+            .select(Columns.raw("plugin_id, latest_version, latest_min_boss_version")) {
+                filter { isIn("plugin_id", pluginIds) }
+            }
+            .decodeList<PluginUpdateRow>()
+
+    override suspend fun fetchLatestStoreVersions(
+        pluginIds: List<String>
+    ): Result<Map<String, Result<PluginVersionInfo>>> = withContext(Dispatchers.IO) {
+        if (pluginIds.isEmpty()) return@withContext Result.success(emptyMap())
+        try {
+            val rows = fetchUpdateRows(pluginIds)
+            val candidates = rows.mapNotNull { row ->
+                row.latestVersion?.takeIf { it.isNotBlank() }?.let { row.pluginId to it }
+            }.toMap()
+            val versions = if (candidates.isEmpty()) emptyMap() else fetchCandidateVersionRows(candidates)
+            // A catalogue row with no published version is omitted, so callers report it as not
+            // in the store; only a published version whose row cannot be read is a lookup failure.
+            Result.success(rows.filter { it.pluginId in candidates }.associate { row ->
+                val version = versions[row.pluginId]
+                row.pluginId to if (version == null) {
+                    Result.failure(IllegalStateException("Latest store version metadata missing: ${row.pluginId}"))
+                } else Result.success(PluginVersionInfo(
+                    version = version.version,
+                    minIpcVersion = version.minIpcVersion ?: "1.0.0",
+                    compatibility = IpcCompat.status(version.minIpcVersion),
+                    minBossVersion = version.minBossVersion ?: row.latestMinBossVersion.orEmpty(),
+                    // No catalogue fallback for the API floor: the view does not project one. The
+                    // downloaded manifest's floor is checked before replacement regardless.
+                    minApiVersion = version.minApiVersion.orEmpty(),
+                ))
+            })
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            Result.failure(failure)
         }
     }
 
@@ -853,7 +920,7 @@ class PluginManagerAPIImpl private constructor(
 
             // IPC-compat gate: never load a version the host can't speak.
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
-                return InstallResult.DownloadFailed(
+                return policyRefusal(
                     "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
                 )
             }
@@ -904,6 +971,10 @@ class PluginManagerAPIImpl private constructor(
                 }
             }
 
+            manifestFloorRefusal(partFile)?.let {
+                partFile.delete()
+                return it
+            }
             if (readPluginIdFromJar(partFile) != pluginId) {
                 partFile.delete()
                 return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
@@ -1524,7 +1595,7 @@ class PluginManagerAPIImpl private constructor(
             // IPC-compat gate: never replace the JAR with a version the host
             // can't speak.
             if (!IpcCompat.isInstallable(downloadInfo.minIpcVersion)) {
-                return InstallResult.DownloadFailed(
+                return policyRefusal(
                     "Version ${downloadInfo.version} requires host IPC ≥ ${downloadInfo.minIpcVersion}; update BOSS to install it."
                 )
             }
@@ -1563,6 +1634,10 @@ class PluginManagerAPIImpl private constructor(
                 }
             }
 
+            manifestFloorRefusal(tempFile)?.let {
+                tempFile.delete()
+                return it
+            }
             if (readPluginIdFromJar(tempFile) != pluginId) {
                 tempFile.delete()
                 return InstallResult.LoadFailed("Downloaded JAR has a different or missing plugin identity")
@@ -1618,7 +1693,7 @@ class PluginManagerAPIImpl private constructor(
             }
             _installedPlugins.value = currentList
 
-            return InstallResult.Success(pluginInfo)
+            return InstallResult.Success(pluginInfo, needsRestart = true)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
@@ -1714,7 +1789,7 @@ class PluginManagerAPIImpl private constructor(
                 pluginId = "",
                 displayName = "",
                 version = "latest"
-            ))
+            ), needsRestart = true)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
@@ -2279,6 +2354,12 @@ class PluginManagerAPIImpl private constructor(
     // ========================================
 
 
+    private fun manifestFloorRefusal(jar: File): InstallResult? {
+        val reason = BossCompat.requirement(readPluginManifestField(jar, "minBossVersion"))
+            ?: apiFloorReason(readPluginManifestField(jar, "minApiVersion"))
+        return reason?.let(::policyRefusal)
+    }
+
     /**
      * Refuse a download whose app floor this host cannot meet, or null to proceed.
      *
@@ -2289,7 +2370,7 @@ class PluginManagerAPIImpl private constructor(
      */
     private fun bossFloorRefusal(downloadInfo: DownloadInfoResponse): InstallResult? =
         BossCompat.requirement(downloadInfo.minBossVersion)?.let { requirement ->
-            InstallResult.DownloadFailed(
+            policyRefusal(
                 "Version ${downloadInfo.version} cannot be installed: " +
                     requirement.replaceFirstChar { it.lowercaseChar() } + "."
             )

@@ -144,6 +144,10 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // Compatibility tests set global System properties (boss.app.version, boss.api.version) and
+    // restore them in finally; they are only safe with one test JVM running one test at a time.
+    maxParallelForks = 1
+    systemProperty("junit.jupiter.execution.parallel.enabled", "false")
 }
 
 // Task to build plugin JAR with compiled classes only
